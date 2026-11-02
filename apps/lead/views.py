@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 
 from django.db.models import Avg, Count, Q, Sum
 from django.db.models.functions import Coalesce, TruncDate
-from django.http import HttpResponse
+from django.http import HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
@@ -16,7 +16,7 @@ from rest_framework.response import Response
 
 from django_filters.rest_framework import DjangoFilterBackend
 
-from apps.callminutes.utils import format_duration_hms
+from apps.callminutes.utils import format_duration, format_duration_hms
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment,
@@ -50,6 +50,24 @@ from apps.global_config.filters import BranchFilterBackend
 
 NEPAL_TZ = ZoneInfo('Asia/Kathmandu')
 TOP_CALLERS_LIMIT = 10
+# Spreadsheets run a cell starting with any of these as a formula.
+CSV_FORMULA_PREFIXES = ('=', '+', '-', '@', '\t', '\r')
+CALL_EXPORT_HEADER = [
+    'Date & time (NPT)', 'Direction', 'Lead', 'Reference', 'Phone', 'Caller',
+    'Logged by', 'Duration (MM:SS)', 'Seconds', 'Outcome', 'Notes', 'Recording',
+]
+
+
+def csv_safe(value):
+    text = '' if value is None else str(value)
+    return f"'{text}" if text.lstrip(' ').startswith(CSV_FORMULA_PREFIXES) else text
+
+
+class EchoWriter:
+    """File-like target for csv.writer that hands each row back instead of storing it."""
+
+    def write(self, value):
+        return value
 
 
 class ConfigViewSet(viewsets.ModelViewSet):
@@ -306,9 +324,39 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve', 'summary']:
+        if self.action in ['list', 'retrieve', 'summary', 'export']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'])
+    def export(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        def rows():
+            writer = csv.writer(EchoWriter())
+            # BOM so Excel reads the file as UTF-8 and shows Devanagari correctly.
+            yield '\ufeff'
+            yield writer.writerow(CALL_EXPORT_HEADER)
+            for call in queryset.iterator(chunk_size=2000):
+                yield writer.writerow([
+                    call.call_timestamp.astimezone(NEPAL_TZ).strftime('%Y-%m-%d %H:%M:%S'),
+                    call.get_direction_display(),
+                    csv_safe(call.lead.full_name),
+                    csv_safe(call.lead.reference_number),
+                    csv_safe(call.phone_number),
+                    csv_safe(call.caller),
+                    csv_safe(call.created_by.name if call.created_by else ''),
+                    format_duration(call.duration_seconds),
+                    call.duration_seconds,
+                    csv_safe(call.outcome),
+                    csv_safe(call.notes),
+                    csv_safe(call.recording_url),
+                ])
+
+        today = timezone.now().astimezone(NEPAL_TZ).date().isoformat()
+        response = StreamingHttpResponse(rows(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="calls-{today}.csv"'
+        return response
 
     @action(detail=False, methods=['get'])
     def summary(self, request):

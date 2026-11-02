@@ -363,3 +363,143 @@ class GlobalCallSummaryTests(CallEndpointTestBase):
         self.make_call(seconds=259)
         row = self.client.get('/api/calls/').data['results'][0]
         self.assertEqual(row['duration_formatted'], '04:19')
+
+
+class GlobalCallExportTests(CallEndpointTestBase):
+    def export(self, query=''):
+        response = self.client.get(f'/api/calls/export/{query}')
+        self.assertEqual(response.status_code, 200)
+        return response, b''.join(response.streaming_content)
+
+    def rows(self, query=''):
+        import csv
+        import io
+        _, body = self.export(query)
+        return list(csv.reader(io.StringIO(body.decode('utf-8-sig'))))
+
+    def test_content_type_filename_and_bom(self):
+        response, body = self.export()
+        self.assertTrue(response['Content-Type'].startswith('text/csv'))
+        self.assertRegex(response['Content-Disposition'], r'filename="calls-\d{4}-\d{2}-\d{2}\.csv"')
+        self.assertTrue(body.startswith(b'\xef\xbb\xbf'))
+
+    def test_header_row(self):
+        self.assertEqual(self.rows()[0], [
+            'Date & time (NPT)', 'Direction', 'Lead', 'Reference', 'Phone', 'Caller',
+            'Logged by', 'Duration (MM:SS)', 'Seconds', 'Outcome', 'Notes', 'Recording',
+        ])
+
+    def test_row_values_use_nepal_time_and_devanagari(self):
+        lead = Lead.objects.create(full_name='सीता श्रेष्ठ', phone='9833333333', branch=self.branch_x)
+        self.make_call(
+            when='2026-10-28T20:00:00Z', seconds=259, lead=lead, outcome='Interested',
+            notes='plain', recording_url='https://example.com/a.mp3',
+        )
+        self.assertEqual(self.rows()[1], [
+            '2026-10-29 01:45:00', 'Outbound', 'सीता श्रेष्ठ', lead.reference_number, '9833333333',
+            'Sita', 'Sita', '04:19', '259', 'Interested', 'plain', 'https://example.com/a.mp3',
+        ])
+
+    def test_exports_every_page_not_just_the_first(self):
+        for _ in range(25):
+            self.make_call()
+        self.assertEqual(len(self.rows()) - 1, 25)
+
+    def test_respects_filters(self):
+        self.make_call(direction='inbound', notes='in')
+        self.make_call(direction='outbound', notes='out')
+        rows = self.rows('?direction=inbound')
+        self.assertEqual(len(rows) - 1, 1)
+        self.assertEqual(rows[1][10], 'in')
+
+    def test_neutralises_formula_cells(self):
+        for note in ['=HYPERLINK("http://evil.test","x")', '+1+1', '-1+1', '@SUM(A1)', '  =1+1', '\t=1+1']:
+            self.make_call(notes=note)
+        notes = [row[10] for row in self.rows()[1:]]
+        self.assertEqual(len(notes), 6)
+        for note in notes:
+            self.assertTrue(note.startswith("'"), msg=note)
+
+    def test_neutralises_a_formula_in_the_lead_name(self):
+        lead = Lead.objects.create(full_name='=cmd()', phone='9833333333', branch=self.branch_x)
+        self.make_call(lead=lead)
+        self.assertEqual(self.rows()[1][2], "'=cmd()")
+
+
+class GlobalCallBranchScopingTests(CallEndpointTestBase):
+    def setUp(self):
+        super().setUp()
+        self.call_x = self.make_call(lead=self.lead_x, user=self.user_x, notes='from-x')
+        self.call_y = self.make_call(lead=self.lead_y, user=self.user_y, notes='from-y')
+
+    def export_notes(self, query=''):
+        import csv
+        import io
+        response = self.client.get(f'/api/calls/export/{query}')
+        body = b''.join(response.streaming_content).decode('utf-8-sig')
+        return [row[10] for row in csv.reader(io.StringIO(body))][1:]
+
+    def test_non_staff_list_only_shows_own_branch(self):
+        self.client.force_authenticate(self.user_x)
+        ids = [r['id'] for r in self.client.get('/api/calls/').data['results']]
+        self.assertEqual(ids, [self.call_x.id])
+
+    def test_non_staff_summary_only_counts_own_branch(self):
+        self.client.force_authenticate(self.user_x)
+        data = self.client.get('/api/calls/summary/').data
+        self.assertEqual(data['total_calls'], 1)
+        self.assertEqual([u['name'] for u in data['by_user']], ['Sita'])
+
+    def test_non_staff_export_only_contains_own_branch(self):
+        self.client.force_authenticate(self.user_x)
+        self.assertEqual(self.export_notes(), ['from-x'])
+
+    def test_non_staff_cannot_widen_scope_with_branch_id(self):
+        self.client.force_authenticate(self.user_x)
+        query = f'?branch_id={self.branch_y.id}'
+        self.assertEqual(
+            [r['id'] for r in self.client.get(f'/api/calls/{query}').data['results']],
+            [self.call_x.id],
+        )
+        self.assertEqual(self.client.get(f'/api/calls/summary/{query}').data['total_calls'], 1)
+        self.assertEqual(self.export_notes(query), ['from-x'])
+
+    def test_staff_see_all_branches_by_default(self):
+        self.assertEqual(self.client.get('/api/calls/').data['count'], 2)
+        self.assertEqual(self.client.get('/api/calls/summary/').data['total_calls'], 2)
+        self.assertCountEqual(self.export_notes(), ['from-x', 'from-y'])
+
+    def test_staff_can_narrow_to_one_branch(self):
+        query = f'?branch_id={self.branch_y.id}'
+        self.assertEqual(
+            [r['id'] for r in self.client.get(f'/api/calls/{query}').data['results']],
+            [self.call_y.id],
+        )
+        self.assertEqual(self.client.get(f'/api/calls/summary/{query}').data['total_calls'], 1)
+        self.assertEqual(self.export_notes(query), ['from-y'])
+
+    def test_endpoints_require_login(self):
+        self.client.force_authenticate(None)
+        for url in ['/api/calls/', '/api/calls/summary/', '/api/calls/export/']:
+            self.assertEqual(self.client.get(url).status_code, 401, msg=url)
+
+
+class GlobalCallQueryCountTests(CallEndpointTestBase):
+    def count_queries(self, url):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        with CaptureQueriesContext(connection) as ctx:
+            response = self.client.get(url)
+            if response.streaming:
+                b''.join(response.streaming_content)
+        return len(ctx)
+
+    def test_query_count_does_not_grow_with_rows(self):
+        for _ in range(3):
+            self.make_call()
+        urls = ['/api/calls/', '/api/calls/summary/', '/api/calls/export/']
+        before = {url: self.count_queries(url) for url in urls}
+        for _ in range(15):
+            self.make_call(user=self.user_y, lead=self.lead_y)
+        for url in urls:
+            self.assertEqual(self.count_queries(url), before[url], msg=url)
