@@ -112,3 +112,9 @@ def format_duration(seconds):
     minutes = seconds // 60
     seconds = seconds % 60
     return f"{minutes:02d}:{seconds:02d}"
+
+
+def format_duration_hms(seconds):
+    """Format seconds as HH:MM:SS (e.g., 30215 -> "08:23:35")."""
+    seconds = max(seconds or 0, 0)
+    return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"

@@ -9,6 +9,8 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | Method | Endpoint | Description | Access |
 |--------|----------|-------------|--------|
 | GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated |
+| GET | `/api/calls/summary/` | Totals, calls per day and top callers for the filtered calls | Authenticated |
+| GET | `/api/calls/export/` | Download the filtered calls as CSV | Authenticated |
 | GET | `/api/leads/{lead_id}/calls/` | List calls for one lead (paginated) | Authenticated |
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
@@ -30,7 +32,7 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 | `lead` | Lead ID |
 | `call_timestamp__gte` / `__lte` | Date/time range (ISO 8601) |
 | `search` | Matches caller, phone number, outcome, notes, lead name & reference number |
-| `ordering` | `call_timestamp`, `duration_seconds`, `created_at` (prefix `-` for desc) |
+| `ordering` | `call_timestamp`, `duration_seconds`, `created_at`, `id` (prefix `-` for desc, comma-separate for tie-breaks) |
 | `page` / `page_size` | Standard pagination |
 
 **Example response row:**
@@ -54,6 +56,44 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 ```
 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
+
+## Call Summary — `GET /api/calls/summary/`
+
+Totals for the same calls `GET /api/calls/` returns: it accepts the same query params (including `search` and `branch_id`) and the same branch scoping, so `total_calls` always equals the list's `count`. `page`, `page_size` and `ordering` have no effect. The response is one unpaginated object.
+
+**Example response:**
+```json
+{
+    "total_calls": 128,
+    "inbound": 40,
+    "outbound": 88,
+    "total_seconds": 30215,
+    "total_formatted": "08:23:35",
+    "avg_seconds": 236,
+    "connected_calls": 110,
+    "connect_rate": 0.859,
+    "by_day": [{ "date": "2026-10-28", "calls": 14, "seconds": 3310 }],
+    "by_user": [{ "user_id": 9, "name": "Shikhar", "calls": 40, "seconds": 9800 }]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `connected_calls` | Calls longer than 0 seconds |
+| `connect_rate` | `connected_calls / total_calls`, from 0 to 1, rounded to 3 places |
+| `by_day` | Oldest first, **days counted in Nepal time**. Days with no calls are left out. |
+| `by_user` | Top 10 by number of calls, grouped by `created_by`. Calls with no `created_by` appear as `user_id: null`, `name: "Unknown"`. |
+
+With no matching calls, every number is `0`, `total_formatted` is `"00:00:00"`, and both lists are empty.
+
+## Call Export — `GET /api/calls/export/`
+
+Streams every call matching the same query params and branch scoping as `GET /api/calls/`, in the requested `ordering`, across all pages. `page` and `page_size` have no effect.
+
+- **Content type:** `text/csv; charset=utf-8`, starting with a UTF-8 BOM so Excel displays Devanagari correctly.
+- **Filename:** `calls-YYYY-MM-DD.csv` (today in Nepal time).
+- **Columns:** `Date & time (NPT)`, `Direction`, `Lead`, `Reference`, `Phone`, `Caller`, `Logged by`, `Duration (MM:SS)`, `Seconds`, `Outcome`, `Notes`, `Recording`.
+- **Formula safety:** a text cell starting with `=`, `+`, `-`, `@`, a tab or a carriage return is prefixed with `'`, so spreadsheets show it as text.
 
 ## Call Minutes Deduction
 
@@ -136,7 +176,7 @@ Every call response includes `duration_formatted` (`"MM:SS"`, e.g. `"04:19"`) fo
 | `recording_url` | string | URL to call recording |
 | `next_followup_at` | datetime | Suggested next followup time |
 | `next_action` | text | Suggested next action |
-| `branch` | int (FK) | Branch ID |
+| `branch` | int (FK) | Auto-set on create from the lead's branch, or the logging user's branch if the lead has none |
 | `created_by` | int (FK, read-only) | Auto-set |
 | `created_by_name` | string (read-only) | Creator display name |
 | `created_at` | datetime (read-only) | Created timestamp |

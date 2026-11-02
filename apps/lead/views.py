@@ -1,7 +1,11 @@
 import csv
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from django.http import HttpResponse
+from django.db.models import Avg, Count, Q, Sum
+from django.db.models.functions import Coalesce, TruncDate
+from django.http import HttpResponse, StreamingHttpResponse
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
 from rest_framework import viewsets, status
@@ -12,6 +16,7 @@ from rest_framework.response import Response
 
 from django_filters.rest_framework import DjangoFilterBackend
 
+from apps.callminutes.utils import format_duration, format_duration_hms
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment,
@@ -42,6 +47,27 @@ from apps.lead.filters import (
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission
 from apps.global_config.filters import BranchFilterBackend
+
+NEPAL_TZ = ZoneInfo('Asia/Kathmandu')
+TOP_CALLERS_LIMIT = 10
+# Spreadsheets run a cell starting with any of these as a formula.
+CSV_FORMULA_PREFIXES = ('=', '+', '-', '@', '\t', '\r')
+CALL_EXPORT_HEADER = [
+    'Date & time (NPT)', 'Direction', 'Lead', 'Reference', 'Phone', 'Caller',
+    'Logged by', 'Duration (MM:SS)', 'Seconds', 'Outcome', 'Notes', 'Recording',
+]
+
+
+def csv_safe(value):
+    text = '' if value is None else str(value)
+    return f"'{text}" if text.lstrip(' ').startswith(CSV_FORMULA_PREFIXES) else text
+
+
+class EchoWriter:
+    """File-like target for csv.writer that hands each row back instead of storing it."""
+
+    def write(self, value):
+        return value
 
 
 class ConfigViewSet(viewsets.ModelViewSet):
@@ -289,8 +315,8 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         'caller', 'phone_number', 'outcome', 'notes', 'lead__full_name',
         'lead__reference_number',
     ]
-    ordering_fields = ['call_timestamp', 'duration_seconds', 'created_at']
-    ordering = ['-call_timestamp']
+    ordering_fields = ['call_timestamp', 'duration_seconds', 'created_at', 'id']
+    ordering = ['-call_timestamp', '-id']
 
     def get_queryset(self):
         return LeadCall.objects.select_related(
@@ -298,9 +324,90 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary', 'export']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'])
+    def export(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        def rows():
+            writer = csv.writer(EchoWriter())
+            # BOM so Excel reads the file as UTF-8 and shows Devanagari correctly.
+            yield '\ufeff'
+            yield writer.writerow(CALL_EXPORT_HEADER)
+            for call in queryset.iterator(chunk_size=2000):
+                yield writer.writerow([
+                    call.call_timestamp.astimezone(NEPAL_TZ).strftime('%Y-%m-%d %H:%M:%S'),
+                    call.get_direction_display(),
+                    csv_safe(call.lead.full_name),
+                    csv_safe(call.lead.reference_number),
+                    csv_safe(call.phone_number),
+                    csv_safe(call.caller),
+                    csv_safe(call.created_by.name if call.created_by else ''),
+                    format_duration(call.duration_seconds),
+                    call.duration_seconds,
+                    csv_safe(call.outcome),
+                    csv_safe(call.notes),
+                    csv_safe(call.recording_url),
+                ])
+
+        today = timezone.now().astimezone(NEPAL_TZ).date().isoformat()
+        response = StreamingHttpResponse(rows(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="calls-{today}.csv"'
+        return response
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        # order_by() drops the list ordering, which Django would otherwise add
+        # to GROUP BY, splitting every day and user into one group per call.
+        queryset = self.filter_queryset(self.get_queryset()).order_by()
+
+        totals = queryset.aggregate(
+            total_calls=Count('id'),
+            inbound=Count('id', filter=Q(direction=LeadCall.Direction.INBOUND)),
+            outbound=Count('id', filter=Q(direction=LeadCall.Direction.OUTBOUND)),
+            total_seconds=Coalesce(Sum('duration_seconds'), 0),
+            avg_seconds=Avg('duration_seconds'),
+            connected_calls=Count('id', filter=Q(duration_seconds__gt=0)),
+        )
+        by_day = (
+            queryset.annotate(date=TruncDate('call_timestamp', tzinfo=NEPAL_TZ))
+            .values('date')
+            .annotate(calls=Count('id'), seconds=Coalesce(Sum('duration_seconds'), 0))
+            .order_by('date')
+        )
+        by_user = (
+            queryset.values('created_by', 'created_by__name')
+            .annotate(calls=Count('id'), seconds=Coalesce(Sum('duration_seconds'), 0))
+            .order_by('-calls', '-seconds', 'created_by')[:TOP_CALLERS_LIMIT]
+        )
+
+        total_calls = totals['total_calls']
+        return Response({
+            'total_calls': total_calls,
+            'inbound': totals['inbound'],
+            'outbound': totals['outbound'],
+            'total_seconds': totals['total_seconds'],
+            'total_formatted': format_duration_hms(totals['total_seconds']),
+            'avg_seconds': round(totals['avg_seconds'] or 0),
+            'connected_calls': totals['connected_calls'],
+            'connect_rate': round(totals['connected_calls'] / total_calls, 3) if total_calls else 0,
+            'by_day': [
+                {'date': row['date'].isoformat(), 'calls': row['calls'], 'seconds': row['seconds']}
+                for row in by_day
+            ],
+            'by_user': [
+                {
+                    'user_id': row['created_by'],
+                    'name': row['created_by__name'] or 'Unknown',
+                    'calls': row['calls'],
+                    'seconds': row['seconds'],
+                }
+                for row in by_user
+            ],
+        })
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
@@ -522,12 +629,18 @@ class LeadCallViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         from apps.callminutes.services import charge_for_call
 
+        # Branch scoping reads LeadCall.branch, so a call saved without one is
+        # invisible to everyone in the branch that made it.
+        target = get_object_or_404(Lead.objects.select_related('branch'), pk=self.kwargs['lead_pk'])
+        branch = target.branch or self.request.user.branch
+
         instance = charge_for_call(
             user=self.request.user,
             duration_seconds=serializer.validated_data.get('duration_seconds'),
             create_call=lambda: serializer.save(
                 lead_id=self.kwargs['lead_pk'],
                 created_by=self.request.user,
+                branch=branch,
             ),
         )
         lead = instance.lead
