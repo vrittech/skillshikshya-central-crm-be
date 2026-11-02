@@ -2,6 +2,7 @@ import csv
 from datetime import datetime
 
 from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
 from rest_framework import viewsets, status
@@ -522,12 +523,18 @@ class LeadCallViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         from apps.callminutes.services import charge_for_call
 
+        # Branch scoping reads LeadCall.branch, so a call saved without one is
+        # invisible to everyone in the branch that made it.
+        target = get_object_or_404(Lead.objects.select_related('branch'), pk=self.kwargs['lead_pk'])
+        branch = target.branch or self.request.user.branch
+
         instance = charge_for_call(
             user=self.request.user,
             duration_seconds=serializer.validated_data.get('duration_seconds'),
             create_call=lambda: serializer.save(
                 lead_id=self.kwargs['lead_pk'],
                 created_by=self.request.user,
+                branch=branch,
             ),
         )
         lead = instance.lead

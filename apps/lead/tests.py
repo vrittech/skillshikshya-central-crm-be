@@ -196,3 +196,48 @@ class GlobalCallListTests(APITestCase):
         self.client.force_authenticate(other_admin)
         response = self.client.get('/api/calls/')
         self.assertNotIn(self.recent_call.id, [r['id'] for r in response.data['results']])
+
+
+class LogCallBranchTests(APITestCase):
+    def setUp(self):
+        from apps.branch.models import Branch
+        from django.contrib.auth.models import Permission
+        self.branch = Branch.objects.create(name='Biratnagar', code='BRT')
+        self.other_branch = Branch.objects.create(name='Dharan', code='DHR')
+        self.counselor = User.objects.create_user(
+            email='sita@test.com', name='Sita', password='x',
+            branch=self.branch, call_seconds_balance=3600,
+        )
+        self.counselor.user_permissions.add(Permission.objects.get(codename='add_leadcall'))
+        self.client.force_authenticate(self.counselor)
+
+    def _log_call(self, lead, **extra):
+        return self.client.post(f'/api/leads/{lead.id}/calls/', {
+            'call_timestamp': '2026-10-28T05:00:00Z', 'caller': 'Sita',
+            'phone_number': '9811111111', 'duration_input': '4:19', **extra,
+        }, format='json')
+
+    def test_call_takes_the_lead_branch(self):
+        lead = Lead.objects.create(full_name='Lead', phone='9811111111', branch=self.branch)
+        response = self._log_call(lead)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['branch'], self.branch.id)
+        self.assertEqual(response.data['duration_seconds'], 259)
+        self.assertEqual(self.client.get('/api/calls/').data['count'], 1)
+
+    def test_client_cannot_file_a_call_under_another_branch(self):
+        lead = Lead.objects.create(full_name='Lead', phone='9811111111', branch=self.branch)
+        response = self._log_call(lead, branch=self.other_branch.id)
+        self.assertEqual(response.data['branch'], self.branch.id)
+
+    def test_lead_without_branch_falls_back_to_the_user_branch(self):
+        lead = Lead.objects.create(full_name='Lead', phone='9811111111')
+        response = self._log_call(lead)
+        self.assertEqual(response.data['branch'], self.branch.id)
+
+    def test_unknown_lead_returns_404(self):
+        response = self.client.post('/api/leads/999999/calls/', {
+            'call_timestamp': '2026-10-28T05:00:00Z', 'caller': 'Sita',
+            'phone_number': '9811111111', 'duration_seconds': 10,
+        }, format='json')
+        self.assertEqual(response.status_code, 404)
