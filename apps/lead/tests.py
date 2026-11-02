@@ -241,3 +241,125 @@ class LogCallBranchTests(APITestCase):
             'phone_number': '9811111111', 'duration_seconds': 10,
         }, format='json')
         self.assertEqual(response.status_code, 404)
+
+
+class CallEndpointTestBase(APITestCase):
+    """Two branches with one staff user, one counselor each and a lead each."""
+
+    def setUp(self):
+        from apps.branch.models import Branch
+        self.branch_x = Branch.objects.create(name='Biratnagar', code='BRT')
+        self.branch_y = Branch.objects.create(name='Dharan', code='DHR')
+        self.admin = User.objects.create_user(
+            email='admin@test.com', name='Admin', password='x', is_staff=True,
+        )
+        self.user_x = User.objects.create_user(
+            email='x@test.com', name='Sita', password='x', branch=self.branch_x,
+        )
+        self.user_y = User.objects.create_user(
+            email='y@test.com', name='Ramesh', password='x', branch=self.branch_y,
+        )
+        self.lead_x = Lead.objects.create(full_name='Lead X', phone='9811111111', branch=self.branch_x)
+        self.lead_y = Lead.objects.create(full_name='Lead Y', phone='9822222222', branch=self.branch_y)
+        self.client.force_authenticate(self.admin)
+
+    def make_call(self, when='2026-10-20T06:00:00Z', seconds=60, lead=None, user=None, **extra):
+        from apps.lead.models import LeadCall
+        from django.utils.dateparse import parse_datetime
+        lead = lead or self.lead_x
+        user = user or self.user_x
+        defaults = dict(
+            lead=lead, call_timestamp=parse_datetime(when), direction='outbound',
+            caller=user.name, phone_number=lead.phone, duration_seconds=seconds,
+            created_by=user, branch=lead.branch,
+        )
+        defaults.update(extra)
+        return LeadCall.objects.create(**defaults)
+
+
+class GlobalCallSummaryTests(CallEndpointTestBase):
+    def test_totals_average_and_connect_rate_include_a_zero_second_call(self):
+        self.make_call(seconds=100)
+        self.make_call(seconds=200, direction='inbound')
+        self.make_call(seconds=0)
+        self.make_call(seconds=300)
+        data = self.client.get('/api/calls/summary/').data
+        self.assertEqual(data['total_calls'], 4)
+        self.assertEqual(data['inbound'], 1)
+        self.assertEqual(data['outbound'], 3)
+        self.assertEqual(data['total_seconds'], 600)
+        self.assertEqual(data['total_formatted'], '00:10:00')
+        self.assertEqual(data['avg_seconds'], 150)
+        self.assertEqual(data['connected_calls'], 3)
+        self.assertEqual(data['connect_rate'], 0.75)
+
+    def test_days_are_counted_in_nepal_time(self):
+        self.make_call(when='2026-10-28T20:00:00Z', seconds=10)  # 01:45 on Oct 29 NPT
+        self.make_call(when='2026-10-28T17:15:00Z', seconds=20)  # 23:00 on Oct 28 NPT
+        self.make_call(when='2026-10-28T18:14:59Z', seconds=30)  # 23:59:59 on Oct 28 NPT
+        self.make_call(when='2026-10-28T18:15:00Z', seconds=40)  # 00:00:00 on Oct 29 NPT
+        by_day = self.client.get('/api/calls/summary/').data['by_day']
+        self.assertEqual(by_day, [
+            {'date': '2026-10-28', 'calls': 2, 'seconds': 50},
+            {'date': '2026-10-29', 'calls': 2, 'seconds': 50},
+        ])
+
+    def test_empty_result_returns_zeros(self):
+        data = self.client.get('/api/calls/summary/').data
+        self.assertEqual(data, {
+            'total_calls': 0, 'inbound': 0, 'outbound': 0, 'total_seconds': 0,
+            'total_formatted': '00:00:00', 'avg_seconds': 0, 'connected_calls': 0,
+            'connect_rate': 0, 'by_day': [], 'by_user': [],
+        })
+
+    def test_by_user_groups_sorts_and_labels_unknown(self):
+        self.make_call(user=self.user_x, seconds=10)
+        self.make_call(user=self.user_x, seconds=20)
+        self.make_call(user=self.user_y, lead=self.lead_y, seconds=30)
+        from apps.lead.models import LeadCall
+        LeadCall.objects.filter(duration_seconds=30).update(created_by=None)
+        by_user = self.client.get('/api/calls/summary/').data['by_user']
+        self.assertEqual(by_user, [
+            {'user_id': self.user_x.id, 'name': 'Sita', 'calls': 2, 'seconds': 30},
+            {'user_id': None, 'name': 'Unknown', 'calls': 1, 'seconds': 30},
+        ])
+
+    def test_by_user_is_limited_to_the_top_ten(self):
+        for i in range(11):
+            user = User.objects.create_user(email=f'u{i}@test.com', name=f'User {i}', password='x')
+            self.make_call(user=user)
+        self.assertEqual(len(self.client.get('/api/calls/summary/').data['by_user']), 10)
+
+    def test_total_matches_the_list_count_for_the_same_filters(self):
+        self.make_call(seconds=10, notes='needle')
+        self.make_call(seconds=20, direction='inbound', notes='needle')
+        self.make_call(seconds=30, notes='other')
+        self.make_call(when='2026-09-01T06:00:00Z', notes='needle')
+        for query in [
+            '', '?direction=inbound', '?search=needle', f'?created_by={self.user_x.id}',
+            '?call_timestamp__gte=2026-10-01T00:00:00%2B05:45', f'?branch_id={self.branch_y.id}',
+        ]:
+            summary = self.client.get(f'/api/calls/summary/{query}').data
+            listing = self.client.get(f'/api/calls/{query}').data
+            self.assertEqual(summary['total_calls'], listing['count'], msg=query)
+
+    def test_list_ordering_does_not_split_the_groups(self):
+        self.make_call(when='2026-10-20T04:00:00Z')
+        self.make_call(when='2026-10-20T05:00:00Z')
+        data = self.client.get('/api/calls/summary/?ordering=call_timestamp').data
+        self.assertEqual(len(data['by_day']), 1)
+        self.assertEqual(data['by_day'][0]['calls'], 2)
+
+    def test_end_of_day_filter_keeps_the_last_second_in_nepal_time(self):
+        last = self.make_call(when='2026-10-28T18:14:59Z')  # 23:59:59 NPT
+        self.make_call(when='2026-10-28T18:15:00Z')  # next day NPT
+        response = self.client.get('/api/calls/', {
+            'call_timestamp__gte': '2026-10-28T00:00:00+05:45',
+            'call_timestamp__lte': '2026-10-28T23:59:59.999999+05:45',
+        })
+        self.assertEqual([r['id'] for r in response.data['results']], [last.id])
+
+    def test_list_includes_duration_formatted(self):
+        self.make_call(seconds=259)
+        row = self.client.get('/api/calls/').data['results'][0]
+        self.assertEqual(row['duration_formatted'], '04:19')

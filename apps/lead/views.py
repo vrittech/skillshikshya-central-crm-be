@@ -1,6 +1,9 @@
 import csv
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
+from django.db.models import Avg, Count, Q, Sum
+from django.db.models.functions import Coalesce, TruncDate
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -13,6 +16,7 @@ from rest_framework.response import Response
 
 from django_filters.rest_framework import DjangoFilterBackend
 
+from apps.callminutes.utils import format_duration_hms
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment,
@@ -43,6 +47,9 @@ from apps.lead.filters import (
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission
 from apps.global_config.filters import BranchFilterBackend
+
+NEPAL_TZ = ZoneInfo('Asia/Kathmandu')
+TOP_CALLERS_LIMIT = 10
 
 
 class ConfigViewSet(viewsets.ModelViewSet):
@@ -290,8 +297,8 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         'caller', 'phone_number', 'outcome', 'notes', 'lead__full_name',
         'lead__reference_number',
     ]
-    ordering_fields = ['call_timestamp', 'duration_seconds', 'created_at']
-    ordering = ['-call_timestamp']
+    ordering_fields = ['call_timestamp', 'duration_seconds', 'created_at', 'id']
+    ordering = ['-call_timestamp', '-id']
 
     def get_queryset(self):
         return LeadCall.objects.select_related(
@@ -299,9 +306,60 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        # order_by() drops the list ordering, which Django would otherwise add
+        # to GROUP BY, splitting every day and user into one group per call.
+        queryset = self.filter_queryset(self.get_queryset()).order_by()
+
+        totals = queryset.aggregate(
+            total_calls=Count('id'),
+            inbound=Count('id', filter=Q(direction=LeadCall.Direction.INBOUND)),
+            outbound=Count('id', filter=Q(direction=LeadCall.Direction.OUTBOUND)),
+            total_seconds=Coalesce(Sum('duration_seconds'), 0),
+            avg_seconds=Avg('duration_seconds'),
+            connected_calls=Count('id', filter=Q(duration_seconds__gt=0)),
+        )
+        by_day = (
+            queryset.annotate(date=TruncDate('call_timestamp', tzinfo=NEPAL_TZ))
+            .values('date')
+            .annotate(calls=Count('id'), seconds=Coalesce(Sum('duration_seconds'), 0))
+            .order_by('date')
+        )
+        by_user = (
+            queryset.values('created_by', 'created_by__name')
+            .annotate(calls=Count('id'), seconds=Coalesce(Sum('duration_seconds'), 0))
+            .order_by('-calls', '-seconds', 'created_by')[:TOP_CALLERS_LIMIT]
+        )
+
+        total_calls = totals['total_calls']
+        return Response({
+            'total_calls': total_calls,
+            'inbound': totals['inbound'],
+            'outbound': totals['outbound'],
+            'total_seconds': totals['total_seconds'],
+            'total_formatted': format_duration_hms(totals['total_seconds']),
+            'avg_seconds': round(totals['avg_seconds'] or 0),
+            'connected_calls': totals['connected_calls'],
+            'connect_rate': round(totals['connected_calls'] / total_calls, 3) if total_calls else 0,
+            'by_day': [
+                {'date': row['date'].isoformat(), 'calls': row['calls'], 'seconds': row['seconds']}
+                for row in by_day
+            ],
+            'by_user': [
+                {
+                    'user_id': row['created_by'],
+                    'name': row['created_by__name'] or 'Unknown',
+                    'calls': row['calls'],
+                    'seconds': row['seconds'],
+                }
+                for row in by_user
+            ],
+        })
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
