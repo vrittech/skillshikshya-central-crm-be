@@ -1,7 +1,11 @@
 import csv
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from django.http import HttpResponse
+from django.http import HttpResponse, StreamingHttpResponse
+from django.shortcuts import get_object_or_404
+from django.db.models import Avg, Count, Q, Sum
+from django.db.models.functions import TruncDate
 from django.utils import timezone
 
 from rest_framework import viewsets, status
@@ -42,6 +46,22 @@ from apps.lead.filters import (
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission
 from apps.global_config.filters import BranchFilterBackend
+from apps.callminutes.utils import format_duration
+
+
+NEPAL_TZ = ZoneInfo('Asia/Kathmandu')
+
+
+def csv_text(value):
+    text = '' if value is None else str(value)
+    if text.lstrip().startswith(('=', '+', '-', '@')) or text.startswith(('\t', '\r', '\n')):
+        return "'" + text
+    return text
+
+
+class CSVBuffer:
+    def write(self, value):
+        return value
 
 
 class ConfigViewSet(viewsets.ModelViewSet):
@@ -287,7 +307,7 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_class = GlobalCallFilter
     search_fields = [
         'caller', 'phone_number', 'outcome', 'notes', 'lead__full_name',
-        'lead__reference_number',
+        'lead__reference_number', 'created_by__name',
     ]
     ordering_fields = ['call_timestamp', 'duration_seconds', 'created_at']
     ordering = ['-call_timestamp']
@@ -298,9 +318,65 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
-            return [IsAuthenticated()]
-        return [IsAuthenticated(), IsStaffOrHasPermission()]
+        return [IsAuthenticated()]
+
+    def filter_queryset(self, queryset):
+        queryset = super().filter_queryset(queryset)
+        return queryset.order_by(*queryset.query.order_by, '-pk')
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        calls = self.filter_queryset(self.get_queryset()).order_by()
+        totals = calls.aggregate(
+            total_calls=Count('pk'),
+            inbound_calls=Count('pk', filter=Q(direction='inbound')),
+            outbound_calls=Count('pk', filter=Q(direction='outbound')),
+            talk_time_seconds=Sum('duration_seconds'),
+            average_duration_seconds=Avg('duration_seconds'),
+            connected_calls=Count('pk', filter=Q(duration_seconds__gt=0)),
+        )
+        totals['talk_time_seconds'] = totals['talk_time_seconds'] or 0
+        totals['average_duration_seconds'] = totals['average_duration_seconds'] or 0
+        totals['connect_rate'] = (
+            round(totals['connected_calls'] * 100 / totals['total_calls'], 2)
+            if totals['total_calls'] else 0
+        )
+        totals['calls_per_day'] = list(
+            calls.annotate(date=TruncDate('call_timestamp', tzinfo=NEPAL_TZ))
+            .values('date').annotate(count=Count('pk')).order_by('date')
+        )
+        totals['top_callers'] = list(
+            calls.values('created_by', 'created_by__name')
+            .annotate(count=Count('pk')).order_by('-count', 'created_by')[:10]
+        )
+        return Response(totals)
+
+    @action(detail=False, methods=['get'])
+    def export_csv(self, request):
+        calls = self.filter_queryset(self.get_queryset())
+
+        def rows():
+            writer = csv.writer(CSVBuffer())
+            yield '\ufeff'
+            yield writer.writerow([
+                'Date & time (NPT)', 'Direction', 'Lead', 'Reference', 'Phone',
+                'Caller', 'Logged by', 'Duration (MM:SS)', 'Seconds',
+                'Outcome', 'Notes', 'Recording',
+            ])
+            for call in calls.iterator(chunk_size=2000):
+                yield writer.writerow([csv_text(value) for value in [
+                    timezone.localtime(call.call_timestamp, NEPAL_TZ).isoformat(),
+                    call.direction, call.lead.full_name, call.lead.reference_number,
+                    call.phone_number, call.caller,
+                    call.created_by.name if call.created_by else '',
+                    format_duration(call.duration_seconds), call.duration_seconds,
+                    call.outcome, call.notes, call.recording_url,
+                ]])
+
+        response = StreamingHttpResponse(rows(), content_type='text/csv; charset=utf-8')
+        date = timezone.localtime(timezone.now(), NEPAL_TZ).date()
+        response['Content-Disposition'] = f'attachment; filename="calls-{date}.csv"'
+        return response
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
@@ -522,11 +598,14 @@ class LeadCallViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         from apps.callminutes.services import charge_for_call
 
+        leads = BranchFilterBackend().filter_queryset(self.request, Lead.objects.all(), self)
+        lead = get_object_or_404(leads, pk=self.kwargs['lead_pk'])
         instance = charge_for_call(
             user=self.request.user,
             duration_seconds=serializer.validated_data.get('duration_seconds'),
             create_call=lambda: serializer.save(
-                lead_id=self.kwargs['lead_pk'],
+                lead=lead,
+                branch=lead.branch,
                 created_by=self.request.user,
             ),
         )
