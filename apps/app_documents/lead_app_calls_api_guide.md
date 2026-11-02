@@ -9,6 +9,8 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | Method | Endpoint | Description | Access |
 |--------|----------|-------------|--------|
 | GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated |
+| GET | `/api/calls/summary/` | Aggregate call metrics, daily trend & top callers | Authenticated |
+| GET | `/api/calls/export_csv/` | Download filtered calls as CSV spreadsheet | Authenticated |
 | GET | `/api/leads/{lead_id}/calls/` | List calls for one lead (paginated) | Authenticated |
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
@@ -54,6 +56,49 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 ```
 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
+
+## Call Summary & Metrics — `GET /api/calls/summary/`
+
+Returns high-level totals, talk time, connect rate, daily call volume in Nepal Time (NPT), and top 10 callers. Accepts the same filter query parameters as `GET /api/calls/` (scoped by branch).
+
+**Query params:** same as `GET /api/calls/` (`direction`, `created_by`, `call_timestamp__gte`, `call_timestamp__lte`, `search`, `branch_id`).
+
+**Example response:**
+```json
+{
+    "total_calls": 42,
+    "inbound_calls": 12,
+    "outbound_calls": 30,
+    "total_seconds": 9450,
+    "talk_time_formatted": "157:30",
+    "avg_duration_seconds": 225,
+    "avg_duration_formatted": "03:45",
+    "connected_calls": 38,
+    "connect_rate": 90.5,
+    "calls_per_day": [
+        { "date": "2026-11-01", "count": 20 },
+        { "date": "2026-11-02", "count": 22 }
+    ],
+    "top_callers": [
+        { "caller": "Sangita Thapa", "calls": 15, "seconds": 3600, "duration_formatted": "60:00" },
+        { "caller": "Ashok Karki", "calls": 12, "seconds": 2700, "duration_formatted": "45:00" }
+    ]
+}
+```
+
+## Call CSV Export — `GET /api/calls/export_csv/`
+
+Streams a UTF-8 CSV attachment containing all calls matching the current filters across all pages, formatted for Microsoft Excel and Google Sheets.
+
+**Filename:** `calls-YYYY-MM-DD.csv` (dated in Nepal Time)
+
+**Columns in order:**
+`Date & time (NPT)`, `Direction`, `Lead`, `Reference`, `Phone`, `Caller`, `Logged by`, `Duration (MM:SS)`, `Seconds`, `Outcome`, `Notes`, `Recording`
+
+**Features:**
+- Includes UTF-8 BOM (`\ufeff`) so Nepali (Devanagari) names render properly in Excel.
+- Formula injection protection: values beginning with `=`, `+`, `-`, `@` are safely prefixed with a single quote.
+- Efficient chunked streaming (`iterator(chunk_size=500)`) with zero N+1 database queries.
 
 ## Call Minutes Deduction
 

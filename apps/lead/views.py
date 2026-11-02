@@ -298,9 +298,130 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'export_csv', 'summary']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'])
+    def export_csv(self, request):
+        from zoneinfo import ZoneInfo
+        from apps.callminutes.utils import format_duration
+
+        npt = ZoneInfo("Asia/Kathmandu")
+        today_npt = timezone.now().astimezone(npt).strftime('%Y-%m-%d')
+        filename = f"calls-{today_npt}.csv"
+
+        queryset = self.filter_queryset(self.get_queryset()).select_related('lead', 'created_by', 'branch')
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+        # UTF-8 BOM so Excel opens Nepali (Devanagari) characters correctly
+        response.write('﻿')
+
+        writer = csv.writer(response)
+        writer.writerow([
+            'Date & time (NPT)', 'Direction', 'Lead', 'Reference', 'Phone',
+            'Caller', 'Logged by', 'Duration (MM:SS)', 'Seconds',
+            'Outcome', 'Notes', 'Recording',
+        ])
+
+        def sanitize_formula(val):
+            if val and str(val)[0] in ('=', '+', '-', '@'):
+                return f"'{val}"
+            return val or ''
+
+        for call in queryset.iterator(chunk_size=500):
+            npt_str = call.call_timestamp.astimezone(npt).strftime('%Y-%m-%d %H:%M:%S') if call.call_timestamp else ''
+            writer.writerow([
+                npt_str,
+                call.get_direction_display() if hasattr(call, 'get_direction_display') else call.direction,
+                call.lead.full_name if call.lead else '',
+                call.lead.reference_number if call.lead else '',
+                call.phone_number or '',
+                call.caller or '',
+                call.created_by.name if call.created_by else '',
+                format_duration(call.duration_seconds),
+                call.duration_seconds or 0,
+                call.outcome or '',
+                sanitize_formula(call.notes),
+                call.recording_url or '',
+            ])
+        return response
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        from collections import defaultdict
+        from zoneinfo import ZoneInfo
+        from apps.callminutes.utils import format_duration
+
+        queryset = self.filter_queryset(self.get_queryset())
+        npt = ZoneInfo("Asia/Kathmandu")
+
+        total_calls = 0
+        inbound_calls = 0
+        outbound_calls = 0
+        total_seconds = 0
+        connected_calls = 0
+        calls_by_date = defaultdict(int)
+        callers_map = defaultdict(lambda: {'calls': 0, 'seconds': 0})
+
+        for call in queryset.iterator(chunk_size=500):
+            total_calls += 1
+            dur = call.duration_seconds or 0
+            total_seconds += dur
+
+            if call.direction == 'inbound':
+                inbound_calls += 1
+            else:
+                outbound_calls += 1
+
+            if dur > 0:
+                connected_calls += 1
+
+            if call.call_timestamp:
+                npt_dt = call.call_timestamp.astimezone(npt)
+                date_str = npt_dt.date().isoformat()
+                calls_by_date[date_str] += 1
+
+            caller_name = call.caller or (call.created_by.name if call.created_by else 'Unknown')
+            callers_map[caller_name]['calls'] += 1
+            callers_map[caller_name]['seconds'] += dur
+
+        avg_duration_seconds = round(total_seconds / total_calls) if total_calls > 0 else 0
+        connect_rate = round((connected_calls / total_calls) * 100, 1) if total_calls > 0 else 0.0
+
+        calls_per_day = [
+            {'date': d, 'count': calls_by_date[d]}
+            for d in sorted(calls_by_date.keys())
+        ]
+
+        sorted_callers = sorted(
+            [
+                {
+                    'caller': name,
+                    'calls': stats['calls'],
+                    'seconds': stats['seconds'],
+                    'duration_formatted': format_duration(stats['seconds']),
+                }
+                for name, stats in callers_map.items()
+            ],
+            key=lambda x: x['calls'],
+            reverse=True,
+        )[:10]
+
+        return Response({
+            'total_calls': total_calls,
+            'inbound_calls': inbound_calls,
+            'outbound_calls': outbound_calls,
+            'total_seconds': total_seconds,
+            'talk_time_formatted': format_duration(total_seconds),
+            'avg_duration_seconds': avg_duration_seconds,
+            'avg_duration_formatted': format_duration(avg_duration_seconds),
+            'connected_calls': connected_calls,
+            'connect_rate': connect_rate,
+            'calls_per_day': calls_per_day,
+            'top_callers': sorted_callers,
+        })
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
@@ -521,16 +642,28 @@ class LeadCallViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         from apps.callminutes.services import charge_for_call
+        from rest_framework.exceptions import PermissionDenied
+
+        lead = Lead.objects.get(pk=self.kwargs['lead_pk'])
+        user_branch = getattr(self.request.user, 'branch', None)
+        if not self.request.user.is_staff and user_branch and lead.branch and lead.branch != user_branch:
+            raise PermissionDenied('You do not have permission to log calls for leads in another branch.')
+
+        branch = serializer.validated_data.get('branch') or lead.branch or user_branch
+        direction = serializer.validated_data.get('direction', 'outbound')
+        duration_seconds = serializer.validated_data.get('duration_seconds', 0)
+        # Inbound calls do not deduct minutes from counselor prepaid balance
+        charge_seconds = 0 if direction == 'inbound' else duration_seconds
 
         instance = charge_for_call(
             user=self.request.user,
-            duration_seconds=serializer.validated_data.get('duration_seconds'),
+            duration_seconds=charge_seconds,
             create_call=lambda: serializer.save(
                 lead_id=self.kwargs['lead_pk'],
                 created_by=self.request.user,
+                branch=branch,
             ),
         )
-        lead = instance.lead
         if lead.last_contact_at is None or instance.call_timestamp > lead.last_contact_at:
             lead.last_contact_at = instance.call_timestamp
         lead.save(update_fields=['lead_score', 'last_contact_at'])

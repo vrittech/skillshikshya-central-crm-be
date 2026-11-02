@@ -184,15 +184,155 @@ class GlobalCallListTests(APITestCase):
         search_lead = self.client.get('/api/calls/?search=Call Person')
         self.assertEqual(search_lead.data['count'], 2)
 
-    def test_branch_scoping_for_non_staff(self):
-        from apps.branch.models import Branch
+    def test_export_csv(self):
         from apps.lead.models import LeadCall
+        # Add formula injection test note
+        LeadCall.objects.filter(id=self.recent_call.id).update(notes='=1+1', caller='राम श्रेष्ठ')
+        response = self.client.get('/api/calls/export_csv/')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('text/csv', response['Content-Type'])
+        self.assertIn('attachment; filename="calls-', response['Content-Disposition'])
+        # Verify UTF-8 BOM
+        self.assertTrue(response.content.startswith(b'\xef\xbb\xbf'))
+        content = response.content.decode('utf-8')
+        # Verify exact column order
+        expected_header = 'Date & time (NPT),Direction,Lead,Reference,Phone,Caller,Logged by,Duration (MM:SS),Seconds,Outcome,Notes,Recording'
+        self.assertIn(expected_header, content)
+        # Verify Nepali name rendered properly
+        self.assertIn('राम श्रेष्ठ', content)
+        # Verify formula injection mitigation: note starting with = is prefixed with '
+        self.assertIn("'=1+1", content)
+
+    def test_branch_scoping_for_non_staff(self):
+        self.test_branch_scoping_non_staff_never_sees_other_branch_calls()
+
+    def test_branch_scoping_non_staff_never_sees_other_branch_calls(self):
+        from apps.branch.models import Branch
+        from apps.lead.models import Lead, LeadCall
+
         other_branch = Branch.objects.create(name='Dharan', code='DHR')
-        other_admin = User.objects.create_user(
-            email='br@test.com', name='BR User', password='x',
-            branch=other_branch,
+        other_lead = Lead.objects.create(full_name='Dharan Lead', phone='9899999999', branch=other_branch)
+        dharan_call = LeadCall.objects.create(
+            lead=other_lead, call_timestamp=self.recent_call.call_timestamp,
+            direction='outbound', caller='Dharan Counselor',
+            duration_seconds=120, branch=other_branch,
         )
-        LeadCall.objects.filter(id=self.recent_call.id).update(branch=None)
-        self.client.force_authenticate(other_admin)
-        response = self.client.get('/api/calls/')
-        self.assertNotIn(self.recent_call.id, [r['id'] for r in response.data['results']])
+
+        dharan_user = User.objects.create_user(
+            email='counselor_dharan@test.com', name='Dharan Counselor User', password='x',
+            branch=other_branch, is_staff=False,
+        )
+        self.client.force_authenticate(dharan_user)
+
+        # 1. List endpoint: Dharan user only sees Dharan calls, never Biratnagar calls
+        list_resp = self.client.get('/api/calls/')
+        self.assertEqual(list_resp.status_code, 200)
+        call_ids = [r['id'] for r in list_resp.data['results']]
+        self.assertIn(dharan_call.id, call_ids)
+        self.assertNotIn(self.recent_call.id, call_ids)
+        self.assertNotIn(self.old_call.id, call_ids)
+
+        # 2. Summary endpoint: Dharan user only sees Dharan metrics
+        sum_resp = self.client.get('/api/calls/summary/')
+        self.assertEqual(sum_resp.status_code, 200)
+        self.assertEqual(sum_resp.data['total_calls'], 1)
+        self.assertEqual(sum_resp.data['total_seconds'], 120)
+        self.assertEqual(sum_resp.data['top_callers'][0]['caller'], 'Dharan Counselor')
+
+        # 3. Export endpoint: Dharan user only exports Dharan calls
+        exp_resp = self.client.get('/api/calls/export_csv/')
+        self.assertEqual(exp_resp.status_code, 200)
+        exp_content = exp_resp.content.decode('utf-8')
+        self.assertIn('Dharan Lead', exp_content)
+        self.assertNotIn('Call Person', exp_content)
+
+        # 4. Detail endpoint: Dharan user cannot retrieve Biratnagar call directly by ID (404)
+        detail_resp = self.client.get(f'/api/calls/{self.recent_call.id}/')
+        self.assertEqual(detail_resp.status_code, 404)
+
+        # 5. Query param spoofing: Dharan user passing ?branch_id=Biratnagar is ignored
+        spoofed_resp = self.client.get(f'/api/calls/?branch_id={self.branch.id}')
+        self.assertEqual(spoofed_resp.status_code, 200)
+        spoofed_ids = [r['id'] for r in spoofed_resp.data['results']]
+        self.assertNotIn(self.recent_call.id, spoofed_ids)
+        self.assertIn(dharan_call.id, spoofed_ids)
+
+        # 6. Logging call: Dharan counselor cannot log a call to a Biratnagar lead (403)
+        log_resp = self.client.post(
+            f'/api/leads/{self.lead.id}/calls/',
+            {'call_timestamp': self.recent_call.call_timestamp.isoformat(), 'caller': 'Dharan Counselor', 'duration_seconds': 60},
+            format='json',
+        )
+        self.assertEqual(log_resp.status_code, 403)
+
+    def test_staff_sees_all_branches_and_narrows_with_branch_id(self):
+        from apps.branch.models import Branch
+        from apps.lead.models import Lead, LeadCall
+
+        other_branch = Branch.objects.create(name='Dharan', code='DHR')
+        other_lead = Lead.objects.create(full_name='Dharan Lead', phone='9899999999', branch=other_branch)
+        dharan_call = LeadCall.objects.create(
+            lead=other_lead, call_timestamp=self.recent_call.call_timestamp,
+            direction='outbound', caller='Dharan Counselor',
+            duration_seconds=120, branch=other_branch,
+        )
+
+        self.client.force_authenticate(self.admin)  # is_staff=True
+
+        # Staff sees all branches by default
+        all_resp = self.client.get('/api/calls/')
+        all_ids = [r['id'] for r in all_resp.data['results']]
+        self.assertIn(dharan_call.id, all_ids)
+        self.assertIn(self.recent_call.id, all_ids)
+
+        # Staff narrows by branch_id
+        filtered_resp = self.client.get(f'/api/calls/?branch_id={self.branch.id}')
+        filtered_ids = [r['id'] for r in filtered_resp.data['results']]
+        self.assertIn(self.recent_call.id, filtered_ids)
+        self.assertNotIn(dharan_call.id, filtered_ids)
+
+        # Staff summary narrows by branch_id
+        filtered_sum = self.client.get(f'/api/calls/summary/?branch_id={other_branch.id}')
+        self.assertEqual(filtered_sum.data['total_calls'], 1)
+        self.assertEqual(filtered_sum.data['top_callers'][0]['caller'], 'Dharan Counselor')
+
+        # Staff export narrows by branch_id
+        filtered_exp = self.client.get(f'/api/calls/export_csv/?branch_id={other_branch.id}')
+        exp_content = filtered_exp.content.decode('utf-8')
+        self.assertIn('Dharan Lead', exp_content)
+        self.assertNotIn('Call Person', exp_content)
+
+    def test_summary(self):
+        response = self.client.get('/api/calls/summary/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['total_calls'], 2)
+        self.assertEqual(response.data['outbound_calls'], 1)
+        self.assertEqual(response.data['inbound_calls'], 1)
+        self.assertEqual(response.data['total_seconds'], 330)
+        self.assertEqual(response.data['connected_calls'], 2)
+        self.assertEqual(response.data['connect_rate'], 100.0)
+        self.assertEqual(len(response.data['top_callers']), 2)
+        self.assertEqual(response.data['top_callers'][0]['caller'], 'Counselor Nine')
+        self.assertTrue(len(response.data['calls_per_day']) >= 1)
+
+    def test_summary_filter_direction(self):
+        response = self.client.get('/api/calls/summary/?direction=inbound')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['total_calls'], 1)
+        self.assertEqual(response.data['inbound_calls'], 1)
+        self.assertEqual(response.data['outbound_calls'], 0)
+        self.assertEqual(response.data['total_seconds'], 60)
+        self.assertEqual(response.data['connect_rate'], 100.0)
+
+    def test_summary_empty_state(self):
+        response = self.client.get('/api/calls/summary/?search=NonExistentUser123')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['total_calls'], 0)
+        self.assertEqual(response.data['inbound_calls'], 0)
+        self.assertEqual(response.data['outbound_calls'], 0)
+        self.assertEqual(response.data['total_seconds'], 0)
+        self.assertEqual(response.data['avg_duration_seconds'], 0)
+        self.assertEqual(response.data['connected_calls'], 0)
+        self.assertEqual(response.data['connect_rate'], 0.0)
+        self.assertEqual(response.data['calls_per_day'], [])
+        self.assertEqual(response.data['top_callers'], [])

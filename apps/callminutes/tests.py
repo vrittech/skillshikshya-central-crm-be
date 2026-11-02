@@ -147,6 +147,22 @@ class CallDeductionTests(CallMinutesBase):
         self.counselor.refresh_from_db()
         self.assertEqual(self.counselor.call_seconds_balance, 510)
 
+    def test_inbound_call_does_not_deduct_balance(self):
+        balance_before = self.counselor.call_seconds_balance
+        response = self._post_call({'direction': 'inbound', 'duration_seconds': 180})
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.counselor.refresh_from_db()
+        self.assertEqual(self.counselor.call_seconds_balance, balance_before)
+        self.assertEqual(response.data['seconds_used'], 0)
+        self.assertEqual(response.data['remaining_seconds'], balance_before)
+        self.assertFalse(CallMinutesTransaction.objects.filter(call=response.data['id']).exists())
+
+    def test_call_inherits_lead_branch(self):
+        response = self._post_call()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        call = LeadCall.objects.get(pk=response.data['id'])
+        self.assertEqual(call.branch, self.lead.branch)
+
 
 class TopUpTests(CallMinutesBase):
     def setUp(self):
@@ -271,6 +287,13 @@ class DurationParserTests(APITestCase):
         self.assertEqual(format_duration(0), '00:00')
         self.assertEqual(format_duration(90), '01:30')
 
+    def test_minute_and_second_shorthand(self):
+        self.assertEqual(parse_duration_to_seconds('4m'), 240)
+        self.assertEqual(parse_duration_to_seconds('4min'), 240)
+        self.assertEqual(parse_duration_to_seconds('4 mins'), 240)
+        self.assertEqual(parse_duration_to_seconds('45s'), 45)
+        self.assertEqual(parse_duration_to_seconds('45sec'), 45)
+
 
 class FlexibleDurationAPITests(CallDeductionTests):
     def setUp(self):
@@ -305,6 +328,13 @@ class FlexibleDurationAPITests(CallDeductionTests):
             response = self._post_with_input(fmt)
             self.assertEqual(response.status_code, 201, msg=fmt)
             self.assertEqual(response.data['duration_seconds'], 259, msg=fmt)
+
+    def test_duration_input_shorthand(self):
+        self.counselor.call_seconds_balance = 100 * 60
+        self.counselor.save()
+        response = self._post_with_input('4m')
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['duration_seconds'], 240)
 
     def test_invalid_duration_input_400(self):
         response = self._post_with_input('not-a-duration')
