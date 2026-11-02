@@ -225,7 +225,7 @@ class LeadCallSerializer(serializers.ModelSerializer):
     class Meta:
         model = LeadCall
         fields = '__all__'
-        read_only_fields = ['lead', 'created_by', 'created_at']
+        read_only_fields = ['lead', 'branch', 'created_by', 'created_at']
 
     def get_duration_formatted(self, obj):
         return format_duration(obj.duration_seconds)
