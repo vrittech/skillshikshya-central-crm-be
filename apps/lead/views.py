@@ -1,6 +1,9 @@
 import csv
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
+from django.db.models import Count, Q, Sum
+from django.db.models.functions import Coalesce, TruncDate
 from django.http import HttpResponse
 from django.utils import timezone
 
@@ -298,9 +301,58 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary', 'export']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @staticmethod
+    def _hms(total):
+        total = int(total or 0)
+        return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        qs = self.filter_queryset(self.get_queryset()).order_by()
+        npt = ZoneInfo('Asia/Kathmandu')
+
+        t = qs.aggregate(
+            total_calls=Count('id'),
+            inbound=Count('id', filter=Q(direction='inbound')),
+            outbound=Count('id', filter=Q(direction='outbound')),
+            total_seconds=Coalesce(Sum('duration_seconds'), 0),
+            connected_calls=Count('id', filter=Q(duration_seconds__gt=0)),
+        )
+        total = t['total_calls']
+        by_day = (
+            qs.annotate(day=TruncDate('call_timestamp', tzinfo=npt))
+            .values('day')
+            .annotate(calls=Count('id'), seconds=Coalesce(Sum('duration_seconds'), 0))
+            .order_by('day')
+        )
+        by_user = (
+            qs.values('created_by', 'created_by__name')
+            .annotate(calls=Count('id'), seconds=Coalesce(Sum('duration_seconds'), 0))
+            .order_by('-calls', 'created_by')[:10]
+        )
+        return Response({
+            **t,
+            'total_formatted': self._hms(t['total_seconds']),
+            'avg_seconds': round(t['total_seconds'] / total) if total else 0,
+            'connect_rate': round(t['connected_calls'] / total, 3) if total else 0,
+            'by_day': [
+                {'date': r['day'].isoformat(), 'calls': r['calls'], 'seconds': r['seconds']}
+                for r in by_day
+            ],
+            'by_user': [
+                {
+                    'user_id': r['created_by'],
+                    'name': r['created_by__name'] or 'Unknown',
+                    'calls': r['calls'],
+                    'seconds': r['seconds'],
+                }
+                for r in by_user
+            ],
+        })
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
