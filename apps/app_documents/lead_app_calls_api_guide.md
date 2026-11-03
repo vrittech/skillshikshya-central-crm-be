@@ -55,6 +55,40 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
 
+## Global Call Summary — `GET /api/calls/summary/`
+
+Returns totals and grouped activity for calls matching the same filters as the [global call log](#global-call-log--get-apicalls). The response is a single unpaginated object. Branch scoping also applies: staff can see all branches or filter with `branch_id`; non-staff users are limited to their assigned branch.
+
+**Response:**
+```json
+{
+    "total_calls": 128,
+    "inbound": 40,
+    "outbound": 88,
+    "total_seconds": 30215,
+    "total_formatted": "08:23:35",
+    "avg_seconds": 236,
+    "connected_calls": 110,
+    "connect_rate": 0.859,
+    "by_day": [
+        {"date": "2026-10-28", "calls": 14, "seconds": 3310}
+    ],
+    "by_user": [
+        {"user_id": 9, "name": "Shikhar", "calls": 40, "seconds": 9800}
+    ]
+}
+```
+
+`connected_calls` counts calls longer than zero seconds. `connect_rate` is the connected-call count divided by total calls (0 when there are no calls). `by_day` uses Nepal time (`Asia/Kathmandu`); callers without an account are grouped as `user_id: null`, `name: "Unknown"`. With no matching calls, the totals are zero and both groups are empty.
+
+## Global Call CSV Export — `GET /api/calls/export/`
+
+Downloads every call matching the same filters and branch scoping as the global call log, across all pages. The response is a CSV attachment named `calls-YYYY-MM-DD.csv`, encoded with a UTF-8 BOM for spreadsheet compatibility with Nepali text.
+
+The CSV columns, in order, are: `Date & time (NPT)`, `Direction`, `Lead`, `Reference`, `Phone`, `Caller`, `Logged by`, `Duration (MM:SS)`, `Seconds`, `Outcome`, `Notes`, `Recording`. Text cells beginning with `=`, `+`, `-`, or `@` are prefixed with an apostrophe to prevent spreadsheet formula evaluation.
+
+All global call log filters apply to this endpoint, including `search`, `direction`, `created_by`, `student`, `lead`, `call_timestamp__gte`, `call_timestamp__lte`, and staff `branch_id`.
+
 ## Call Minutes Deduction
 
 Creating a call **deducts minutes from the requesting user's balance**:

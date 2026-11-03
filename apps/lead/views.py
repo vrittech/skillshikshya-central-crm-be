@@ -1,8 +1,11 @@
 import csv
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from django.http import HttpResponse
+from django.http import HttpResponse, StreamingHttpResponse
 from django.utils import timezone
+from django.db.models import Avg, Count, Q, Sum
+from django.db.models.functions import TruncDate
 
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -281,6 +284,9 @@ class GlobalPaymentViewSet(viewsets.ReadOnlyModelViewSet):
 class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
     """Flat, cross-lead call log. Newest calls first by default."""
     queryset = LeadCall.objects.none()
+    # Calls created from the Log Call dialog do not populate LeadCall.branch.
+    # Use the lead's branch so those calls remain available to branch filters.
+    branch_field = 'lead__branch'
     serializer_class = GlobalCallSerializer
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, BranchFilterBackend]
@@ -301,6 +307,100 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         if self.action in ['list', 'retrieve']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        calls = self.filter_queryset(self.get_queryset())
+        totals = calls.aggregate(
+            total_calls=Count('id'),
+            inbound=Count('id', filter=Q(direction=LeadCall.Direction.INBOUND)),
+            outbound=Count('id', filter=Q(direction=LeadCall.Direction.OUTBOUND)),
+            total_seconds=Sum('duration_seconds'),
+            avg_seconds=Avg('duration_seconds'),
+            connected_calls=Count('id', filter=Q(duration_seconds__gt=0)),
+        )
+        total_calls = totals['total_calls'] or 0
+        total_seconds = totals['total_seconds'] or 0
+        avg_seconds = round(totals['avg_seconds'] or 0)
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        by_day = list(
+            calls.annotate(date=TruncDate('call_timestamp', tzinfo=ZoneInfo('Asia/Kathmandu')))
+            .values('date').annotate(calls=Count('id'), seconds=Sum('duration_seconds'))
+            .order_by('date')
+        )
+        by_user = list(
+            calls.values('created_by_id', 'created_by__name')
+            .annotate(calls=Count('id'), seconds=Sum('duration_seconds'))
+            .order_by('-calls', 'created_by__name')[:10]
+        )
+        return Response({
+            'total_calls': total_calls,
+            'inbound': totals['inbound'] or 0,
+            'outbound': totals['outbound'] or 0,
+            'total_seconds': total_seconds,
+            'total_formatted': f'{hours:02d}:{minutes:02d}:{seconds:02d}',
+            'avg_seconds': avg_seconds,
+            'connected_calls': totals['connected_calls'] or 0,
+            'connect_rate': (totals['connected_calls'] or 0) / total_calls if total_calls else 0,
+            'by_day': [dict(row, date=row['date'].isoformat(), seconds=row['seconds'] or 0) for row in by_day],
+            'by_user': [
+                {'user_id': row['created_by_id'], 'name': row['created_by__name'] or 'Unknown',
+                 'calls': row['calls'], 'seconds': row['seconds'] or 0}
+                for row in by_user
+            ],
+        })
+
+    @action(detail=False, methods=['get'])
+    def export(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).select_related(
+            'lead', 'created_by',
+        )
+
+        class Echo:
+            def write(self, value):
+                return value
+
+        def safe_text(value):
+            if value is None:
+                return ''
+            text = str(value)
+            return f"'{text}" if text.startswith(('=', '+', '-', '@')) else text
+
+        def duration_mmss(seconds):
+            seconds = seconds or 0
+            return f'{seconds // 60:02d}:{seconds % 60:02d}'
+
+        def rows():
+            yield '\ufeff'
+            writer = csv.writer(Echo())
+            yield writer.writerow([
+                'Date & time (NPT)', 'Direction', 'Lead', 'Reference', 'Phone',
+                'Caller', 'Logged by', 'Duration (MM:SS)', 'Seconds', 'Outcome',
+                'Notes', 'Recording',
+            ])
+            for call in queryset.iterator(chunk_size=1000):
+                local_timestamp = timezone.localtime(
+                    call.call_timestamp, ZoneInfo('Asia/Kathmandu'),
+                ).strftime('%Y-%m-%d %H:%M:%S')
+                yield writer.writerow([
+                    local_timestamp,
+                    safe_text(call.direction),
+                    safe_text(call.lead.full_name),
+                    safe_text(call.lead.reference_number),
+                    safe_text(call.phone_number),
+                    safe_text(call.caller),
+                    safe_text(call.created_by.name if call.created_by else 'Unknown'),
+                    duration_mmss(call.duration_seconds),
+                    call.duration_seconds or 0,
+                    safe_text(call.outcome),
+                    safe_text(call.notes),
+                    safe_text(call.recording_url),
+                ])
+
+        response = StreamingHttpResponse(rows(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = 'attachment; filename="calls.csv"'
+        return response
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
