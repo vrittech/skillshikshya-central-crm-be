@@ -255,6 +255,11 @@ class LeadCallSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
+# ---------------------------------------------------------------------------
+# US-1, US-2, US-3: Global Call Read-Only Serializer
+# ---------------------------------------------------------------------------
+
+
 class GlobalCallSerializer(serializers.ModelSerializer):
     lead_name = serializers.CharField(source='lead.full_name', read_only=True)
     lead_reference_number = serializers.CharField(

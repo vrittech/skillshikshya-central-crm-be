@@ -283,6 +283,11 @@ class GlobalPaymentViewSet(viewsets.ReadOnlyModelViewSet):
         return [IsAuthenticated(), IsStaffOrHasPermission()]
 
 
+# ---------------------------------------------------------------------------
+# US-1, US-2, US-4, US-6: Global Calls ViewSet (Listing, Summary, CSV Export)
+# ---------------------------------------------------------------------------
+
+
 class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
     """Flat, cross-lead call log. Newest calls first by default."""
     queryset = LeadCall.objects.none()

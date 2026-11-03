@@ -2,6 +2,10 @@ import re
 
 from django.core.exceptions import ValidationError
 
+# ---------------------------------------------------------------------------
+# Flexible Duration Parser (US-5)
+# ---------------------------------------------------------------------------
+
 
 def parse_duration_to_seconds(duration_str):
     """
@@ -95,6 +99,11 @@ def parse_duration_to_seconds(duration_str):
         f'Invalid duration format: "{duration_str}". '
         'Accepted formats: "4:19", "4.19", "04:19", "4m19s", "259", "4:19:30"'
     )
+
+
+# ---------------------------------------------------------------------------
+# Duration Formatter (MM:SS)
+# ---------------------------------------------------------------------------
 
 
 def format_duration(seconds):
