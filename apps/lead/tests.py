@@ -4,6 +4,7 @@ from rest_framework.test import APITestCase
 
 from apps.course.models import Course
 from apps.lead.models import Lead
+from django.utils import timezone
 
 User = get_user_model()
 
@@ -118,33 +119,64 @@ class GlobalCallListTests(APITestCase):
         from apps.branch.models import Branch
         from django.utils import timezone as tz
         from apps.lead.models import LeadCall
+        from apps.student.models import Student
+
+        self.branch = Branch.objects.create(
+            name='Biratnagar',
+            code='BRT',
+        )
 
         self.admin = User.objects.create_user(
-            email='admin@test.com', name='Admin', password='pass', is_staff=True,
-        )
-        self.counselor = User.objects.create_user(
-            email='c9@test.com', name='Counselor Nine', password='pass',
+            email='admin@test.com',
+            name='Admin',
+            password='pass',
             is_staff=True,
         )
+
+        self.counselor = User.objects.create_user(
+            email='c9@test.com',
+            name='Counselor Nine',
+            password='pass',
+            is_staff=False,
+            branch=self.branch,
+        )
+
         self.client.force_authenticate(self.admin)
-        self.branch = Branch.objects.create(name='Biratnagar', code='BRT')
-        self.lead = Lead.objects.create(full_name='Call Person', phone='9811111111')
-        from apps.student.models import Student
+
+        self.lead = Lead.objects.create(
+            full_name='Call Person',
+            phone='9811111111',
+        )
+
         self.student = Student.objects.create(
-            full_name='Call Person', phone='9811111111', lead=self.lead,
+            full_name='Call Person',
+            phone='9811111111',
+            lead=self.lead,
         )
+
         now = tz.now()
+
         self.recent_call = LeadCall.objects.create(
-            lead=self.lead, call_timestamp=now, direction='outbound',
-            caller='Counselor Nine', phone_number='9811111111',
-            duration_seconds=270, outcome='interested',
-            created_by=self.counselor, branch=self.branch,
+            lead=self.lead,
+            call_timestamp=now,
+            direction='outbound',
+            caller='Counselor Nine',
+            phone_number='9811111111',
+            duration_seconds=270,
+            outcome='interested',
+            created_by=self.counselor,
+            branch=self.branch,
         )
+
         self.old_call = LeadCall.objects.create(
-            lead=self.lead, call_timestamp=now - timedelta(days=10),
-            direction='inbound', caller='Someone Else',
-            phone_number='9822222222', duration_seconds=60,
-            created_by=self.admin, branch=self.branch,
+            lead=self.lead,
+            call_timestamp=now - timedelta(days=10),
+            direction='inbound',
+            caller='Someone Else',
+            phone_number='9822222222',
+            duration_seconds=60,
+            created_by=self.admin,
+            branch=self.branch,
         )
 
     def test_list_returns_all_calls_newest_first(self):
@@ -184,15 +216,94 @@ class GlobalCallListTests(APITestCase):
         search_lead = self.client.get('/api/calls/?search=Call Person')
         self.assertEqual(search_lead.data['count'], 2)
 
-    def test_branch_scoping_for_non_staff(self):
-        from apps.branch.models import Branch
-        from apps.lead.models import LeadCall
-        other_branch = Branch.objects.create(name='Dharan', code='DHR')
-        other_admin = User.objects.create_user(
-            email='br@test.com', name='BR User', password='x',
-            branch=other_branch,
+
+    def test_summary_returns_correct_statistics(self):
+        response = self.client.get('/api/calls/summary/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['total_calls'], 2)
+        self.assertEqual(response.data['inbound_calls'], 1)
+        self.assertEqual(response.data['outbound_calls'], 1)
+        self.assertEqual(response.data['total_duration_seconds'], 330)
+        self.assertEqual(response.data['average_duration_seconds'], 165)
+
+    def test_summary_respects_direction_filter(self):
+        response = self.client.get('/api/calls/summary/?direction=inbound')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['total_calls'], 1)
+        self.assertEqual(response.data['inbound_calls'], 1)
+        self.assertEqual(response.data['outbound_calls'], 0)
+        self.assertEqual(response.data['total_duration_seconds'], 60)
+
+    def test_non_staff_without_branch_sees_no_calls(self):
+        user_without_branch = User.objects.create_user(
+            email='nobranch@test.com',
+            name='No Branch User',
+            password='x',
         )
-        LeadCall.objects.filter(id=self.recent_call.id).update(branch=None)
-        self.client.force_authenticate(other_admin)
+        self.client.force_authenticate(user_without_branch)
+
         response = self.client.get('/api/calls/')
-        self.assertNotIn(self.recent_call.id, [r['id'] for r in response.data['results']])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['count'], 0)
+
+    def test_non_staff_cannot_see_other_branch_calls(self):
+        from apps.lead.models import LeadCall
+        from apps.branch.models import Branch
+
+        other_branch = Branch.objects.create(
+            name='Kathmandu',
+            code='KTM',
+        )
+
+        other_lead = Lead.objects.create(
+            full_name='Other Branch Person',
+        )
+
+        LeadCall.objects.create(
+            lead=other_lead,
+            call_timestamp=timezone.now(),
+            direction='inbound',
+            caller='Other Branch Caller',
+            phone_number='9800000000',
+            duration_seconds=120,
+            outcome='interested',
+            branch=other_branch,
+            created_by=self.counselor,
+        )
+
+        self.client.force_authenticate(self.counselor)
+
+        response = self.client.get('/api/calls/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['count'], 2)
+
+        callers = [call['caller'] for call in response.data['results']]
+        self.assertNotIn('Other Branch Caller', callers)
+
+    def test_export_csv_returns_csv_file(self):
+        response = self.client.get('/api/calls/export_csv/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'text/csv; charset=utf-8')
+        self.assertIn('attachment; filename="calls.csv"', response['Content-Disposition'])
+
+        content = response.content.decode('utf-8')
+        self.assertIn('Lead Name', content)
+        self.assertIn('Call Person', content)
+        self.assertIn('Counselor Nine', content)
+
+    def test_export_csv_protects_formula_values(self):
+        from apps.lead.models import LeadCall
+
+        LeadCall.objects.filter(id=self.recent_call.id).update(
+            caller='=HYPERLINK("https://example.com")'
+        )
+
+        response = self.client.get('/api/calls/export_csv/')
+        content = response.content.decode('utf-8')
+
+        self.assertIn('\'=HYPERLINK(', content)

@@ -1,6 +1,7 @@
 import csv
 from datetime import datetime
 
+
 from django.http import HttpResponse
 from django.utils import timezone
 
@@ -293,14 +294,108 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
     ordering = ['-call_timestamp']
 
     def get_queryset(self):
-        return LeadCall.objects.select_related(
+        queryset = LeadCall.objects.select_related(
             'lead', 'created_by', 'branch',
         )
+
+        user = self.request.user
+
+        # Staff can access calls across branches.
+        # BranchFilterBackend handles optional branch_id filtering.
+        if user.is_staff or user.is_superuser:
+            return queryset
+
+        # Non-staff users must have an assigned branch.
+        if not user.branch:
+            return queryset.none()
+
+        # Non-staff users can only access their own branch.
+        return queryset.filter(branch=user.branch)
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        """Return summary statistics for the filtered, accessible calls."""
+        from django.db.models import Avg, Count, Q, Sum
+
+        queryset = self.filter_queryset(self.get_queryset())
+
+        data = queryset.aggregate(
+            total_calls=Count('id'),
+            inbound_calls=Count(
+                'id',
+                filter=Q(direction='inbound'),
+            ),
+            outbound_calls=Count(
+                'id',
+                filter=Q(direction='outbound'),
+            ),
+            total_duration_seconds=Sum('duration_seconds'),
+            average_duration_seconds=Avg('duration_seconds'),
+        )
+
+        return Response({
+            'total_calls': data['total_calls'] or 0,
+            'inbound_calls': data['inbound_calls'] or 0,
+            'outbound_calls': data['outbound_calls'] or 0,
+            'total_duration_seconds': data['total_duration_seconds'] or 0,
+            'average_duration_seconds': round(
+                data['average_duration_seconds'] or 0, 2
+            ),
+        })
+
+    @staticmethod
+    def _safe_csv_value(value):
+        """Prevent spreadsheet formula injection in text fields."""
+        if isinstance(value, str):
+            normalized = value.lstrip(' \t\r\n')
+            if normalized.startswith(('=', '+', '-', '@')):
+                return "'" + value
+        return value
+
+    @action(detail=False, methods=['get'])
+    def export_csv(self, request):
+        """Export calls to CSV respecting search, filters, ordering, and branch restrictions."""
+        # Use the same filtering logic as list view
+        queryset = self.filter_queryset(self.get_queryset())
+
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = 'attachment; filename="calls.csv"'
+
+        # Write header
+        writer = csv.writer(response)
+        writer.writerow([
+            'ID', 'Lead ID', 'Lead Name', 'Lead Reference Number',
+            'Call Timestamp', 'Direction', 'Caller', 'Phone Number',
+            'Duration Seconds', 'Outcome', 'Notes', 'Branch Name',
+            'Created By', 'Created At'
+        ])
+
+        # Write data rows efficiently - use iterator to avoid memory issues
+        for call in queryset.iterator(chunk_size=500):
+            writer.writerow([
+                call.id,
+                call.lead.id if call.lead else '',
+                self._safe_csv_value(call.lead.full_name if call.lead else ''),
+                self._safe_csv_value(call.lead.reference_number if call.lead else ''),
+                call.call_timestamp.isoformat() if call.call_timestamp else '',
+                call.get_direction_display(),
+                self._safe_csv_value(call.caller),
+                self._safe_csv_value(call.phone_number),
+                call.duration_seconds,
+                self._safe_csv_value(call.outcome or ''),
+                self._safe_csv_value(call.notes or ''),
+                self._safe_csv_value(call.branch.name if call.branch else ''),
+                self._safe_csv_value(call.created_by.name if call.created_by else ''),
+                call.created_at.isoformat() if call.created_at else '',
+            ])
+
+        return response
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
