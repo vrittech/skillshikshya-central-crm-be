@@ -306,10 +306,24 @@ class FlexibleDurationAPITests(CallDeductionTests):
             self.assertEqual(response.status_code, 201, msg=fmt)
             self.assertEqual(response.data['duration_seconds'], 259, msg=fmt)
 
+    def test_raw_seconds_and_overflow_are_normalized(self):
+        self.counselor.call_seconds_balance = 100 * 60
+        self.counselor.save()
+        for value, expected in (('259', 259), ('7:89', 509)):
+            response = self._post_with_input(value)
+            self.assertEqual(response.status_code, 201, msg=value)
+            self.assertEqual(response.data['duration_seconds'], expected, msg=value)
+
     def test_invalid_duration_input_400(self):
         response = self._post_with_input('not-a-duration')
         self.assertEqual(response.status_code, 400)
         self.assertIn('duration_input', response.data)
+
+    def test_negative_duration_components_are_rejected(self):
+        for value in ('-259', '-1:00', '4:-1', '4.-1', '4m-1s'):
+            response = self._post_with_input(value)
+            self.assertEqual(response.status_code, 400, msg=value)
+            self.assertIn('duration_input', response.data, msg=value)
 
     def test_duration_seconds_still_accepted(self):
         response = self.client.post(

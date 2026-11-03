@@ -34,6 +34,9 @@ def parse_duration_to_seconds(duration_str):
     
     if not s:
         return 0
+
+    if '-' in s:
+        raise ValidationError(f'Duration cannot be negative: {duration_str}')
     
     # H:M:S or M:S format (overflow carries: "7:89" = 8min 29sec)
     if ':' in s:

@@ -1,7 +1,6 @@
 import csv
 from datetime import datetime
 
-from django.http import HttpResponse
 from django.utils import timezone
 
 from rest_framework import viewsets, status
@@ -42,6 +41,14 @@ from apps.lead.filters import (
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission
 from apps.global_config.filters import BranchFilterBackend
+
+from zoneinfo import ZoneInfo
+from django.db.models import (
+    Avg, Case, CharField, Count, F, Q, Sum, Value, When,
+)
+from django.db.models.functions import TruncDate
+from django.http import HttpResponse, StreamingHttpResponse
+from apps.callminutes.utils import format_duration
 
 
 class ConfigViewSet(viewsets.ModelViewSet):
@@ -297,8 +304,173 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
             'lead', 'created_by', 'branch',
         )
 
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        # Apply all existing filters, including branch isolation.
+        queryset = self.filter_queryset(self.get_queryset())
+
+        # Calculate the summary cards.
+        totals = queryset.aggregate(
+            total_calls=Count('id'),
+            inbound_calls=Count(
+                'id',
+                filter=Q(direction='inbound'),
+            ),
+            outbound_calls=Count(
+                'id',
+                filter=Q(direction='outbound'),
+            ),
+            total_talk_time_seconds=Sum('duration_seconds'),
+            average_duration_seconds=Avg('duration_seconds'),
+            connected_calls=Count(
+                'id',
+                filter=Q(duration_seconds__gt=0),
+            ),
+        )
+
+        total_calls = totals['total_calls']
+        connected_calls = totals['connected_calls']
+
+        connect_rate = (
+            round((connected_calls / total_calls) * 100, 2)
+            if total_calls else 0
+        )
+
+        # Group calls by Nepal-local calendar date.
+        calls_per_day = (
+            queryset
+            .order_by()
+            .annotate(
+                day=TruncDate(
+                    'call_timestamp',
+                    tzinfo=ZoneInfo('Asia/Kathmandu'),
+                )
+            )
+            .values('day')
+            .annotate(total_calls=Count('id'))
+            .order_by('day')
+        )
+
+        # Group blank or missing caller names as "Unknown".
+        top_callers = (
+            queryset
+            .order_by()
+            .annotate(
+                caller_display=Case(
+                    When(caller__isnull=True, then=Value('Unknown')),
+                    When(caller='', then=Value('Unknown')),
+                    default=F('caller'),
+                    output_field=CharField(),
+                )
+            )
+            .values('caller_display')
+            .annotate(
+                total_calls=Count('id'),
+                total_talk_time_seconds=Sum('duration_seconds'),
+            )
+            .order_by('-total_calls', 'caller_display')[:10]
+        )
+
+        return Response({
+            'totals': {
+                'total_calls': total_calls,
+                'inbound_calls': totals['inbound_calls'],
+                'outbound_calls': totals['outbound_calls'],
+                'total_talk_time_seconds': (
+                    totals['total_talk_time_seconds'] or 0
+                ),
+                'average_duration_seconds': (
+                    round(totals['average_duration_seconds'], 2)
+                    if totals['average_duration_seconds'] is not None
+                    else 0
+                ),
+                'connected_calls': connected_calls,
+                'connect_rate': connect_rate,
+            },
+            'calls_per_day': list(calls_per_day),
+            'top_callers': list(top_callers),
+        })
+
+    @action(detail=False, methods=['get'], url_path='export')
+    def export(self, request):
+
+        # Apply existing filters and branch restrictions.
+        queryset = self.filter_queryset(self.get_queryset())
+
+        # Prepare a CSV writer that can return individual rows.
+        class Echo:
+            def write(self, value):
+                return value
+
+        writer = csv.writer(Echo())
+
+        # Protect spreadsheet cells against formula injection.
+        def safe_cell(value):
+            if value is None:
+                return ''
+
+            if isinstance(value, str):
+                if value.lstrip(' \t\r\n').startswith(
+                    ('=', '+', '-', '@')
+                ):
+                    return "'" + value
+
+            return value
+
+        # Generate the CSV progressively.
+        def generate_csv():
+            # UTF-8 BOM helps spreadsheet applications recognize Unicode.
+            yield '\ufeff'
+
+            yield writer.writerow([
+                'When',
+                'Direction',
+                'Lead',
+                'Lead Reference',
+                'Phone',
+                'Caller',
+                'Logged By',
+                'Duration',
+                'Duration Seconds',
+                'Outcome',
+                'Recording URL',
+                'Notes',
+            ])
+
+            # Process database records in batches.
+            for call in queryset.iterator(chunk_size=1000):
+                row = [
+                    call.call_timestamp.isoformat() if call.call_timestamp else '',
+                    call.direction,
+                    call.lead.full_name if call.lead_id else '',
+                    call.lead.reference_number if call.lead_id else '',
+                    call.phone_number,
+                    call.caller,
+                    call.created_by.name if call.created_by_id else '',
+                    format_duration(call.duration_seconds),
+                    call.duration_seconds,
+                    call.outcome,
+                    call.recording_url,
+                    call.notes,
+                ]
+
+                yield writer.writerow([
+                    safe_cell(value) for value in row
+                ])
+
+        response = StreamingHttpResponse(
+            generate_csv(),
+            content_type='text/csv; charset=utf-8',
+        )
+
+        response['Content-Disposition'] = (
+            'attachment; filename="calls.csv"'
+        )
+
+        return response
+
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary', 'export']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
 

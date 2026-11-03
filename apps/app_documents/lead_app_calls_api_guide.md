@@ -9,6 +9,8 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | Method | Endpoint | Description | Access |
 |--------|----------|-------------|--------|
 | GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated |
+| GET | `/api/calls/summary/` | Filtered totals, Kathmandu-local daily counts, and top callers | Authenticated |
+| GET | `/api/calls/export/` | Stream all calls matching the supplied filters as CSV | Authenticated |
 | GET | `/api/leads/{lead_id}/calls/` | List calls for one lead (paginated) | Authenticated |
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
@@ -18,7 +20,14 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 
 ## Global Call Log — `GET /api/calls/`
 
-Read-only list of every call across all leads, **branch-scoped** (staff see all / `?branch_id=X`; non-staff locked to their branch). Ordered by `call_timestamp` descending by default.
+Read-only list of calls across leads, ordered by `call_timestamp` descending by default. The API defaults to 10 rows per page (maximum 100); clients may request another page size.
+
+### Branch behavior
+
+- Staff/superusers see all branches unless they pass `branch_id=X`.
+- Non-staff users with an assigned branch are restricted to that branch. A submitted `branch_id` does not override this restriction.
+- **Current behavior for non-staff users without an assigned branch:** the branch filter leaves the queryset unchanged, so they can see calls from all branches. This behavior is shared with the global `BranchFilterBackend`; this endpoint does not change it. Assign an appropriate branch before granting access, or decide and implement a separate unassigned-user policy centrally. Calls with no branch are not included for users scoped to a specific branch.
+- The calls page only displays the branch selector to staff/superusers; the server remains the source of access control.
 
 **Query params:**
 
@@ -28,10 +37,17 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 | `created_by` | User ID — calls logged by that user |
 | `student` | Student ID — calls on the lead linked to that student |
 | `lead` | Lead ID |
-| `call_timestamp__gte` / `__lte` | Date/time range (ISO 8601) |
+| `call_timestamp__gte` / `call_timestamp__lte` | Inclusive date/time range (ISO 8601, timezone-aware values recommended) |
 | `search` | Matches caller, phone number, outcome, notes, lead name & reference number |
 | `ordering` | `call_timestamp`, `duration_seconds`, `created_at` (prefix `-` for desc) |
+| `branch_id` | Staff/superusers only: restrict to one branch |
 | `page` / `page_size` | Standard pagination |
+
+### Summary and CSV export
+
+`GET /api/calls/summary/` accepts the same filters as the global call list, including search, creator, direction, date range, and branch. All totals, top callers, and `calls_per_day` use the filtered queryset. Daily grouping uses the `Asia/Kathmandu` calendar.
+
+`GET /api/calls/export/` accepts the same filters but does not paginate: it streams every matching row, regardless of `page` or `page_size`. The response is UTF-8 CSV with a BOM. Text cells starting (after whitespace) with `=`, `+`, `-`, or `@` are prefixed to prevent spreadsheet formula execution. Query loading uses related lead/user/branch rows and streams records in batches.
 
 **Example response row:**
 ```json
@@ -209,4 +225,4 @@ GET /api/leads/1/calls/?ordering=-call_timestamp
 
 ## DELETE `/api/leads/{lead_id}/calls/{id}/` — Delete Call
 
-**Response:** `204 No Content`
+**Response:** `405 Method Not Allowed` — call records cannot be deleted.
