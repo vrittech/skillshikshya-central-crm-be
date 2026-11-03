@@ -9,6 +9,8 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | Method | Endpoint | Description | Access |
 |--------|----------|-------------|--------|
 | GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated |
+| GET | `/api/calls/summary/` | **Totals and chart data** for the filtered calls (not paginated) | Authenticated |
+| GET | `/api/calls/export/` | **CSV download** of the filtered calls (all pages) | Authenticated |
 | GET | `/api/leads/{lead_id}/calls/` | List calls for one lead (paginated) | Authenticated |
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
@@ -45,6 +47,7 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
     "caller": "Shikhar",
     "phone_number": "9877700111",
     "duration_seconds": 270,
+    "duration_formatted": "04:30",
     "outcome": "Interested",
     "notes": "",
     "branch": 1,
@@ -55,6 +58,53 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
 
+## Call Summary — `GET /api/calls/summary/`
+
+Aggregated numbers for the same set of calls the list would return. It accepts **every filter, search and branch-scoping parameter of `GET /api/calls/`**, so the totals always match the table's row count. The response is one unpaginated object.
+
+A call counts as **connected** when `duration_seconds > 0`. Days in `by_day` are bucketed in **Nepal time (Asia/Kathmandu)**, so a call at 11 pm NPT belongs to that day, not the next one.
+
+**Example response:**
+```json
+{
+    "total_calls": 128,
+    "inbound": 40,
+    "outbound": 88,
+    "total_seconds": 30215,
+    "total_formatted": "08:23:35",
+    "avg_seconds": 236,
+    "connected_calls": 110,
+    "connect_rate": 0.859,
+    "by_day": [
+        { "date": "2026-10-28", "calls": 14, "seconds": 3310 }
+    ],
+    "by_user": [
+        { "user_id": 9, "name": "Shikhar", "calls": 40, "seconds": 9800 }
+    ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `total_formatted` | `total_seconds` as `HH:MM:SS` |
+| `avg_seconds` | `total_seconds / total_calls`, rounded (0 when there are no calls) |
+| `connect_rate` | `connected_calls / total_calls`, 3 decimals (0 when there are no calls) |
+| `by_day` | Calls and seconds per Nepal-time day, oldest first |
+| `by_user` | Top 10 callers by number of calls. Calls with no `created_by` appear as `user_id: null`, `name: "Unknown"` |
+
+With no matching calls, every number is `0` and `by_day` / `by_user` are empty arrays.
+
+## Export Calls — `GET /api/calls/export/`
+
+Downloads every call matching the current filters (all pages) as a CSV. It accepts the same filter, search and branch-scoping parameters as `GET /api/calls/`.
+
+- **Filename:** `calls-YYYY-MM-DD.csv` (date in Nepal time)
+- **Encoding:** UTF-8 with a BOM, so Excel shows Devanagari names correctly
+- **Streaming:** rows are streamed in chunks, with a fixed number of database queries however many rows match
+- **Columns, in order:** Date & time (NPT) · Direction · Lead · Reference · Phone · Caller · Logged by · Duration (MM:SS) · Seconds · Outcome · Notes · Recording
+- **Formula safety:** text cells starting with `=`, `+`, `-` or `@` are prefixed with `'` so spreadsheets show them as plain text and never run them
+
+> Fetch it with an authenticated request (for example axios with `responseType: "blob"`), not a plain link, so the login-cookie refresh still applies.
 ## Call Minutes Deduction
 
 Creating a call **deducts minutes from the requesting user's balance**:
