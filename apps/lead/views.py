@@ -1,7 +1,10 @@
 import csv
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from django.http import HttpResponse
+from django.db.models import Avg, Count, Q, Sum
+from django.db.models.functions import Coalesce, TruncDate
+from django.http import HttpResponse, StreamingHttpResponse
 from django.utils import timezone
 
 from rest_framework import viewsets, status
@@ -11,6 +14,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from django_filters.rest_framework import DjangoFilterBackend
+
+from apps.callminutes.utils import format_duration
 
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
@@ -298,9 +303,151 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary', 'export']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
+        npt_tz = ZoneInfo("Asia/Kathmandu")
+
+        aggregates = queryset.aggregate(
+            total_calls=Count('id'),
+            inbound=Count('id', filter=Q(direction='inbound')),
+            outbound=Count('id', filter=Q(direction='outbound')),
+            total_seconds=Coalesce(Sum('duration_seconds'), 0),
+            avg_seconds=Coalesce(Avg('duration_seconds'), 0.0),
+            connected_calls=Count('id', filter=Q(duration_seconds__gt=0)),
+        )
+
+        total_calls = aggregates['total_calls'] or 0
+        inbound = aggregates['inbound'] or 0
+        outbound = aggregates['outbound'] or 0
+        total_seconds = aggregates['total_seconds'] or 0
+        avg_seconds = int(round(aggregates['avg_seconds'] or 0))
+        connected_calls = aggregates['connected_calls'] or 0
+        connect_rate = round(connected_calls / total_calls, 3) if total_calls > 0 else 0.0
+
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        total_formatted = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        by_day_qs = (
+            queryset.annotate(day=TruncDate('call_timestamp', tzinfo=npt_tz))
+            .values('day')
+            .annotate(
+                calls=Count('id'),
+                seconds=Coalesce(Sum('duration_seconds'), 0),
+            )
+            .order_by('day')
+        )
+        by_day = [
+            {
+                "date": row['day'].strftime('%Y-%m-%d'),
+                "calls": row['calls'],
+                "seconds": row['seconds'],
+            }
+            for row in by_day_qs
+            if row['day'] is not None
+        ]
+
+        by_user_qs = (
+            queryset.values('created_by', 'created_by__name')
+            .annotate(
+                calls=Count('id'),
+                seconds=Coalesce(Sum('duration_seconds'), 0),
+            )
+            .order_by('-calls', 'created_by__name')[:10]
+        )
+        by_user = [
+            {
+                "user_id": row['created_by'],
+                "name": (row['created_by__name'] or f"User {row['created_by']}") if row['created_by'] else "Unknown",
+                "calls": row['calls'],
+                "seconds": row['seconds'],
+            }
+            for row in by_user_qs
+        ]
+
+        return Response({
+            "total_calls": total_calls,
+            "inbound": inbound,
+            "outbound": outbound,
+            "total_seconds": total_seconds,
+            "total_formatted": total_formatted,
+            "avg_seconds": avg_seconds,
+            "connected_calls": connected_calls,
+            "connect_rate": connect_rate,
+            "by_day": by_day,
+            "by_user": by_user,
+        })
+
+    @action(detail=False, methods=['get'])
+    def export(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).select_related('lead', 'created_by', 'branch')
+        npt_tz = ZoneInfo("Asia/Kathmandu")
+        now_npt = timezone.now().astimezone(npt_tz)
+        filename = f"calls-{now_npt.strftime('%Y-%m-%d')}.csv"
+
+        def sanitize_cell(value):
+            if value is None:
+                return ''
+            s = str(value)
+            if s and s[0] in ('=', '+', '-', '@'):
+                return "'" + s
+            return s
+
+        class Echo:
+            def write(self, value):
+                return value
+
+        def stream_csv():
+            yield '\ufeff'  # UTF-8 BOM
+            writer = csv.writer(Echo())
+            headers = [
+                'Date & time (NPT)',
+                'Direction',
+                'Lead',
+                'Reference',
+                'Phone',
+                'Caller',
+                'Logged by',
+                'Duration (MM:SS)',
+                'Seconds',
+                'Outcome',
+                'Notes',
+                'Recording',
+            ]
+            yield writer.writerow(headers)
+            for call in queryset.iterator(chunk_size=1000):
+                if call.call_timestamp:
+                    dt_str = call.call_timestamp.astimezone(npt_tz).strftime('%Y-%m-%d %H:%M:%S')
+                else:
+                    dt_str = ''
+                row = [
+                    dt_str,
+                    sanitize_cell(call.direction),
+                    sanitize_cell(call.lead.full_name if call.lead else ''),
+                    sanitize_cell(call.lead.reference_number if call.lead else ''),
+                    sanitize_cell(call.phone_number),
+                    sanitize_cell(call.caller),
+                    sanitize_cell(call.created_by.name if call.created_by else ''),
+                    format_duration(call.duration_seconds),
+                    call.duration_seconds if call.duration_seconds is not None else 0,
+                    sanitize_cell(call.outcome),
+                    sanitize_cell(call.notes),
+                    sanitize_cell(call.recording_url),
+                ]
+                yield writer.writerow(row)
+
+        response = StreamingHttpResponse(
+            stream_csv(),
+            content_type='text/csv; charset=utf-8',
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
 
 
 class NotificationViewSet(viewsets.ModelViewSet):

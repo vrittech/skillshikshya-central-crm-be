@@ -9,6 +9,8 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | Method | Endpoint | Description | Access |
 |--------|----------|-------------|--------|
 | GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated |
+| GET | `/api/calls/summary/` | **Call activity summary & statistics** | Authenticated |
+| GET | `/api/calls/export/` | **Export filtered calls to CSV** (streaming) | Authenticated |
 | GET | `/api/leads/{lead_id}/calls/` | List calls for one lead (paginated) | Authenticated |
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
@@ -31,6 +33,7 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 | `call_timestamp__gte` / `__lte` | Date/time range (ISO 8601) |
 | `search` | Matches caller, phone number, outcome, notes, lead name & reference number |
 | `ordering` | `call_timestamp`, `duration_seconds`, `created_at` (prefix `-` for desc) |
+| `branch_id` | Branch ID (staff/superuser only) |
 | `page` / `page_size` | Standard pagination |
 
 **Example response row:**
@@ -45,15 +48,91 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
     "caller": "Shikhar",
     "phone_number": "9877700111",
     "duration_seconds": 270,
+    "duration_formatted": "04:30",
     "outcome": "Interested",
     "notes": "",
+    "recording_url": null,
+    "next_followup_at": null,
+    "next_action": null,
     "branch": 1,
     "created_by": 9,
-    "created_by_name": "Shikhar"
+    "created_by_name": "Shikhar",
+    "created_at": "2026-08-26T05:48:13Z"
 }
 ```
 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
+
+## Team Call Activity Summary — `GET /api/calls/summary/`
+
+Calculates real-time aggregation metrics across calls respecting active filters and branch scoping:
+
+- **Permissions:** Authenticated. Non-staff users only see aggregations for calls in their assigned branch; staff see all branches by default and can filter with `?branch_id=X`.
+- **Query params:** Identical to `/api/calls/` (`direction`, `created_by`, `student`, `lead`, `call_timestamp__gte`, `call_timestamp__lte`, `search`, `branch_id`).
+
+**Response fields:**
+- `total_calls`: Total number of matching calls.
+- `inbound`: Count of inbound calls.
+- `outbound`: Count of outbound calls.
+- `total_seconds`: Total call talk time in seconds.
+- `total_formatted`: Total duration formatted as `"HH:MM:SS"` (e.g. `"08:23:35"`).
+- `avg_seconds`: Average call duration in seconds.
+- `connected_calls`: Calls where `duration_seconds > 0`.
+- `connect_rate`: Fraction of connected calls (`connected_calls / total_calls`, rounded to 3 decimals, or `0.0`).
+- `by_day`: Array of `{"date": "YYYY-MM-DD", "calls": int, "seconds": int}` grouped by Nepal calendar day (`Asia/Kathmandu`, UTC+05:45).
+- `by_user`: Top 10 callers by call count: `{"user_id": int | null, "name": str, "calls": int, "seconds": int}`. Unattributed calls appear with `user_id: null, name: "Unknown"`.
+
+**Example response:**
+```json
+{
+  "total_calls": 128,
+  "inbound": 40,
+  "outbound": 88,
+  "total_seconds": 30215,
+  "total_formatted": "08:23:35",
+  "avg_seconds": 236,
+  "connected_calls": 110,
+  "connect_rate": 0.859,
+  "by_day": [
+    {
+      "date": "2026-10-28",
+      "calls": 14,
+      "seconds": 3310
+    }
+  ],
+  "by_user": [
+    {
+      "user_id": 9,
+      "name": "Shikhar",
+      "calls": 40,
+      "seconds": 9800
+    }
+  ]
+}
+```
+
+## CSV Export — `GET /api/calls/export/`
+
+Streams matching call records across all pages into a CSV spreadsheet.
+
+- **Permissions:** Authenticated, branch-scoped identically to the call list and summary.
+- **Query params:** Supports all filter and search parameters from the list view (`direction`, `created_by`, `search`, `call_timestamp__gte`, `call_timestamp__lte`, `branch_id`, etc.).
+- **Filename:** `calls-YYYY-MM-DD.csv` (using current date in Nepal time).
+- **Encoding & Compatibility:** Pre-pended with UTF-8 BOM (`\xef\xbb\xbf`) for native Excel Unicode/Nepali rendering.
+- **Security:** Formula injection neutralization applied: any text cell starting with `=`, `+`, `-`, or `@` is prefixed with `'`.
+- **Columns (in exact order):**
+  1. `Date & time (NPT)` (`YYYY-MM-DD HH:MM:SS` in `Asia/Kathmandu` timezone)
+  2. `Direction`
+  3. `Lead`
+  4. `Reference`
+  5. `Phone`
+  6. `Caller`
+  7. `Logged by`
+  8. `Duration (MM:SS)`
+  9. `Seconds`
+  10. `Outcome`
+  11. `Notes`
+  12. `Recording`
 
 ## Call Minutes Deduction
 
