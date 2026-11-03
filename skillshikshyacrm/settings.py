@@ -230,7 +230,7 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'apps.account.authentication.CookieJWTAuthentication',
-        'rest_framework.authentication.SessionAuthentication',
+        'apps.account.authentication.CsrfExemptSessionAuthentication',
     ],
     'DEFAULT_PAGINATION_CLASS': 'apps.global_config.pagination.CustomPagination',
     'PAGE_SIZE': 10,
@@ -262,6 +262,13 @@ SIMPLE_JWT = {
 
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:5173',
+]
+
+CSRF_TRUSTED_ORIGINS = [
     'http://localhost:3000',
     'http://localhost:5173',
     'http://127.0.0.1:3000',
