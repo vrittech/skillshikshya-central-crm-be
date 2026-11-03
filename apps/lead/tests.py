@@ -146,6 +146,14 @@ class GlobalCallListTests(APITestCase):
             phone_number='9822222222', duration_seconds=60,
             created_by=self.admin, branch=self.branch,
         )
+    def test_summary_total_matches_list(self):
+        summary = self.client.get('/api/calls/summary/')
+        listing = self.client.get('/api/calls/')
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(summary.data['total_calls'], listing.data['count'])
+        self.assertEqual(summary.data['inbound'], 1)
+        self.assertEqual(summary.data['outbound'], 1)
+        self.assertEqual(summary.data['talk_seconds'], 330)
 
     def test_list_returns_all_calls_newest_first(self):
         response = self.client.get('/api/calls/')
@@ -196,3 +204,112 @@ class GlobalCallListTests(APITestCase):
         self.client.force_authenticate(other_admin)
         response = self.client.get('/api/calls/')
         self.assertNotIn(self.recent_call.id, [r['id'] for r in response.data['results']])
+
+    def test_summary_total_matches_list(self):
+            summary = self.client.get('/api/calls/summary/')
+            listing = self.client.get('/api/calls/')
+            self.assertEqual(summary.status_code, 200)
+            self.assertEqual(summary.data['total_calls'], listing.data['count'])
+            self.assertEqual(summary.data['inbound'], 1)
+            self.assertEqual(summary.data['outbound'], 1)
+            self.assertEqual(summary.data['talk_seconds'], 330)
+            
+    def test_branch_scoping_list_summary_export(self):
+        from apps.branch.models import Branch
+        from apps.lead.models import LeadCall
+        from django.utils import timezone as tz
+
+        dharan = Branch.objects.create(name='Dharan', code='DHR')
+        dharan_user = User.objects.create_user(
+            email='dhr@test.com', name='Dharan User', password='x', branch=dharan,
+        )
+        dharan_call = LeadCall.objects.create(
+            lead=self.lead, call_timestamp=tz.now(), direction='outbound',
+            caller='Dharan User', phone_number='9833333333',
+            duration_seconds=100, created_by=dharan_user, branch=dharan,
+        )
+        self.client.force_authenticate(dharan_user)
+
+        listing = self.client.get('/api/calls/')
+        self.assertEqual([r['id'] for r in listing.data['results']], [dharan_call.id])
+
+        summary = self.client.get('/api/calls/summary/')
+        self.assertEqual(summary.data['total_calls'], 1)
+        self.assertEqual(summary.data['talk_seconds'], 100)
+
+        export = self.client.get('/api/calls/export/')
+        body = export.content.decode('utf-8')
+        self.assertIn('9833333333', body)
+        self.assertNotIn('9811111111', body) 
+        self.assertNotIn('9822222222', body)
+        
+        
+    def test_staff_branch_id_filter(self):  # self.client is still logged in as staff admin from setUp
+        from apps.branch.models import Branch
+        from apps.lead.models import LeadCall
+        from django.utils import timezone as tz
+
+        dharan = Branch.objects.create(name='Dharan', code='DHR')
+        dharan_call = LeadCall.objects.create(
+            lead=self.lead, call_timestamp=tz.now(), direction='outbound',
+            caller='X', phone_number='9833333333', duration_seconds=100,
+            created_by=self.admin, branch=dharan,
+        )
+       
+        everything = self.client.get('/api/calls/')
+        self.assertEqual(everything.data['count'], 3)
+        only = self.client.get(f'/api/calls/?branch_id={dharan.id}')
+        self.assertEqual([r['id'] for r in only.data['results']], [dharan_call.id])
+        
+    def test_export_escapes_formula_and_has_header(self):
+        from apps.lead.models import LeadCall
+        from django.utils import timezone as tz
+
+        LeadCall.objects.create(
+            lead=self.lead, call_timestamp=tz.now(), direction='outbound',
+            caller='X', phone_number='9844444444', duration_seconds=10,
+            notes='=1+1', created_by=self.admin, branch=self.branch,
+        )
+        response = self.client.get('/api/calls/export/')
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode('utf-8')
+        self.assertIn('Date & time (NPT)', body)
+        self.assertIn("'=1+1", body)    
+    
+    def test_summary_days_use_nepal_time(self):
+        from datetime import datetime
+        from apps.lead.filters import NPT
+        from apps.lead.models import LeadCall
+
+        # 00:30 NPT on 15 Jan is still 14 Jan in UTC
+        LeadCall.objects.create(
+            lead=self.lead, call_timestamp=datetime(2026, 1, 15, 0, 30, tzinfo=NPT),
+            direction='inbound', caller='X', phone_number='9855555555',
+            duration_seconds=5, created_by=self.admin, branch=self.branch,
+        )
+        response = self.client.get('/api/calls/summary/')
+        days = {d['date']: d['count'] for d in response.data['calls_per_day']}
+        self.assertEqual(days.get('2026-01-15'), 1)
+        self.assertNotIn('2026-01-14', days)   
+        
+    def test_query_count_is_fixed(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from django.utils import timezone as tz
+        from apps.lead.models import LeadCall
+
+        def queries(url):
+            with CaptureQueriesContext(connection) as ctx:
+                self.client.get(url)
+            return len(ctx)
+
+        urls = ('/api/calls/', '/api/calls/summary/', '/api/calls/export/')
+        before = [queries(u) for u in urls]
+        for i in range(30):
+            LeadCall.objects.create(
+                lead=self.lead, call_timestamp=tz.now(), direction='outbound',
+                caller='X', phone_number=f'98000000{i:02d}', duration_seconds=i,
+                created_by=self.counselor, branch=self.branch,
+            )
+        after = [queries(u) for u in urls]
+        self.assertEqual(before, after) 

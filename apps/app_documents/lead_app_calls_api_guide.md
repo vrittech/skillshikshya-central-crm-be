@@ -9,6 +9,8 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | Method | Endpoint | Description | Access |
 |--------|----------|-------------|--------|
 | GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated |
+| GET | `/api/calls/summary/` | Totals, daily counts and top callers for the filtered calls | Authenticated |
+| GET | `/api/calls/export/` | Download the filtered calls as CSV (all pages) | Authenticated |
 | GET | `/api/leads/{lead_id}/calls/` | List calls for one lead (paginated) | Authenticated |
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
@@ -32,6 +34,8 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 | `search` | Matches caller, phone number, outcome, notes, lead name & reference number |
 | `ordering` | `call_timestamp`, `duration_seconds`, `created_at` (prefix `-` for desc) |
 | `page` / `page_size` | Standard pagination |
+| `from_date` / `to_date` | `YYYY-MM-DD`, inclusive, counted in Nepal time (`to_date` includes the whole day up to 23:59:59) |
+| `branch_id` | Staff only: narrow to one branch |
 
 **Example response row:**
 ```json
@@ -54,6 +58,46 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 ```
 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
+
+## Calls Summary: `GET /api/calls/summary/`
+
+Aggregated numbers for the same calls the list would return. It accepts every filter and search parameter of `GET /api/calls/` and applies the same branch scoping, so `total_calls` always equals the list `count`.
+
+**Example response:**
+
+    {
+        "total_calls": 128,
+        "inbound": 40,
+        "outbound": 88,
+        "talk_seconds": 30240,
+        "avg_seconds": 236,
+        "connect_rate": 81.3,
+        "calls_per_day": [
+            {"date": "2026-11-02", "count": 14},
+            {"date": "2026-11-03", "count": 9}
+        ],
+        "top_callers": [
+            {"user_id": 9, "name": "Shikhar", "count": 52}
+        ]
+    }
+
+- A call is *connected* when `duration_seconds > 0`. `connect_rate` is a percentage.
+- Days are counted in Nepal time (`Asia/Kathmandu`), so a call at 11 pm NPT belongs to that day.
+- `top_callers` are the top 10 users by number of calls logged.
+- With no matching calls, all numbers are `0` and both lists are empty.
+
+## Calls Export: `GET /api/calls/export/`
+
+Downloads every call matching the filters (not just one page) as `calls-YYYY-MM-DD.csv`. It accepts the same filters and branch scoping as the list.
+
+**Columns, in order:** Date & time (NPT), Direction, Lead, Reference, Phone, Caller, Logged by, Duration (MM:SS), Seconds, Outcome, Notes, Recording.
+
+- The file starts with a UTF-8 BOM so Excel shows Nepali (Devanagari) text correctly.
+- A text cell starting with `=`, `+`, `-` or `@` is prefixed with `'` so it is never run as a spreadsheet formula.
+- Rows are streamed from the database with `select_related`, so the number of queries stays fixed however many rows are exported.
+
+
+
 
 ## Call Minutes Deduction
 

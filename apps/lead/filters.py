@@ -4,8 +4,16 @@ from apps.lead.models import (
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
 )
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 
+NPT = ZoneInfo("Asia/Kathmandu")
+
+
+def npt_day_start(d):
+     return datetime.combine(d, datetime.min.time(), tzinfo=NPT)
+ 
 class LearningModeFilter(django_filters.FilterSet):
     name = django_filters.CharFilter(lookup_expr='icontains')
 
@@ -172,6 +180,14 @@ class GlobalCallFilter(django_filters.FilterSet):
     created_by = django_filters.NumberFilter(field_name='created_by')
     student = django_filters.NumberFilter(field_name='lead__students')
 
+    from_date = django_filters.DateFilter(method="filter_from_date")
+    to_date = django_filters.DateFilter(method="filter_to_date")
+
+    def filter_from_date(self, qs, name, value):
+        return qs.filter(call_timestamp__gte=npt_day_start(value))
+
+    def filter_to_date(self, qs, name, value):
+        return qs.filter(call_timestamp__lt=npt_day_start(value) + timedelta(days=1)) #when next day start 23 59 59 is kept
     class Meta:
         model = LeadCall
         fields = ['lead', 'direction', 'outcome']
