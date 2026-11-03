@@ -9,6 +9,8 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | Method | Endpoint | Description | Access |
 |--------|----------|-------------|--------|
 | GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated |
+| GET | `/api/calls/summary/` | **Summary of the filtered calls**: totals, talk time, connect rate, calls per day, top callers | Authenticated |
+| GET | `/api/calls/export/` | **Download all filtered calls as CSV** | Authenticated |
 | GET | `/api/leads/{lead_id}/calls/` | List calls for one lead (paginated) | Authenticated |
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
@@ -56,7 +58,49 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
 
 ## Call Minutes Deduction
+## Call Summary — `GET /api/calls/summary/`
 
+Totals for the calls that match the filters. Takes the **same query params as `GET /api/calls/`** and is **branch-scoped** in the same way. Paging and ordering have no effect, because the summary always covers all matching calls. Days are in Nepal time (NPT).
+
+**Example response:**
+```json
+{
+    "total_calls": 51,
+    "inbound": 25,
+    "outbound": 26,
+    "talk_seconds": 18279,
+    "average_seconds": 358,
+    "connected_calls": 36,
+    "connect_rate": 70.6,
+    "calls_per_day": [
+        { "date": "2026-11-02", "count": 1 },
+        { "date": "2026-11-03", "count": 3 }
+    ],
+    "top_callers": [
+        { "caller": "Shikhar", "calls": 12, "talk_seconds": 4210 }
+    ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `talk_seconds` | Sum of all call durations, in seconds |
+| `average_seconds` | Talk time divided by total calls, rounded to whole seconds (`0` when there are no calls) |
+| `connected_calls` | Calls with `duration_seconds > 0` |
+| `connect_rate` | `connected_calls` as a **percent** of `total_calls`, 1 decimal (`70.6` means 70.6%). `0` when there are no calls |
+| `calls_per_day` | Calls per Nepal-time day |
+| `top_callers` | Up to 10 callers, most calls first |
+
+With no matching calls every number is `0` and both lists are empty.
+
+## Call Export — `GET /api/calls/export/`
+
+Downloads **every** call that matches the filters as a CSV file, not just one page. Takes the same query params as `GET /api/calls/` and is branch-scoped in the same way. The file is streamed, so large exports do not load into memory.
+
+- **Content-Disposition:** `attachment; filename="calls-YYYY-MM-DD.csv"`
+- **Encoding:** UTF-8 with a BOM, so Excel and Google Sheets open it correctly.
+- **Columns:** Date & time (NPT), Direction, Lead, Reference, Phone, Caller, Logged by, Duration (MM:SS), Seconds, Outcome, Notes, Recording.
+- **Spreadsheet safety:** a cell that starts with `=`, `+`, `-` or `@` gets a `'` in front, so it can't run as a formula. Phone numbers that start with `+` therefore appear as `'+977...`.
 Creating a call **deducts minutes from the requesting user's balance**:
 
 - Minutes charged = the call's **exact `duration_seconds`** (no rounding). A 4m30s (270s) call deducts exactly 270 seconds; a 0-second call is recorded but deducts nothing.

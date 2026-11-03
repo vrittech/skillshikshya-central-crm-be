@@ -1,3 +1,5 @@
+from django.http import StreamingHttpResponse
+from apps.lead.call_reports import build_summary, csv_rows, export_filename
 import csv
 from datetime import datetime
 
@@ -298,9 +300,24 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary', 'export']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        """Totals, calls per day (Nepal time) and top callers for the current filters."""
+        return Response(build_summary(self.filter_queryset(self.get_queryset())))
+
+    @action(detail=False, methods=['get'])
+    def export(self, request):
+        """Every call matching the current filters, as a CSV (not paginated)."""
+        response = StreamingHttpResponse(
+            csv_rows(self.filter_queryset(self.get_queryset())),
+            content_type='text/csv; charset=utf-8',
+        )
+        response['Content-Disposition'] = f'attachment; filename="{export_filename()}"'
+        return response
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
