@@ -9,6 +9,8 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | Method | Endpoint | Description | Access |
 |--------|----------|-------------|--------|
 | GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated |
+| GET | `/api/calls/summary/` | Summary of matching calls, grouped by Nepal-time day and caller | Authenticated |
+| GET | `/api/calls/export/` | Download all matching calls as a UTF-8 CSV | Authenticated |
 | GET | `/api/leads/{lead_id}/calls/` | List calls for one lead (paginated) | Authenticated |
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
@@ -54,6 +56,35 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 ```
 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
+
+## Call Summary — `GET /api/calls/summary/`
+
+Returns one unpaginated summary object for the calls matching the same filters and branch scope as the global call list. Dates in `by_day` use Nepal time (`Asia/Kathmandu`).
+
+The response includes total, inbound and outbound counts; total and average duration; connected-call count and rate; calls grouped by day; and calls grouped by user. Calls without a `created_by` user appear as `"Unknown"` with `user_id: null`.
+
+Example response:
+```json
+{
+    "total_calls": 128,
+    "inbound": 40,
+    "outbound": 88,
+    "total_seconds": 30215,
+    "total_formatted": "08:23:35",
+    "avg_seconds": 236,
+    "connected_calls": 110,
+    "connect_rate": 0.859,
+    "by_day": [
+        {"date": "2026-10-29", "calls": 14, "seconds": 3310}
+    ],
+    "by_user": [
+        {"user_id": 9, "name": "Shikhar", "calls": 40, "seconds": 9800}
+    ]
+} 
+```
+## Call CSV Export — `GET /api/calls/export/`
+Downloads all calls matching the list filters and branch scope, without pagination. The CSV includes Nepal-time call timestamps and the columns listed in the header row. The file is named `calls-YYYY-MM-DD.csv` and includes a UTF-8 BOM for spreadsheet compatibility.
+Text cells beginning with `=`, `+`, `-`, or `@` are prefixed with an apostrophe to prevent spreadsheet formulas from running.
 
 ## Call Minutes Deduction
 
