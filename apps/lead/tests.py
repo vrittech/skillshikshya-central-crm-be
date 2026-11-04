@@ -178,6 +178,211 @@ class GlobalCallListTests(APITestCase):
             [r['id'] for r in response.data['results']], [self.recent_call.id],
         )
 
+    def _call_at(self, year, month, day, hour, minute):
+        from datetime import datetime
+        from apps.lead.filters import NEPAL_TZ
+        from apps.lead.models import LeadCall
+        when = datetime(year, month, day, hour, minute, tzinfo=NEPAL_TZ)
+        return LeadCall.objects.create(
+            lead=self.lead, call_timestamp=when, direction='outbound',
+            caller='Counselor Nine', phone_number='9811111111', duration_seconds=30,
+            created_by=self.counselor, branch=self.branch,
+        )
+
+    def _call_in_other_branch(self):
+        from apps.branch.models import Branch
+        other_branch = Branch.objects.create(name='Dharan', code='DHR')
+        call = self._call_at(2020, 1, 15, 10, 0)
+        call.branch = other_branch
+        call.notes = 'Dharan only'
+        call.save(update_fields=['branch', 'notes'])
+        return other_branch, call
+
+    def _export_lines(self, params=''):
+        response = self.client.get(f'/api/calls/export/{params}')
+        self.assertEqual(response.status_code, 200)
+        return response.getvalue().decode('utf-8').splitlines()
+
+    def test_date_to_includes_end_of_day_npt(self):
+        late_call = self._call_at(2020, 1, 15, 23, 59)
+        response = self.client.get('/api/calls/?date_from=2020-01-15&date_to=2020-01-15')
+        self.assertEqual([r['id'] for r in response.data['results']], [late_call.id])
+
+    def test_date_filters_use_npt_days(self):
+        # 00:10 NPT on Jan 16 is still Jan 15 in UTC
+        early_call = self._call_at(2020, 1, 16, 0, 10)
+        response = self.client.get('/api/calls/?date_from=2020-01-15&date_to=2020-01-15')
+        self.assertEqual(response.data['count'], 0)
+        jan_16 = self.client.get('/api/calls/?date_from=2020-01-16&date_to=2020-01-16')
+        self.assertEqual([r['id'] for r in jan_16.data['results']], [early_call.id])
+
+    def test_summary(self):
+        response = self.client.get('/api/calls/summary/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['total_calls'], 2)
+        self.assertEqual(response.data['inbound'], 1)
+        self.assertEqual(response.data['outbound'], 1)
+        self.assertEqual(response.data['total_seconds'], 330)
+        self.assertEqual(response.data['average_seconds'], 165)
+        self.assertEqual(response.data['connected'], 2)
+        self.assertEqual(response.data['connect_rate'], 100.0)
+        self.assertEqual(
+            [(c['user_id'], c['count']) for c in response.data['top_callers']],
+            [(self.admin.id, 1), (self.counselor.id, 1)],
+        )
+
+    def test_summary_empty(self):
+        response = self.client.get('/api/calls/summary/?date_from=1999-01-01&date_to=1999-01-01')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['total_calls'], 0)
+        self.assertEqual(response.data['average_seconds'], 0)
+        self.assertEqual(response.data['connect_rate'], 0)
+        self.assertEqual(response.data['calls_per_day'], [])
+        self.assertEqual(response.data['top_callers'], [])
+
+    def test_summary_npt_days(self):
+        # 00:30 NPT on Jan 16 is still Jan 15 in UTC
+        self._call_at(2020, 1, 15, 23, 30)
+        self._call_at(2020, 1, 16, 0, 30)
+        response = self.client.get('/api/calls/summary/?date_from=2020-01-15&date_to=2020-01-16')
+        self.assertEqual(response.data['calls_per_day'], [
+            {'date': '2020-01-15', 'count': 1},
+            {'date': '2020-01-16', 'count': 1},
+        ])
+
+    def test_summary_matches_list_count(self):
+        self._call_at(2020, 1, 15, 10, 0)
+        for params in ('', '?direction=outbound', '?search=Counselor Nine', '?date_to=2020-01-15'):
+            list_count = self.client.get(f'/api/calls/{params}').data['count']
+            summary = self.client.get(f'/api/calls/summary/{params}').data
+            self.assertEqual(summary['total_calls'], list_count, msg=params)
+
+    def test_summary_branch_scoping_for_non_staff(self):
+        self._call_in_other_branch()
+        branch_user = User.objects.create_user(
+            email='brt@test.com', name='BRT User', password='x', branch=self.branch,
+        )
+        self.client.force_authenticate(branch_user)
+        response = self.client.get('/api/calls/summary/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['total_calls'], 2)
+        self.assertEqual(response.data['total_seconds'], 330)
+        self.assertNotIn('2020-01-15', [d['date'] for d in response.data['calls_per_day']])
+
+    def test_summary_query_count(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        with CaptureQueriesContext(connection) as before:
+            self.client.get('/api/calls/summary/')
+        for minute in range(20):
+            self._call_at(2020, 1, 15, 10, minute)
+        with self.assertNumQueries(len(before)):
+            self.client.get('/api/calls/summary/')
+
+    def test_export_header(self):
+        lines = self._export_lines()
+        self.assertEqual(
+            lines[0],
+            '\ufeffDate & time (NPT),Direction,Lead,Reference,Phone,Caller,'
+            'Logged by,Duration (MM:SS),Seconds,Outcome,Notes,Recording',
+        )
+        self.assertEqual(len(lines), 1 + 2)
+
+    def test_export_row(self):
+        self._call_at(2020, 1, 15, 23, 59)
+        lines = self._export_lines('?date_from=2020-01-15&date_to=2020-01-15')
+        self.assertEqual(
+            lines[1],
+            f'2020-01-15 23:59,Outbound,Call Person,{self.lead.reference_number},'
+            '9811111111,Counselor Nine,Counselor Nine,00:30,30,,,',
+        )
+
+    def test_export_filename(self):
+        from django.utils import timezone as tz
+        from apps.lead.filters import NEPAL_TZ
+        response = self.client.get('/api/calls/export/')
+        today = tz.now().astimezone(NEPAL_TZ).strftime('%Y-%m-%d')
+        self.assertEqual(response['Content-Disposition'], f'attachment; filename="calls-{today}.csv"')
+
+    def test_export_formula_escaping(self):
+        call = self._call_at(2020, 1, 15, 10, 0)
+        call.notes = '=SUM(1)'
+        call.save(update_fields=['notes'])
+        lines = self._export_lines('?date_from=2020-01-15&date_to=2020-01-15')
+        self.assertIn(",'=SUM(1),", lines[1])
+
+    def test_export_branch_scoping_for_non_staff(self):
+        self._call_in_other_branch()
+        branch_user = User.objects.create_user(
+            email='brt@test.com', name='BRT User', password='x', branch=self.branch,
+        )
+        self.client.force_authenticate(branch_user)
+        lines = self._export_lines()
+        self.assertEqual(len(lines), 1 + 2)
+        self.assertNotIn('Dharan only', '\n'.join(lines))
+
+    def test_export_query_count(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        for minute in range(3):
+            self._call_at(2020, 1, 15, 10, minute)
+        with CaptureQueriesContext(connection) as queries:
+            self.assertEqual(len(self._export_lines()), 1 + 5)
+        for minute in range(45):
+            self._call_at(2020, 1, 15, 11, minute)
+        with self.assertNumQueries(len(queries)):
+            self.assertEqual(len(self._export_lines()), 1 + 50)
+
+    def test_list_branch_scoping_for_non_staff(self):
+        self._call_in_other_branch()
+        branch_user = User.objects.create_user(
+            email='brt@test.com', name='BRT User', password='x', branch=self.branch,
+        )
+        self.client.force_authenticate(branch_user)
+        response = self.client.get('/api/calls/')
+        self.assertEqual(response.status_code, 200)
+        ids = [r['id'] for r in response.data['results']]
+        self.assertEqual(ids, [self.recent_call.id, self.old_call.id])
+
+    def test_branch_id_ignored_for_non_staff(self):
+        other_branch, other_call = self._call_in_other_branch()
+        branch_user = User.objects.create_user(
+            email='brt@test.com', name='BRT User', password='x', branch=self.branch,
+        )
+        self.client.force_authenticate(branch_user)
+        response = self.client.get(f'/api/calls/?branch_id={other_branch.id}')
+        self.assertNotIn(other_call.id, [r['id'] for r in response.data['results']])
+
+    def test_staff_branch_id_filter(self):
+        other_branch, other_call = self._call_in_other_branch()
+        # staff sees all
+        self.assertEqual(self.client.get('/api/calls/').data['count'], 3)
+        self.assertEqual(self.client.get('/api/calls/summary/').data['total_calls'], 3)
+        self.assertEqual(len(self._export_lines()), 1 + 3)
+        # staff filtered by branch_id
+        filtered = self.client.get(f'/api/calls/?branch_id={other_branch.id}')
+        self.assertEqual([r['id'] for r in filtered.data['results']], [other_call.id])
+        summary = self.client.get(f'/api/calls/summary/?branch_id={other_branch.id}')
+        self.assertEqual(summary.data['total_calls'], 1)
+        self.assertEqual(summary.data['calls_per_day'], [{'date': '2020-01-15', 'count': 1}])
+        lines = self._export_lines(f'?branch_id={other_branch.id}')
+        self.assertEqual(len(lines), 2)
+        self.assertIn('Dharan only', lines[1])
+
+    def test_list_query_count(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        for minute in range(3):
+            self._call_at(2020, 1, 15, 10, minute)
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get('/api/calls/?page_size=100')
+        self.assertEqual(len(response.data['results']), 5)
+        for minute in range(45):
+            self._call_at(2020, 1, 15, 11, minute)
+        with self.assertNumQueries(len(queries)):
+            response = self.client.get('/api/calls/?page_size=100')
+        self.assertEqual(len(response.data['results']), 50)
+
     def test_search(self):
         response = self.client.get('/api/calls/?search=Counselor Nine')
         self.assertEqual(response.data['count'], 1)

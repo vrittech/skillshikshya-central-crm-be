@@ -1,7 +1,10 @@
 import csv
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from django.http import HttpResponse
+from django.db.models import Count, Q, Sum
+from django.db.models.functions import TruncDate
+from django.http import HttpResponse, StreamingHttpResponse
 from django.utils import timezone
 
 from rest_framework import viewsets, status
@@ -42,6 +45,9 @@ from apps.lead.filters import (
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission
 from apps.global_config.filters import BranchFilterBackend
+from apps.callminutes.utils import format_duration
+
+NEPAL_TZ = ZoneInfo('Asia/Kathmandu')
 
 
 class ConfigViewSet(viewsets.ModelViewSet):
@@ -278,6 +284,18 @@ class GlobalPaymentViewSet(viewsets.ReadOnlyModelViewSet):
         return [IsAuthenticated(), IsStaffOrHasPermission()]
 
 
+class Echo:
+    def write(self, value):
+        return value
+
+
+def _csv_safe(value):
+    # a leading = + - or @ would run as a formula in Excel
+    if isinstance(value, str) and value.startswith(('=', '+', '-', '@')):
+        return f"'{value}"
+    return value
+
+
 class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
     """Flat, cross-lead call log. Newest calls first by default."""
     queryset = LeadCall.objects.none()
@@ -298,9 +316,79 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary', 'export']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        # drop the list ordering, it would end up in GROUP BY
+        queryset = self.filter_queryset(self.get_queryset()).order_by()
+        totals = queryset.aggregate(
+            total_calls=Count('id'),
+            inbound=Count('id', filter=Q(direction='inbound')),
+            outbound=Count('id', filter=Q(direction='outbound')),
+            connected=Count('id', filter=Q(duration_seconds__gt=0)),
+            total_seconds=Sum('duration_seconds'),
+        )
+        total_calls = totals['total_calls']
+        total_seconds = totals['total_seconds'] or 0
+        calls_per_day = (
+            queryset.annotate(day=TruncDate('call_timestamp', tzinfo=NEPAL_TZ))
+            .values('day')
+            .annotate(count=Count('id'))
+            .order_by('day')
+        )
+        top_callers = (
+            queryset.filter(created_by__isnull=False)
+            .values('created_by', 'created_by__name')
+            .annotate(count=Count('id'))
+            .order_by('-count', 'created_by__name')[:10]
+        )
+        return Response({
+            'total_calls': total_calls,
+            'inbound': totals['inbound'],
+            'outbound': totals['outbound'],
+            'total_seconds': total_seconds,
+            'average_seconds': round(total_seconds / total_calls) if total_calls else 0,
+            'connected': totals['connected'],
+            'connect_rate': round((totals['connected'] / total_calls * 100), 1) if total_calls else 0,
+            'calls_per_day': [
+                {'date': row['day'].isoformat(), 'count': row['count']} for row in calls_per_day
+            ],
+            'top_callers': [
+                {'user_id': row['created_by'], 'name': row['created_by__name'], 'count': row['count']}
+                for row in top_callers
+            ],
+        })
+
+    @action(detail=False, methods=['get'])
+    def export(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
+        writer = csv.writer(Echo())
+
+        def rows():
+            yield '\ufeff'  # UTF-8 BOM, Excel needs it for Devanagari names
+            yield writer.writerow([
+                'Date & time (NPT)', 'Direction', 'Lead', 'Reference', 'Phone', 'Caller',
+                'Logged by', 'Duration (MM:SS)', 'Seconds', 'Outcome', 'Notes', 'Recording',
+            ])
+            for call in queryset.iterator(chunk_size=2000):
+                row = [
+                    call.call_timestamp.astimezone(NEPAL_TZ).strftime('%Y-%m-%d %H:%M'),
+                    call.get_direction_display(),
+                    call.lead.full_name, call.lead.reference_number,
+                    call.phone_number, call.caller,
+                    call.created_by.name if call.created_by else '',
+                    format_duration(call.duration_seconds), call.duration_seconds,
+                    call.outcome, call.notes, call.recording_url,
+                ]
+                yield writer.writerow([_csv_safe(v) for v in row])
+
+        today = timezone.now().astimezone(NEPAL_TZ).strftime('%Y-%m-%d')
+        response = StreamingHttpResponse(rows(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="calls-{today}.csv"'
+        return response
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
