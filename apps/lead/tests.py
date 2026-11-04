@@ -196,3 +196,176 @@ class GlobalCallListTests(APITestCase):
         self.client.force_authenticate(other_admin)
         response = self.client.get('/api/calls/')
         self.assertNotIn(self.recent_call.id, [r['id'] for r in response.data['results']])
+
+class CallsSummaryExportTests(APITestCase):
+    """Summary (US-1), export (US-4) and branch scoping (US-6)."""
+
+    def setUp(self):
+        import datetime as dt
+        from django.utils import timezone as tz
+        from apps.branch.models import Branch
+        from apps.lead.models import LeadCall
+
+        utc = dt.timezone.utc
+        self.admin = User.objects.create_user(
+            email='sum-admin@test.com', name='Sum Admin', password='pass', is_staff=True,
+        )
+        self.brt = Branch.objects.create(name='Biratnagar', code='SBT')
+        self.dng = Branch.objects.create(name='Dharan', code='SDH')
+
+        self.brt_user = User.objects.create_user(
+            email='brt@test.com', name='Brt User', password='pass',
+        )
+        self.brt_user.branch = self.brt
+        self.brt_user.save()
+        self.dng_user = User.objects.create_user(
+            email='dng@test.com', name='Dng User', password='pass',
+        )
+        self.dng_user.branch = self.dng
+        self.dng_user.save()
+
+        self.lead = Lead.objects.create(full_name='Sita नेपाली', phone='9800000001')
+
+        def mk(ts, direction, seconds, branch, by, notes=''):
+            return LeadCall.objects.create(
+                lead=self.lead, call_timestamp=ts, direction=direction,
+                caller='x', phone_number='9800000001', duration_seconds=seconds,
+                outcome='interested', created_by=by, branch=branch, notes=notes,
+            )
+
+        # 20:00 UTC on Oct 28 is 01:45 NPT on Oct 29.
+        self.c1 = mk(dt.datetime(2026, 10, 28, 20, 0, tzinfo=utc), 'outbound', 100, self.brt, self.admin)
+        # 17:15 UTC is 23:00 NPT, so it stays on Oct 28. Zero-second call.
+        self.c2 = mk(dt.datetime(2026, 10, 28, 17, 15, tzinfo=utc), 'inbound', 0, self.brt, self.admin)
+        # No created_by, so it should appear as "Unknown".
+        self.c3 = mk(dt.datetime(2026, 10, 29, 6, 0, tzinfo=utc), 'outbound', 200, self.brt, None)
+        # Another branch.
+        self.c4 = mk(dt.datetime(2026, 10, 29, 7, 0, tzinfo=utc), 'outbound', 50, self.dng, self.dng_user,
+                     notes='=HYPERLINK("http://evil.test","click")')
+
+    # ---- summary ----
+    def test_summary_totals_average_and_connect_rate(self):
+        self.client.force_authenticate(self.admin)
+        r = self.client.get('/api/calls/summary/?branch_id=%d' % self.brt.id)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data['total_calls'], 3)
+        self.assertEqual(r.data['inbound'], 1)
+        self.assertEqual(r.data['outbound'], 2)
+        self.assertEqual(r.data['total_seconds'], 300)
+        self.assertEqual(r.data['total_formatted'], '00:05:00')
+        self.assertEqual(r.data['avg_seconds'], 100)
+        self.assertEqual(r.data['connected_calls'], 2)  # the 0-second call is not connected
+        self.assertEqual(r.data['connect_rate'], 0.667)
+
+    def test_summary_days_use_nepal_time(self):
+        self.client.force_authenticate(self.admin)
+        r = self.client.get('/api/calls/summary/?branch_id=%d' % self.brt.id)
+        days = {d['date']: d for d in r.data['by_day']}
+        self.assertEqual(days['2026-10-29']['calls'], 2)   # 20:00 UTC counts as Oct 29
+        self.assertEqual(days['2026-10-28']['calls'], 1)   # 23:00 NPT stays on Oct 28
+
+    def test_summary_unknown_caller(self):
+        self.client.force_authenticate(self.admin)
+        r = self.client.get('/api/calls/summary/?branch_id=%d' % self.brt.id)
+        unknown = [u for u in r.data['by_user'] if u['user_id'] is None]
+        self.assertEqual(len(unknown), 1)
+        self.assertEqual(unknown[0]['name'], 'Unknown')
+
+    def test_summary_empty_result_returns_zeros(self):
+        self.client.force_authenticate(self.admin)
+        r = self.client.get('/api/calls/summary/?call_timestamp__gte=2099-01-01')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data['total_calls'], 0)
+        self.assertEqual(r.data['total_seconds'], 0)
+        self.assertEqual(r.data['avg_seconds'], 0)
+        self.assertEqual(r.data['connect_rate'], 0)
+        self.assertEqual(r.data['by_day'], [])
+        self.assertEqual(r.data['by_user'], [])
+
+    def test_summary_matches_list_count(self):
+        self.client.force_authenticate(self.admin)
+        qs = '?direction=outbound'
+        listing = self.client.get('/api/calls/' + qs)
+        summary = self.client.get('/api/calls/summary/' + qs)
+        self.assertEqual(summary.data['total_calls'], listing.data['count'])
+
+    # ---- export ----
+    def _export_rows(self, qs=''):
+        import csv
+        import io
+        r = self.client.get('/api/calls/export/' + qs)
+        self.assertEqual(r.status_code, 200)
+        body = b''.join(r.streaming_content)
+        self.assertTrue(body.startswith(b'\xef\xbb\xbf'))  # UTF-8 BOM
+        rows = list(csv.reader(io.StringIO(body.decode('utf-8-sig'))))
+        return r, rows
+
+    def test_export_content_type_header_and_rows(self):
+        self.client.force_authenticate(self.admin)
+        r, rows = self._export_rows()
+        self.assertIn('text/csv', r['Content-Type'])
+        self.assertRegex(r['Content-Disposition'], r'calls-\d{4}-\d{2}-\d{2}\.csv')
+        self.assertEqual(rows[0], [
+            'Date & time (NPT)', 'Direction', 'Lead', 'Reference', 'Phone',
+            'Caller', 'Logged by', 'Duration (MM:SS)', 'Seconds',
+            'Outcome', 'Notes', 'Recording',
+        ])
+        self.assertEqual(len(rows) - 1, 4)
+        self.assertIn('Sita नेपाली', [row[2] for row in rows[1:]])
+
+    def test_export_respects_filters(self):
+        self.client.force_authenticate(self.admin)
+        _, rows = self._export_rows('?direction=inbound')
+        self.assertEqual(len(rows) - 1, 1)
+
+    def test_export_neutralises_formula_notes(self):
+        self.client.force_authenticate(self.admin)
+        _, rows = self._export_rows()
+        notes = [row[10] for row in rows[1:] if 'HYPERLINK' in row[10]]
+        self.assertEqual(len(notes), 1)
+        self.assertTrue(notes[0].startswith("'=HYPERLINK("))
+
+    def test_export_query_count_is_fixed(self):
+        import datetime as dt
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from apps.lead.models import LeadCall
+
+        self.client.force_authenticate(self.admin)
+        with CaptureQueriesContext(connection) as before:
+            b''.join(self.client.get('/api/calls/export/').streaming_content)
+        for i in range(10):
+            LeadCall.objects.create(
+                lead=self.lead,
+                call_timestamp=dt.datetime(2026, 10, 30, 6, i, tzinfo=dt.timezone.utc),
+                direction='outbound', caller='x', phone_number='1',
+                duration_seconds=5, created_by=self.admin, branch=self.brt,
+            )
+        with CaptureQueriesContext(connection) as after:
+            b''.join(self.client.get('/api/calls/export/').streaming_content)
+        self.assertEqual(len(before), len(after))
+
+    # ---- branch scoping (US-6) ----
+    def test_non_staff_list_summary_export_stay_in_branch(self):
+        self.client.force_authenticate(self.brt_user)
+        listing = self.client.get('/api/calls/')
+        self.assertEqual(listing.data['count'], 3)
+        self.assertNotIn(self.c4.id, [r['id'] for r in listing.data['results']])
+
+        summary = self.client.get('/api/calls/summary/')
+        self.assertEqual(summary.data['total_calls'], 3)
+
+        _, rows = self._export_rows()
+        self.assertEqual(len(rows) - 1, 3)
+        self.assertFalse(any('HYPERLINK' in row[10] for row in rows[1:]))
+
+    def test_non_staff_cannot_widen_with_branch_id(self):
+        self.client.force_authenticate(self.brt_user)
+        r = self.client.get('/api/calls/summary/?branch_id=%d' % self.dng.id)
+        self.assertEqual(r.data['total_calls'], 3)
+
+    def test_staff_sees_all_and_can_narrow_by_branch(self):
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(self.client.get('/api/calls/summary/').data['total_calls'], 4)
+        narrowed = self.client.get('/api/calls/summary/?branch_id=%d' % self.dng.id)
+        self.assertEqual(narrowed.data['total_calls'], 1)
