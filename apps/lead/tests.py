@@ -178,6 +178,30 @@ class GlobalCallListTests(APITestCase):
             [r['id'] for r in response.data['results']], [self.recent_call.id],
         )
 
+    def _call_at(self, year, month, day, hour, minute):
+        from datetime import datetime
+        from apps.lead.filters import NEPAL_TZ
+        from apps.lead.models import LeadCall
+        when = datetime(year, month, day, hour, minute, tzinfo=NEPAL_TZ)
+        return LeadCall.objects.create(
+            lead=self.lead, call_timestamp=when, direction='outbound',
+            caller='Counselor Nine', phone_number='9811111111', duration_seconds=30,
+            created_by=self.counselor, branch=self.branch,
+        )
+
+    def test_date_to_includes_end_of_day_npt(self):
+        late_call = self._call_at(2020, 1, 15, 23, 59)
+        response = self.client.get('/api/calls/?date_from=2020-01-15&date_to=2020-01-15')
+        self.assertEqual([r['id'] for r in response.data['results']], [late_call.id])
+
+    def test_date_filters_use_npt_days(self):
+        # 00:10 NPT on Jan 16 is still Jan 15 in UTC
+        early_call = self._call_at(2020, 1, 16, 0, 10)
+        response = self.client.get('/api/calls/?date_from=2020-01-15&date_to=2020-01-15')
+        self.assertEqual(response.data['count'], 0)
+        jan_16 = self.client.get('/api/calls/?date_from=2020-01-16&date_to=2020-01-16')
+        self.assertEqual([r['id'] for r in jan_16.data['results']], [early_call.id])
+
     def test_search(self):
         response = self.client.get('/api/calls/?search=Counselor Nine')
         self.assertEqual(response.data['count'], 1)

@@ -1,9 +1,18 @@
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
 import django_filters
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
 )
+
+NEPAL_TZ = ZoneInfo('Asia/Kathmandu')
+
+
+def _nepal_day_start(day):
+    return datetime.combine(day, time.min, tzinfo=NEPAL_TZ)
 
 
 class LearningModeFilter(django_filters.FilterSet):
@@ -169,12 +178,21 @@ class GlobalCallFilter(django_filters.FilterSet):
     notes = django_filters.CharFilter(lookup_expr='icontains')
     call_timestamp__gte = django_filters.DateTimeFilter(field_name='call_timestamp', lookup_expr='gte')
     call_timestamp__lte = django_filters.DateTimeFilter(field_name='call_timestamp', lookup_expr='lte')
+    # whole Nepal days (TIME_ZONE is UTC, so a plain date lookup would drop the last day)
+    date_from = django_filters.DateFilter(method='filter_date_from')
+    date_to = django_filters.DateFilter(method='filter_date_to')
     created_by = django_filters.NumberFilter(field_name='created_by')
     student = django_filters.NumberFilter(field_name='lead__students')
 
     class Meta:
         model = LeadCall
         fields = ['lead', 'direction', 'outcome']
+
+    def filter_date_from(self, queryset, name, value):
+        return queryset.filter(call_timestamp__gte=_nepal_day_start(value))
+
+    def filter_date_to(self, queryset, name, value):
+        return queryset.filter(call_timestamp__lt=_nepal_day_start(value + timedelta(days=1)))
 
 
 class LeadActivityFilter(django_filters.FilterSet):
