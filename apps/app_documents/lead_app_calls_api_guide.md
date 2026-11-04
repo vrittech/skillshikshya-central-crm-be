@@ -9,6 +9,8 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | Method | Endpoint | Description | Access |
 |--------|----------|-------------|--------|
 | GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated |
+| GET | `/api/calls/summary/` | Summary totals for the filtered calls | Authenticated |
+| GET | `/api/calls/export/` | Export filtered calls to CSV (not paginated) | Authenticated |
 | GET | `/api/leads/{lead_id}/calls/` | List calls for one lead (paginated) | Authenticated |
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
@@ -29,9 +31,12 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 | `student` | Student ID — calls on the lead linked to that student |
 | `lead` | Lead ID |
 | `call_timestamp__gte` / `__lte` | Date/time range (ISO 8601) |
+| `date_from` / `date_to` | Nepal calendar dates, `YYYY-MM-DD`; `date_to` includes the whole day (to 23:59:59 NPT) |
 | `search` | Matches caller, phone number, outcome, notes, lead name & reference number |
 | `ordering` | `call_timestamp`, `duration_seconds`, `created_at` (prefix `-` for desc) |
 | `page` / `page_size` | Standard pagination |
+
+> **Date pickers:** use `date_from` / `date_to`. A bare `?call_timestamp__lte=2026-11-03` is read as midnight UTC and drops the whole last day.
 
 **Example response row:**
 ```json
@@ -54,6 +59,75 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 ```
 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
+
+## GET `/api/calls/summary/` — Call Summary
+
+Totals for the filtered call list. Supports all the same query params and branch scoping as `GET /api/calls/`; `page`, `page_size` and `ordering` are ignored.
+
+```
+GET /api/calls/summary/?direction=outbound&date_from=2026-11-01&date_to=2026-11-03
+```
+
+**Response `200 OK`:**
+```json
+{
+    "total_calls": 3,
+    "inbound": 0,
+    "outbound": 3,
+    "total_seconds": 600,
+    "average_seconds": 200,
+    "connected": 2,
+    "connect_rate": 66.7,
+    "calls_per_day": [
+        { "date": "2026-11-01", "count": 1 },
+        { "date": "2026-11-03", "count": 2 }
+    ],
+    "top_callers": [
+        { "user_id": 9, "name": "Shikhar", "count": 2 },
+        { "user_id": 4, "name": "Sita", "count": 1 }
+    ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `average_seconds` | `total_seconds / total_calls`, rounded |
+| `connected` | Calls with `duration_seconds > 0` |
+| `connect_rate` | `connected` as a percentage of `total_calls` (1 decimal) |
+| `calls_per_day` | Count per **Nepal** calendar day of `call_timestamp`, oldest first. Days with no calls are omitted |
+| `top_callers` | Top 10 users by calls logged (`created_by`) |
+
+With no matching calls every number is `0` and both lists are `[]`.
+
+## GET `/api/calls/export/` — Export CSV
+
+Exports the current filtered call list as a CSV file (no pagination). Supports all the same query params and branch scoping as `GET /api/calls/`.
+
+```
+GET /api/calls/export/?created_by=9&date_from=2026-11-01&date_to=2026-11-03
+```
+
+**Response:** `Content-Type: text/csv; charset=utf-8` with `Content-Disposition: attachment; filename="calls-2026-11-03.csv"` (today's Nepal date).
+
+**Columns:**
+
+| Column | Value |
+|--------|-------|
+| Date & time (NPT) | `call_timestamp` in Asia/Kathmandu, `YYYY-MM-DD HH:MM` |
+| Direction | `Inbound` / `Outbound` |
+| Lead | `lead_name` |
+| Reference | `lead_reference_number` |
+| Phone | `phone_number` |
+| Caller | `caller` |
+| Logged by | `created_by_name` |
+| Duration (MM:SS) | `duration_seconds` as `MM:SS` |
+| Seconds | `duration_seconds` |
+| Outcome | `outcome` |
+| Notes | `notes` |
+| Recording | `recording_url` |
+
+- The file starts with a UTF-8 BOM (Excel needs it to read Devanagari names).
+- Cells starting with `=`, `+`, `-` or `@` get a leading `'` (formula escaping: `=SUM(1)` is written as `'=SUM(1)`).
 
 ## Call Minutes Deduction
 
