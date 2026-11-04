@@ -1,15 +1,18 @@
 import csv
+import re
 from datetime import datetime
 
-from django.http import HttpResponse
+from django.http import HttpResponse, StreamingHttpResponse
 from django.utils import timezone
-
+from apps.callminutes.utils import format_duration
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-
+from zoneinfo import ZoneInfo
+from django.db.models import Count, Q, Sum
+from django.db.models.functions import TruncDate
 from django_filters.rest_framework import DjangoFilterBackend
 
 from apps.lead.models import (
@@ -278,6 +281,30 @@ class GlobalPaymentViewSet(viewsets.ReadOnlyModelViewSet):
         return [IsAuthenticated(), IsStaffOrHasPermission()]
 
 
+CALL_CSV_HEADERS = [
+    'Date & time (NPT)', 'Direction', 'Lead', 'Reference', 'Phone', 'Caller',
+    'Logged by', 'Duration (MM:SS)', 'Seconds', 'Outcome', 'Notes', 'Recording',
+]
+_FORMULA_PREFIXES = ('=', '+', '-', '@', '\t', '\r')
+_PLAIN_INTL_PHONE = re.compile(r'^\+\d[\d\s-]*$')
+
+
+def _csv_safe(value, allow_phone=False):
+    """Stop spreadsheet apps from running a cell as a formula (CSV injection)."""
+    if value is None:
+        return ''
+    text = str(value)
+    if text.startswith(_FORMULA_PREFIXES) and not (allow_phone and _PLAIN_INTL_PHONE.match(text)):
+        return "'" + text
+    return text
+
+
+class _Echo:
+    """csv.writer target that hands each formatted row straight back to us."""
+    def write(self, value):
+        return value
+
+
 class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
     """Flat, cross-lead call log. Newest calls first by default."""
     queryset = LeadCall.objects.none()
@@ -298,9 +325,99 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary', 'export']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        """Totals, calls per day (Nepal time) and top callers for the current filters."""
+        npt = ZoneInfo('Asia/Kathmandu')
+        # Same filters, search and branch scoping as the list. order_by() clears the
+        # default -call_timestamp so it can't leak into the GROUP BY below.
+        qs = self.filter_queryset(self.get_queryset()).order_by()
+
+        totals = qs.aggregate(
+            total_calls=Count('id'),
+            inbound=Count('id', filter=Q(direction='inbound')),
+            outbound=Count('id', filter=Q(direction='outbound')),
+            total_seconds=Sum('duration_seconds'),
+            connected_calls=Count('id', filter=Q(duration_seconds__gt=0)),
+        )
+        total_calls = totals['total_calls']
+        total_seconds = totals['total_seconds'] or 0
+        connected = totals['connected_calls']
+
+        by_day = (
+            qs.annotate(day=TruncDate('call_timestamp', tzinfo=npt))
+            .values('day')
+            .annotate(calls=Count('id'), seconds=Sum('duration_seconds'))
+            .order_by('day')
+        )
+        by_user = (
+            qs.values('created_by', 'created_by__name')
+            .annotate(calls=Count('id'), seconds=Sum('duration_seconds'))
+            .order_by('-calls', '-seconds')[:10]
+        )
+
+        hours, rest = divmod(total_seconds, 3600)
+        minutes, secs = divmod(rest, 60)
+        return Response({
+            'total_calls': total_calls,
+            'inbound': totals['inbound'],
+            'outbound': totals['outbound'],
+            'total_seconds': total_seconds,
+            'total_formatted': f'{hours:02d}:{minutes:02d}:{secs:02d}',
+            'avg_seconds': round(total_seconds / total_calls) if total_calls else 0,
+            'connected_calls': connected,
+            'connect_rate': round(connected / total_calls, 3) if total_calls else 0,
+            'by_day': [
+                {'date': d['day'].isoformat(), 'calls': d['calls'], 'seconds': d['seconds'] or 0}
+                for d in by_day
+            ],
+            'by_user': [
+                {
+                    'user_id': u['created_by'],
+                    'name': u['created_by__name'] or 'Unknown',
+                    'calls': u['calls'],
+                    'seconds': u['seconds'] or 0,
+                }
+                for u in by_user
+            ],
+        })
+
+    @action(detail=False, methods=['get'], url_path='export')
+    def export(self, request):
+        """CSV of every call matching the current filters (all pages, no pagination)."""
+        npt = ZoneInfo('Asia/Kathmandu')
+        # Evaluated eagerly so a bad filter returns 400 before streaming starts.
+        qs = self.filter_queryset(self.get_queryset())
+        writer = csv.writer(_Echo())
+
+        def rows():
+            yield '\ufeff'  # BOM: makes Excel read the file as UTF-8 (Devanagari)
+            yield writer.writerow(CALL_CSV_HEADERS)
+            for c in qs.iterator(chunk_size=2000):
+                yield writer.writerow([
+                    timezone.localtime(c.call_timestamp, npt).strftime('%Y-%m-%d %H:%M:%S'),
+                    c.get_direction_display(),
+                    _csv_safe(c.lead.full_name),
+                    _csv_safe(c.lead.reference_number),
+                    _csv_safe(c.phone_number, allow_phone=True),
+                    _csv_safe(c.caller),
+                    _csv_safe(c.created_by.name if c.created_by else ''),
+                    format_duration(c.duration_seconds),
+                    c.duration_seconds,
+                    _csv_safe(c.outcome),
+                    _csv_safe(c.notes),
+                    _csv_safe(c.recording_url),
+                ])
+
+        today = timezone.localtime(timezone.now(), npt).date().isoformat()
+        response = StreamingHttpResponse(rows(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="calls-{today}.csv"'
+        response['Cache-Control'] = 'no-store'
+        return response
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
