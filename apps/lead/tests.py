@@ -333,6 +333,56 @@ class GlobalCallListTests(APITestCase):
         with self.assertNumQueries(len(queries)):
             self.assertEqual(len(self._export_lines()), 1 + 50)
 
+    def test_list_branch_scoping_for_non_staff(self):
+        self._call_in_other_branch()
+        branch_user = User.objects.create_user(
+            email='brt@test.com', name='BRT User', password='x', branch=self.branch,
+        )
+        self.client.force_authenticate(branch_user)
+        response = self.client.get('/api/calls/')
+        self.assertEqual(response.status_code, 200)
+        ids = [r['id'] for r in response.data['results']]
+        self.assertEqual(ids, [self.recent_call.id, self.old_call.id])
+
+    def test_branch_id_ignored_for_non_staff(self):
+        other_branch, other_call = self._call_in_other_branch()
+        branch_user = User.objects.create_user(
+            email='brt@test.com', name='BRT User', password='x', branch=self.branch,
+        )
+        self.client.force_authenticate(branch_user)
+        response = self.client.get(f'/api/calls/?branch_id={other_branch.id}')
+        self.assertNotIn(other_call.id, [r['id'] for r in response.data['results']])
+
+    def test_staff_branch_id_filter(self):
+        other_branch, other_call = self._call_in_other_branch()
+        # staff sees all
+        self.assertEqual(self.client.get('/api/calls/').data['count'], 3)
+        self.assertEqual(self.client.get('/api/calls/summary/').data['total_calls'], 3)
+        self.assertEqual(len(self._export_lines()), 1 + 3)
+        # staff filtered by branch_id
+        filtered = self.client.get(f'/api/calls/?branch_id={other_branch.id}')
+        self.assertEqual([r['id'] for r in filtered.data['results']], [other_call.id])
+        summary = self.client.get(f'/api/calls/summary/?branch_id={other_branch.id}')
+        self.assertEqual(summary.data['total_calls'], 1)
+        self.assertEqual(summary.data['calls_per_day'], [{'date': '2020-01-15', 'count': 1}])
+        lines = self._export_lines(f'?branch_id={other_branch.id}')
+        self.assertEqual(len(lines), 2)
+        self.assertIn('Dharan only', lines[1])
+
+    def test_list_query_count(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        for minute in range(3):
+            self._call_at(2020, 1, 15, 10, minute)
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get('/api/calls/?page_size=100')
+        self.assertEqual(len(response.data['results']), 5)
+        for minute in range(45):
+            self._call_at(2020, 1, 15, 11, minute)
+        with self.assertNumQueries(len(queries)):
+            response = self.client.get('/api/calls/?page_size=100')
+        self.assertEqual(len(response.data['results']), 50)
+
     def test_search(self):
         response = self.client.get('/api/calls/?search=Counselor Nine')
         self.assertEqual(response.data['count'], 1)
