@@ -8,7 +8,9 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 
 | Method | Endpoint | Description | Access |
 |--------|----------|-------------|--------|
-| GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated |
+| GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated; branch-scoped |
+| GET | `/api/calls/summary/` | Filtered calls overview aggregates | Authenticated; same branch scope and filters as the global call log |
+| GET | `/api/calls/export-csv/` | Download all matching calls as CSV | Authenticated; same branch scope and filters as the global call log |
 | GET | `/api/leads/{lead_id}/calls/` | List calls for one lead (paginated) | Authenticated |
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
@@ -18,7 +20,51 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 
 ## Global Call Log — `GET /api/calls/`
 
-Read-only list of every call across all leads, **branch-scoped** (staff see all / `?branch_id=X`; non-staff locked to their branch). Ordered by `call_timestamp` descending by default.
+Read-only list of calls across leads. Results are ordered by `call_timestamp` descending by default and branch-scoped server-side:
+
+- **Staff/superusers** see all branches by default and can filter with `?branch_id=<id>`.
+- **Non-staff users assigned to a branch** see only calls in their assigned branch whose linked lead is also assigned to that branch. A supplied `branch_id` is ignored for non-staff users.
+- Branch scoping is enforced in the server-side queryset. Search and other filters only narrow results; ordering and pagination cannot broaden the returned branch-scoped calls.
+
+### Calls Summary — `GET /api/calls/summary/`
+
+Returns aggregate analytics for the same filtered call set as `GET /api/calls/`. It accepts the global call log filters listed above, including `search`, direction, logged-by (`created_by`), date range, lead, student, and staff-only `branch_id`. Pagination parameters do not limit the summary. Branch visibility rules are identical to the global call log.
+
+Response fields:
+
+| Field | Description |
+|-------|-------------|
+| `total_calls` | Total matching calls |
+| `inbound_calls` / `outbound_calls` | Direction counts |
+| `connected_calls` | Matching calls with duration greater than zero |
+| `total_duration_seconds` | Sum of stored call durations in seconds |
+| `average_duration_seconds` | Average stored duration in seconds (0 for no calls) |
+| `connect_rate` | Connected calls divided by total calls, as a percentage (0 for no calls) |
+| `calls_per_day` | `[{ "date": "YYYY-MM-DD", "count": n }]`, grouped by the Asia/Kathmandu calendar date |
+| `top_callers` | Up to 10 users by matching call count, each with `id`, `name`, `email`, and `call_count`; deleted/missing users appear as `id: null`, `"Unknown caller"`, and `email: null` |
+
+**Non-staff users without an assigned branch:** Current behavior is to see calls from all branches. `BranchFilterBackend` leaves the queryset unfiltered when the user's branch is empty; this behavior is preserved and is not a secure default for accounts intended to be branch-limited. An unassigned account can expose call details, including phone numbers and notes. Proposed remediation: assign a branch to every branch-limited account, then change unassigned non-staff access to fail closed (for example, return no branch-scoped rows) after verifying/backfilling existing accounts. This remediation is not implemented here.
+
+### Calls CSV Export — `GET /api/calls/export-csv/`
+
+Downloads every call matching the global call log filters, without applying list pagination. Search, direction, logged-by (`created_by`), date range, and staff `branch_id` filters are shared with the calls list and summary. Branch visibility is enforced server-side using the same queryset. Non-staff users cannot select a different branch by supplying `branch_id`; staff can export all branches or filter by branch.
+
+The response is a UTF-8 CSV with a UTF-8 BOM for spreadsheet compatibility, named `calls-YYYY-MM-DD.csv` using the Nepal local date. The exact column order is:
+
+1. Date & time (NPT)
+2. Direction
+3. Lead
+4. Reference
+5. Phone
+6. Caller
+7. Logged by
+8. Duration (MM) — duration in decimal minutes, to two decimal places
+9. Seconds — stored integer duration in seconds
+10. Outcome
+11. Notes
+12. Recording
+
+Date/time values use `Asia/Kathmandu`. Empty values are emitted as empty CSV cells. User-controlled text that could be interpreted as a spreadsheet formula is prefixed with an apostrophe.
 
 **Query params:**
 

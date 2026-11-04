@@ -1,7 +1,11 @@
 import csv
 from datetime import datetime
+from io import StringIO
+from zoneinfo import ZoneInfo
 
-from django.http import HttpResponse
+from django.db.models import Avg, Count, Q, Sum, Value
+from django.db.models.functions import Coalesce, TruncDate
+from django.http import HttpResponse, StreamingHttpResponse
 from django.utils import timezone
 
 from rest_framework import viewsets, status
@@ -293,12 +297,151 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
     ordering = ['-call_timestamp']
 
     def get_queryset(self):
-        return LeadCall.objects.select_related(
+        queryset = LeadCall.objects.select_related(
             'lead', 'created_by', 'branch',
         )
+        user = self.request.user
+        if not (user.is_staff or user.is_superuser) and user.branch_id is not None:
+            # Do not expose a related lead's details when a call's branch is
+            # inconsistent with the lead's branch. BranchFilterBackend scopes
+            # the call itself to the same assigned branch.
+            queryset = queryset.filter(lead__branch_id=user.branch_id)
+        return queryset
+
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        """Return SQL-aggregated analytics for the same filtered call set as list."""
+        queryset = self.filter_queryset(self.get_queryset())
+        totals = queryset.aggregate(
+            total_calls=Count('pk'),
+            inbound_calls=Count('pk', filter=Q(direction=LeadCall.Direction.INBOUND)),
+            outbound_calls=Count('pk', filter=Q(direction=LeadCall.Direction.OUTBOUND)),
+            connected_calls=Count('pk', filter=Q(duration_seconds__gt=0)),
+            total_duration_seconds=Coalesce(Sum('duration_seconds'), Value(0)),
+            average_duration_seconds=Avg('duration_seconds'),
+        )
+        total_calls = totals['total_calls']
+        average_duration = totals['average_duration_seconds']
+
+        calls_per_day = queryset.annotate(
+            day=TruncDate(
+                'call_timestamp',
+                tzinfo=ZoneInfo('Asia/Kathmandu'),
+            ),
+        ).values('day').annotate(
+            call_count=Count('pk'),
+        ).order_by('day')
+
+        top_callers = queryset.values(
+            'created_by_id',
+            'created_by__name',
+            'created_by__email',
+        ).annotate(
+            call_count=Count('pk'),
+        ).order_by('-call_count', 'created_by__name')[:10]
+
+        return Response({
+            **totals,
+            'average_duration_seconds': round(float(average_duration or 0), 2),
+            'connect_rate': round(
+                totals['connected_calls'] / total_calls * 100,
+                2,
+            ) if total_calls else 0,
+            'calls_per_day': [
+                {'date': row['day'].isoformat(), 'count': row['call_count']}
+                for row in calls_per_day
+            ],
+            'top_callers': [
+                {
+                    'id': caller['created_by_id'],
+                    'name': caller['created_by__name'] or 'Unknown caller',
+                    'email': caller['created_by__email'],
+                    'call_count': caller['call_count'],
+                }
+                for caller in top_callers
+            ],
+        })
+
+    @action(detail=False, methods=['get'], url_path='export-csv')
+    def export_csv(self, request):
+        """Stream every call matching the list filters as an Excel-friendly CSV."""
+        queryset = self.filter_queryset(self.get_queryset()).order_by(
+            '-call_timestamp',
+            '-pk',
+        )
+        nepal_timezone = ZoneInfo('Asia/Kathmandu')
+        headers = [
+            'Date & time (NPT)',
+            'Direction',
+            'Lead',
+            'Reference',
+            'Phone',
+            'Caller',
+            'Logged by',
+            'Duration (MM)',
+            'Seconds',
+            'Outcome',
+            'Notes',
+            'Recording',
+        ]
+
+        def safe_text(value):
+            text = '' if value is None else str(value)
+            if text.lstrip('\ufeff\x00').lstrip().startswith(
+                ('=', '+', '-', '@'),
+            ):
+                return f"'{text}"
+            return text
+
+        def rows():
+            buffer = StringIO()
+            writer = csv.writer(buffer)
+            yield '\ufeff'
+            writer.writerow(headers)
+            yield buffer.getvalue()
+            buffer.seek(0)
+            buffer.truncate(0)
+
+            for call in queryset.iterator(chunk_size=2000):
+                duration = call.duration_seconds
+                logged_by = call.created_by.name if call.created_by else 'Unknown caller'
+                local_timestamp = timezone.localtime(
+                    call.call_timestamp,
+                    nepal_timezone,
+                )
+                writer.writerow([
+                    local_timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+                    safe_text(call.direction.title()),
+                    safe_text(call.lead.full_name),
+                    safe_text(call.lead.reference_number),
+                    safe_text(call.phone_number),
+                    safe_text(call.caller),
+                    safe_text(logged_by),
+                    f'{duration / 60:.2f}' if duration is not None else '',
+                    duration if duration is not None else '',
+                    safe_text(call.outcome),
+                    safe_text(call.notes),
+                    safe_text(call.recording_url),
+                ])
+                yield buffer.getvalue()
+                buffer.seek(0)
+                buffer.truncate(0)
+
+        filename_date = timezone.localtime(
+            timezone.now(),
+            nepal_timezone,
+        ).strftime('%Y-%m-%d')
+        response = StreamingHttpResponse(
+            rows(),
+            content_type='text/csv; charset=utf-8',
+        )
+        response['Content-Disposition'] = (
+            f'attachment; filename="calls-{filename_date}.csv"'
+        )
+        return response
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary', 'export_csv']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
 
