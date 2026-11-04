@@ -196,3 +196,138 @@ class GlobalCallListTests(APITestCase):
         self.client.force_authenticate(other_admin)
         response = self.client.get('/api/calls/')
         self.assertNotIn(self.recent_call.id, [r['id'] for r in response.data['results']])
+
+
+    def test_branch_scoping_for_non_staff_list(self):
+        """Non-staff user in Branch X cannot see Branch Y calls in list endpoint."""
+        from apps.branch.models import Branch
+        from apps.lead.models import LeadCall
+        
+        branch_y = Branch.objects.create(name='Dharan', code='DHR')
+        dharan_user = User.objects.create_user(
+            email='dharan@test.com', name='Dharan User', password='x',
+            branch=branch_y, is_staff=False
+        )
+        
+        # Ensure recent_call belongs to Branch X (not Branch Y)
+        LeadCall.objects.filter(id=self.recent_call.id).update(branch=self.branch)
+        
+        self.client.force_authenticate(dharan_user)
+        response = self.client.get('/api/calls/')
+        
+        self.assertEqual(response.status_code, 200)
+        returned_ids = [r['id'] for r in response.data['results']]
+        self.assertNotIn(self.recent_call.id, returned_ids)
+
+
+    def test_branch_scoping_for_non_staff_summary(self):
+        """Non-staff user in Branch X cannot see Branch Y metrics in summary endpoint."""
+        from apps.branch.models import Branch
+        from apps.lead.models import LeadCall
+        
+        branch_y = Branch.objects.create(name='Dharan', code='DHR')
+        dharan_user = User.objects.create_user(
+            email='dharan_summary@test.com', name='Dharan Summary User', password='x',
+            branch=branch_y, is_staff=False
+        )
+        
+        # Assign existing test calls to Branch X
+        LeadCall.objects.filter(id=self.recent_call.id).update(branch=self.branch)
+        
+        self.client.force_authenticate(dharan_user)
+        response = self.client.get('/api/calls/summary/')
+        
+        self.assertEqual(response.status_code, 200)
+        # Summary total_calls count must be 0 for Dharan user
+        self.assertEqual(response.data.get('total_calls', 0), 0)
+
+
+    def test_branch_scoping_for_non_staff_export(self):
+        """Non-staff user in Branch X cannot see Branch Y rows in CSV export."""
+        from apps.branch.models import Branch
+        from apps.lead.models import LeadCall
+        
+        branch_y = Branch.objects.create(name='Dharan', code='DHR')
+        dharan_user = User.objects.create_user(
+            email='dharan_export@test.com', name='Dharan Export User', password='x',
+            branch=branch_y, is_staff=False
+        )
+        
+        # Assign call to Branch X
+        LeadCall.objects.filter(id=self.recent_call.id).update(branch=self.branch)
+        
+        self.client.force_authenticate(dharan_user)
+        response = self.client.get('/api/calls/export/')
+        
+        self.assertEqual(response.status_code, 200)
+        csv_content = response.content.decode('utf-8')
+        # Prove that phone number/call reference of Branch X does not leak into Dharan user's CSV
+        self.assertNotIn(self.recent_call.phone_number, csv_content)    
+
+
+class GlobalCallSummaryAndExportTests(APITestCase):
+    def setUp(self):
+        from datetime import timedelta
+        from apps.branch.models import Branch
+        from django.utils import timezone as tz
+        from apps.lead.models import LeadCall
+
+        self.admin = User.objects.create_user(
+            email='admin_summary@test.com', name='Admin Summary', password='pass', is_staff=True,
+        )
+        self.counselor = User.objects.create_user(
+            email='c9_summary@test.com', name='Counselor Nine Summary', password='pass',
+            is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+        self.branch = Branch.objects.create(name='Biratnagar', code='BRT')
+        self.lead = Lead.objects.create(full_name='Call Person', phone='9811111111')
+        
+        now = tz.now()
+        # Connected call (> 0 seconds)
+        self.recent_call = LeadCall.objects.create(
+            lead=self.lead, call_timestamp=now, direction='outbound',
+            caller='Counselor Nine Summary', phone_number='9811111111',
+            duration_seconds=270, outcome='interested',
+            notes='Regular note',
+            created_by=self.counselor, branch=self.branch,
+        )
+        # Unconnected call (0 seconds)
+        self.old_call = LeadCall.objects.create(
+            lead=self.lead, call_timestamp=now - timedelta(days=10),
+            direction='inbound', caller='Someone Else',
+            phone_number='9822222222', duration_seconds=0,
+            notes='=HYPERLINK("http://malicious.com")',  # Formula injection test case
+            created_by=self.admin, branch=self.branch,
+        )
+
+    def test_summary_endpoint_totals_and_aggregations(self):
+        response = self.client.get('/api/calls/summary/')
+        self.assertEqual(response.status_code, 200)
+        data = response.data
+
+        # Verify exact aggregations based on setUp fixtures (2 calls total: 1 inbound, 1 outbound)
+        self.assertEqual(data['total_calls'], 2)
+        self.assertEqual(data['inbound'], 1)
+        self.assertEqual(data['outbound'], 1)
+        self.assertEqual(data['total_seconds'], 270)  # 270s + 0s
+        self.assertEqual(data['connected_calls'], 1)  # Only 1 call has duration > 0
+        self.assertEqual(data['connect_rate'], 0.5)     # 1 / 2 connected rate
+        self.assertGreaterEqual(len(data['by_day']), 1)
+        self.assertGreaterEqual(len(data['by_user']), 1)
+
+    def test_export_csv_endpoint_format_and_formula_safety(self):
+        response = self.client.get('/api/calls/export/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'text/csv; charset=utf-8')
+        self.assertTrue(response['Content-Disposition'].startswith('attachment; filename="calls-'))
+
+        # Decode content with utf-8-sig to handle the UTF-8 BOM (\ufeff) properly
+        content = response.content.decode('utf-8-sig')
+
+        # Verify header structure
+        self.assertIn("Date & time (NPT)", content)
+        self.assertIn("Duration (MM:SS)", content)
+
+        # Verify formula injection safety guard neutralizes '=' with a leading apostrophe
+        self.assertIn("'=HYPERLINK", content)

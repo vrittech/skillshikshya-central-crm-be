@@ -210,3 +210,84 @@ GET /api/leads/1/calls/?ordering=-call_timestamp
 ## DELETE `/api/leads/{lead_id}/calls/{id}/` — Delete Call
 
 **Response:** `204 No Content`
+
+
+
+## GET CALL SUMMARY STATS
+
+Returns overall aggregated call metrics, daily volume breakdown (evaluated in Nepal Time `Asia/Kathmandu`), and caller leaderboard (top 10 callers). Respects search queries, URL filter parameters, and branch scoping rules (`BranchFilterBackend`).
+
+## Global Call Log — `GET /api/calls/`
+
+Read-only paginated list of every call across all leads. Results are **branch-scoped** (staff see all branches by default and can narrow down using `?branch_id=X`; non-staff users are locked to their own branch). Ordered by `call_timestamp` descending by default.
+
+- **URL**: `/api/calls/`
+- **Method**: `GET`
+- **Authentication**: Required (Bearer Token / Session)
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `direction` | string | Filter by direction (`inbound` or `outbound`) |
+| `created_by` | int | User ID — filter by calls logged by a specific user |
+| `student` | int | Student ID — filter calls on the lead linked to that student |
+| `lead` | int | Lead ID — filter calls for a specific lead |
+| `branch_id` | int | Branch ID — filter by branch (staff users only) |
+| `call_timestamp__gte` / `__lte` | datetime | Date/time range filter (ISO 8601) |
+| `search` | string | Matches caller, phone number, outcome, notes, lead name & reference number |
+| `ordering` | string | Sort by `call_timestamp`, `duration_seconds`, or `created_at` (prefix with `-` for descending) |
+| `page` / `page_size` | int | Standard pagination (max page size: 100) |
+
+**Example Response Row (`200 OK`):**
+```json
+{
+    "id": 24,
+    "lead": 101,
+    "lead_name": "Sita Kumari InvoiceTest",
+    "lead_reference_number": "LD-2026-000086",
+    "call_timestamp": "2026-08-26T05:48:13Z",
+    "direction": "outbound",
+    "caller": "Shikhar",
+    "phone_number": "9877700111",
+    "duration_seconds": 270,
+    "duration_formatted": "04:30",
+    "outcome": "Interested",
+    "notes": "",
+    "recording_url": null,
+    "branch": 1,
+    "created_by": 9,
+    "created_by_name": "Shikhar"
+}
+```
+
+
+## Export Calls to CSV — GET `/api/calls/export/`
+
+Downloads all call records matching the active filters across every page as a streamed CSV spreadsheet.
+
+**URL**: `/api/calls/export`
+- **Method**: `GET`
+- **Authentication**: Required (Bearer Token / Session)
+
+### Response Details
+
+* **Content-Type**: `text/csv; charset=utf-8`
+* **Content-Disposition**: `attachment; filename="calls-YYYY-MM-DD.csv"` (dynamically named using the current date in Nepal Time `Asia/Kathmandu`).
+* **Excel / Sheets Compatibility**: Automatically writes a leading UTF-8 Byte Order Mark (`\ufeff`) so that Nepali (Devanagari) character names and notes display correctly without mojibake.
+* **Security (Formula Neutralization)**: Any notes text cell starting with `=`, `+`, `-`, or `@` is automatically prefixed with a single quote (`'`) to prevent spreadsheet formula injection attacks.
+
+### CSV Column Structure (in exact order)
+
+1. `Date & time (NPT)`
+2. `Direction`
+3. `Lead`
+4. `Reference`
+5. `Phone`
+6. `Caller`
+7. `Logged by`
+8. `Duration (MM:SS)`
+9. `Seconds`
+10. `Outcome`
+11. `Notes`
+12. `Recording`

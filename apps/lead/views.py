@@ -43,6 +43,20 @@ from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission
 from apps.global_config.filters import BranchFilterBackend
 
+import csv
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from django.db.models import Count, Q, Sum, F, ExpressionWrapper, FloatField
+from django.db.models.functions import TruncDate, Coalesce
+from django.http import HttpResponse
+from rest_framework import status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+
+from apps.callminutes.utils import format_duration
+from .models import LeadCall
+
 
 class ConfigViewSet(viewsets.ModelViewSet):
     pagination_class = CustomPagination
@@ -301,6 +315,150 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         if self.action in ['list', 'retrieve']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request, *args, **kwargs):
+        # Pass through filter_queryset to respect search, filters, and BranchFilterBackend
+        queryset = self.filter_queryset(self.get_queryset())
+
+        # 1. Total Metrics Aggregation
+        totals = queryset.aggregate(
+            total_calls=Count('id'),
+            inbound=Count('id', filter=Q(direction='inbound')),
+            outbound=Count('id', filter=Q(direction='outbound')),
+            total_seconds=Coalesce(Sum('duration_seconds'), 0),
+            connected_calls=Count('id', filter=Q(duration_seconds__gt=0)),
+        )
+
+        total_calls = totals['total_calls']
+        total_seconds = totals['total_seconds']
+        connected_calls = totals['connected_calls']
+
+        avg_seconds = round(total_seconds / total_calls) if total_calls > 0 else 0
+        connect_rate = round(connected_calls / total_calls, 3) if total_calls > 0 else 0.0
+
+        # 2. Aggregation By Day (Nepal Time Zone: Asia/Kathmandu)
+        npt_tz = ZoneInfo("Asia/Kathmandu")
+        by_day_qs = (
+            queryset.annotate(date=TruncDate('created_at', tzinfo=npt_tz))
+            .values('date')
+            .annotate(
+                calls=Count('id'),
+                seconds=Coalesce(Sum('duration_seconds'), 0)
+            )
+            .order_by('date')
+        )
+
+        by_day = [
+            {
+                "date": item['date'].strftime('%Y-%m-%d') if item['date'] else None,
+                "calls": item['calls'],
+                "seconds": item['seconds']
+            }
+            for item in by_day_qs
+        ]
+
+        # 3. Aggregation By User (Top 10 Callers)
+        by_user_qs = (
+            queryset.values('created_by_id', 'created_by__name', 'created_by__email')
+            .annotate(
+                calls=Count('id'),
+                seconds=Coalesce(Sum('duration_seconds'), 0)
+            )
+            .order_by('-calls')[:10]
+        )
+
+        by_user = []
+        for item in by_user_qs:
+            user_id = item['created_by_id']
+            if user_id is None:
+                name = "Unknown"
+            else:
+                name = item['created_by__name'] or item['created_by__email'] or "Unknown"
+
+            by_user.append({
+                "user_id": user_id,
+                "name": name,
+                "calls": item['calls'],
+                "seconds": item['seconds']
+            })
+
+        data = {
+            "total_calls": total_calls,
+            "inbound": totals['inbound'],
+            "outbound": totals['outbound'],
+            "total_seconds": total_seconds,
+            "total_formatted": format_duration(total_seconds),
+            "avg_seconds": avg_seconds,
+            "connected_calls": connected_calls,
+            "connect_rate": connect_rate,
+            "by_day": by_day,
+            "by_user": by_user
+        }
+
+        return Response(data, status=status.HTTP_200_OK)
+
+
+    @action(detail=False, methods=['get'], url_path='export')
+    def export(self, request, *args, **kwargs):
+        # Apply search, filters, and BranchFilterBackend scoping automatically
+        queryset = self.filter_queryset(self.get_queryset()).select_related('lead', 'created_by')
+
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        today_str = datetime.now(ZoneInfo("Asia/Kathmandu")).strftime('%Y-%m-%d')
+        response['Content-Disposition'] = f'attachment; filename="calls-{today_str}.csv"'
+
+        # Write UTF-8 BOM so Excel/Google Sheets display Nepali Devanagari correctly
+        response.write('\ufeff'.encode('utf-8'))
+
+        writer = csv.writer(response)
+        writer.writerow([
+            'Date & time (NPT)', 'Direction', 'Lead', 'Reference',
+            'Phone', 'Caller', 'Logged by', 'Duration (MM:SS)',
+            'Seconds', 'Outcome', 'Notes', 'Recording'
+        ])
+
+        npt_tz = ZoneInfo("Asia/Kathmandu")
+
+        for call in queryset.iterator(chunk_size=2000):
+            created_npt = call.created_at.astimezone(npt_tz).strftime('%Y-%m-%d %H:%M:%S') if call.created_at else ''
+            
+            # Neutralize potential CSV formula execution (=, +, -, @)
+            notes = call.notes or ''
+            if notes.startswith(('=', '+', '-', '@')):
+                notes = f"'{notes}"
+
+            # Safe field extraction for Lead
+            lead_name = ''
+            lead_ref = ''
+            if call.lead:
+                lead_name = getattr(call.lead, 'full_name', getattr(call.lead, 'name', str(call.lead)))
+                lead_ref = getattr(call.lead, 'reference_code', getattr(call.lead, 'ref_code', ''))
+
+            # Safe field extraction for User
+            logged_by = 'Unknown'
+            if call.created_by:
+                logged_by = getattr(call.created_by, 'name', None) or getattr(call.created_by, 'email', 'Unknown')
+
+            caller_name = getattr(call, 'caller_name', None) or logged_by
+
+            writer.writerow([
+                created_npt,
+                call.direction or '',
+                lead_name,
+                lead_ref,
+                call.phone_number or '',
+                caller_name,
+                logged_by,
+                format_duration(call.duration_seconds or 0),
+                call.duration_seconds or 0,
+                call.outcome or '',
+                notes,
+                call.recording_url or ''
+            ])
+
+        return response
 
 
 class NotificationViewSet(viewsets.ModelViewSet):

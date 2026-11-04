@@ -257,6 +257,7 @@ class LeadCallSerializer(serializers.ModelSerializer):
 
 class GlobalCallSerializer(serializers.ModelSerializer):
     lead_name = serializers.CharField(source='lead.full_name', read_only=True)
+    created_by_name = serializers.ReadOnlyField(source='created_by.get_full_name')
     lead_reference_number = serializers.CharField(
         source='lead.reference_number', read_only=True,
     )
@@ -272,6 +273,12 @@ class GlobalCallSerializer(serializers.ModelSerializer):
             'branch', 'created_by', 'created_by_name', 'created_at',
         ]
         read_only_fields = fields
+
+    def get_created_by_name(self, obj):
+        if not obj.created_by:
+            return "Unknown"
+        return obj.created_by.get_full_name() or obj.created_by.username
+
 
 
 class LeadActivitySerializer(serializers.ModelSerializer):
