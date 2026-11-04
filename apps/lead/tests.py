@@ -198,6 +198,11 @@ class GlobalCallListTests(APITestCase):
         call.save(update_fields=['branch', 'notes'])
         return other_branch, call
 
+    def _export_lines(self, params=''):
+        response = self.client.get(f'/api/calls/export/{params}')
+        self.assertEqual(response.status_code, 200)
+        return response.getvalue().decode('utf-8').splitlines()
+
     def test_date_to_includes_end_of_day_npt(self):
         late_call = self._call_at(2020, 1, 15, 23, 59)
         response = self.client.get('/api/calls/?date_from=2020-01-15&date_to=2020-01-15')
@@ -273,6 +278,60 @@ class GlobalCallListTests(APITestCase):
             self._call_at(2020, 1, 15, 10, minute)
         with self.assertNumQueries(len(before)):
             self.client.get('/api/calls/summary/')
+
+    def test_export_header(self):
+        lines = self._export_lines()
+        self.assertEqual(
+            lines[0],
+            '\ufeffDate & time (NPT),Direction,Lead,Reference,Phone,Caller,'
+            'Logged by,Duration (MM:SS),Seconds,Outcome,Notes,Recording',
+        )
+        self.assertEqual(len(lines), 1 + 2)
+
+    def test_export_row(self):
+        self._call_at(2020, 1, 15, 23, 59)
+        lines = self._export_lines('?date_from=2020-01-15&date_to=2020-01-15')
+        self.assertEqual(
+            lines[1],
+            f'2020-01-15 23:59,Outbound,Call Person,{self.lead.reference_number},'
+            '9811111111,Counselor Nine,Counselor Nine,00:30,30,,,',
+        )
+
+    def test_export_filename(self):
+        from django.utils import timezone as tz
+        from apps.lead.filters import NEPAL_TZ
+        response = self.client.get('/api/calls/export/')
+        today = tz.now().astimezone(NEPAL_TZ).strftime('%Y-%m-%d')
+        self.assertEqual(response['Content-Disposition'], f'attachment; filename="calls-{today}.csv"')
+
+    def test_export_formula_escaping(self):
+        call = self._call_at(2020, 1, 15, 10, 0)
+        call.notes = '=SUM(1)'
+        call.save(update_fields=['notes'])
+        lines = self._export_lines('?date_from=2020-01-15&date_to=2020-01-15')
+        self.assertIn(",'=SUM(1),", lines[1])
+
+    def test_export_branch_scoping_for_non_staff(self):
+        self._call_in_other_branch()
+        branch_user = User.objects.create_user(
+            email='brt@test.com', name='BRT User', password='x', branch=self.branch,
+        )
+        self.client.force_authenticate(branch_user)
+        lines = self._export_lines()
+        self.assertEqual(len(lines), 1 + 2)
+        self.assertNotIn('Dharan only', '\n'.join(lines))
+
+    def test_export_query_count(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        for minute in range(3):
+            self._call_at(2020, 1, 15, 10, minute)
+        with CaptureQueriesContext(connection) as queries:
+            self.assertEqual(len(self._export_lines()), 1 + 5)
+        for minute in range(45):
+            self._call_at(2020, 1, 15, 11, minute)
+        with self.assertNumQueries(len(queries)):
+            self.assertEqual(len(self._export_lines()), 1 + 50)
 
     def test_search(self):
         response = self.client.get('/api/calls/?search=Counselor Nine')
