@@ -1,5 +1,8 @@
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
+from django.db.models import Count, Sum, Avg, Q
+from django.db.models.functions import TruncDate
+from zoneinfo import ZoneInfo
 
 from django.http import HttpResponse
 from django.utils import timezone
@@ -257,52 +260,236 @@ class GlobalEnrollmentViewSet(viewsets.ReadOnlyModelViewSet):
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
 
-
 class GlobalPaymentViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Payment.objects.none()
     serializer_class = GlobalPaymentSerializer
     pagination_class = CustomPagination
-    filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
+    filter_backends = [
+        DjangoFilterBackend,
+        OrderingFilter,
+        BranchFilterBackend,
+    ]
     filterset_class = GlobalPaymentFilter
     ordering_fields = ['payment_date', 'amount', 'created_at']
     ordering = ['-payment_date']
 
     def get_queryset(self):
         return Payment.objects.select_related(
-            'enrollment', 'enrollment__lead', 'enrollment__course', 'received_by', 'branch',
+            'enrollment',
+            'enrollment__lead',
+            'enrollment__course',
+            'received_by',
+            'branch',
         )
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
 
+        total_calls = queryset.count()
+        inbound_calls = queryset.filter(direction='inbound').count()
+        outbound_calls = queryset.filter(direction='outbound').count()
+        connected_calls = queryset.filter(duration_seconds__gt=0).count()
+
+        talk_time = queryset.aggregate(
+            total=Sum('duration_seconds')
+        )['total'] or 0
+
+        average_duration = talk_time / total_calls if total_calls else 0
+        connect_rate = connected_calls / total_calls * 100 if total_calls else 0
+
+        daily_calls = (
+            queryset
+            .annotate(
+                day=TruncDate(
+                    'call_timestamp',
+                    tzinfo=ZoneInfo('Asia/Kathmandu')
+                )
+            )
+            .values('day')
+            .annotate(total_calls=Count('id'))
+            .order_by('day')
+        )
+
+        top_callers = (
+            queryset
+            .values('caller')
+            .annotate(total_calls=Count('id'))
+            .order_by('-total_calls')[:10]
+        )
+
+        return Response({
+            'total_calls': total_calls,
+            'inbound_calls': inbound_calls,
+            'outbound_calls': outbound_calls,
+            'talk_time_seconds': talk_time,
+            'average_duration_seconds': round(average_duration, 2),
+            'connected_calls': connected_calls,
+            'connect_rate': round(connect_rate, 2),
+            'daily_calls': [
+                {
+                    'date': item['day'].isoformat(),
+                    'total_calls': item['total_calls'],
+                }
+                for item in daily_calls
+            ],
+            'top_callers': list(top_callers),
+        })
 
 class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
-    """Flat, cross-lead call log. Newest calls first by default."""
     queryset = LeadCall.objects.none()
     serializer_class = GlobalCallSerializer
     pagination_class = CustomPagination
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, BranchFilterBackend]
+
+    filter_backends = [
+        DjangoFilterBackend,
+        SearchFilter,
+        OrderingFilter,
+        BranchFilterBackend,
+    ]
+
     filterset_class = GlobalCallFilter
+
     search_fields = [
-        'caller', 'phone_number', 'outcome', 'notes', 'lead__full_name',
+        'caller',
+        'phone_number',
+        'outcome',
+        'notes',
+        'lead__full_name',
         'lead__reference_number',
     ]
-    ordering_fields = ['call_timestamp', 'duration_seconds', 'created_at']
+
+    ordering_fields = [
+        'call_timestamp',
+        'duration_seconds',
+        'created_at',
+    ]
+
     ordering = ['-call_timestamp']
 
     def get_queryset(self):
         return LeadCall.objects.select_related(
-            'lead', 'created_by', 'branch',
+            'lead',
+            'created_by',
+            'branch',
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
 
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
 
+        total_calls = queryset.count()
+        inbound_calls = queryset.filter(direction='inbound').count()
+        outbound_calls = queryset.filter(direction='outbound').count()
+        connected_calls = queryset.filter(duration_seconds__gt=0).count()
+
+        talk_time = queryset.aggregate(
+            total=Sum('duration_seconds')
+        )['total'] or 0
+
+        average_duration = (
+            talk_time / total_calls if total_calls else 0
+        )
+
+        connect_rate = (
+            connected_calls / total_calls * 100 if total_calls else 0
+        )
+
+        daily_calls = (
+            queryset
+            .annotate(
+                day=TruncDate(
+                    'call_timestamp',
+                    tzinfo=ZoneInfo('Asia/Kathmandu'),
+                )
+            )
+            .values('day')
+            .annotate(total_calls=Count('id'))
+            .order_by('day')
+        )
+
+        top_callers = (
+            queryset
+            .values('caller')
+            .annotate(total_calls=Count('id'))
+            .order_by('-total_calls')[:10]
+        )
+
+        return Response({
+            'total_calls': total_calls,
+            'inbound_calls': inbound_calls,
+            'outbound_calls': outbound_calls,
+            'talk_time_seconds': talk_time,
+            'average_duration_seconds': round(average_duration, 2),
+            'connected_calls': connected_calls,
+            'connect_rate': round(connect_rate, 2),
+            'daily_calls': [
+                {
+                    'date': item['day'].isoformat(),
+                    'total_calls': item['total_calls'],
+                }
+                for item in daily_calls
+            ],
+            'top_callers': list(top_callers),
+        })
+
+    @action(detail=False, methods=['get'], url_path='export')
+    def export_csv(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        nepal_tz = ZoneInfo('Asia/Kathmandu')
+        today = timezone.localdate(timezone=nepal_tz)
+
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = (
+            f'attachment; filename="calls-{today.isoformat()}.csv"'
+        )
+
+        # UTF-8 BOM helps Excel display Nepali text correctly.
+        response.write('\ufeff')
+        writer = csv.writer(response)
+
+        writer.writerow([
+            'Date & time (NPT)', 'Direction', 'Lead', 'Reference',
+            'Phone', 'Caller', 'Logged by', 'Duration (MM:SS)',
+            'Seconds', 'Outcome', 'Notes', 'Recording',
+        ])
+
+        for call in queryset.iterator(chunk_size=1000):
+            seconds = max(call.duration_seconds or 0, 0)
+            minutes, remaining_seconds = divmod(seconds, 60)
+
+            notes = call.notes or ''
+            if notes.startswith(('=', '+', '-', '@')):
+                notes = "'" + notes
+
+            local_time = timezone.localtime(call.call_timestamp, nepal_tz)
+
+            writer.writerow([
+                local_time.strftime('%Y-%m-%d %H:%M:%S'),
+                call.get_direction_display(),
+                call.lead.full_name,
+                call.lead.reference_number,
+                call.phone_number or '',
+                call.caller or '',
+                str(call.created_by) if call.created_by else '',
+                f'{minutes:02d}:{remaining_seconds:02d}',
+                seconds,
+                call.outcome or '',
+                notes,
+                call.recording_url or '',
+            ])
+
+        return response
 class NotificationViewSet(viewsets.ModelViewSet):
     queryset = Notification.objects.all()
     serializer_class = NotificationSerializer
