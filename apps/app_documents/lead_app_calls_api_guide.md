@@ -210,3 +210,45 @@ GET /api/leads/1/calls/?ordering=-call_timestamp
 ## DELETE `/api/leads/{lead_id}/calls/{id}/` — Delete Call
 
 **Response:** `204 No Content`
+
+---
+
+## Calls Summary — GET `/api/calls/summary/`
+
+Returns summary statistics for calls across leads.
+
+The summary uses the same filters and branch restrictions as the global calls list.
+
+**Supported filters:**
+- `direction`
+- `created_by`
+- `student`
+- `lead`
+- `call_timestamp__gte`
+- `call_timestamp__lte`
+- `search`
+
+**Example response:**
+
+```json
+{
+  "total_calls": 25,
+  "inbound_calls": 10,
+  "outbound_calls": 15,
+  "talk_time_seconds": 3600,
+  "average_duration_seconds": 144,
+  "connected_calls": 20,
+  "connect_rate": 80,
+  "daily_calls": [
+    {
+      "date": "2026-11-04",
+      "total_calls": 25
+    }
+  ],
+  "top_callers": [
+    {
+      "caller": "Counselor",
+      "total_calls": 15
+    }
+  ]
+}
