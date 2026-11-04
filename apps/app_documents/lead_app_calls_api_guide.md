@@ -55,6 +55,112 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
 
+## Calls Summary — `GET /api/calls/summary/`
+
+Returns overview statistics for the global call log.
+
+**Access:** Authenticated users.
+
+**Query parameters:** Supports the same filters, search, and branch scoping as `GET /api/calls/`.
+
+**Example request:**
+
+```http
+GET /api/calls/summary/?direction=outbound
+
+```
+
+**Example response:**
+
+```json
+{
+    "total_calls": 2,
+    "inbound_calls": 1,
+    "outbound_calls": 1,
+    "talk_time_seconds": 330,
+    "average_duration_seconds": 165.0,
+    "connected_calls": 2,
+    "connect_rate": 100.0,
+    "daily_calls": [
+        {
+            "date": "2026-11-03",
+            "count": 2
+        }
+    ],
+    "top_callers": [
+        {
+            "caller": "Counselor Nine",
+            "call_count": 1
+        }
+    ]
+}
+```
+
+**Response fields:**
+
+| Field | Description |
+|---|---|
+| `total_calls` | Total matching calls |
+| `inbound_calls` | Inbound calls |
+| `outbound_calls` | Outbound calls |
+| `talk_time_seconds` | Total talk time in seconds |
+| `average_duration_seconds` | Average duration in seconds |
+| `connected_calls` | Calls with duration greater than zero |
+| `connect_rate` | Connected calls / total calls × 100 |
+| `daily_calls` | Daily call counts in Nepal time |
+| `top_callers` | Top 10 callers by call count |
+
+---
+
+## Export Calls — `GET /api/calls/export_csv/`
+
+Exports all matching calls as a CSV file.
+
+**Access:** Authenticated users.
+
+**Example requests:**
+
+```http
+GET /api/calls/export_csv/
+GET /api/calls/export_csv/?direction=inbound
+GET /api/calls/export_csv/?search=Counselor
+```
+
+**Response details:**
+
+- Content type: `text/csv; charset=utf-8`
+- Filename: `calls-YYYY-MM-DD.csv`
+- Exports all matching records, not just the current page.
+- Uses Nepal time (Asia/Kathmandu).
+- Includes UTF-8 BOM for Excel and Devanagari compatibility.
+- Protects text values starting with `=`, `+`, `-`, or `@` against spreadsheet formula injection.
+
+**CSV columns:**
+
+1. Date & time (NPT)
+2. Direction
+3. Lead
+4. Reference
+5. Phone
+6. Caller
+7. Logged by
+8. Duration (MM:SS)
+9. Seconds
+10. Outcome
+11. Notes
+12. Recording
+
+**Branch visibility:**
+
+- Staff and superusers see all branches by default.
+- Staff and superusers can filter with `?branch_id=X`.
+- Non-staff users with an assigned branch see calls belonging to their branch.
+- Non-staff users without an assigned branch are not restricted by the current branch filter backend.
+
+Both endpoints use the same filters and branch-scoping behavior as the global call list.
+
+---
+
 ## Call Minutes Deduction
 
 Creating a call **deducts minutes from the requesting user's balance**:
@@ -210,3 +316,21 @@ GET /api/leads/1/calls/?ordering=-call_timestamp
 ## DELETE `/api/leads/{lead_id}/calls/{id}/` — Delete Call
 
 **Response:** `204 No Content`
+
+## Current Branch Visibility Behavior and Proposed Fix
+
+### Current Behavior
+
+The Calls list, summary, and CSV export endpoints use the existing `BranchFilterBackend`.
+
+- **Staff and superusers:** Can view calls from all branches by default. They can filter calls using `?branch_id=<branch_id>`.
+- **Non-staff users with an assigned branch:** Can view calls belonging to their assigned branch.
+- **Non-staff users without an assigned branch:** Currently receive calls from all branches because the existing backend does not restrict users without a branch.
+
+### Proposed Security Fix
+
+For improved branch-level data isolation, non-staff users without an assigned branch should not receive calls from all branches.
+
+A proposed fix is to return an empty queryset or deny access with HTTP 403 when a non-staff user has no assigned branch.
+
+**Note:** This is a documented recommendation only. The existing branch-filter behavior has not been changed as part of this assignment.

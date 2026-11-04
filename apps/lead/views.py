@@ -1,8 +1,14 @@
 import csv
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from django.http import HttpResponse
 from django.utils import timezone
+
+from django.db.models import Count, Sum, Avg, Q
+from django.db.models.functions import TruncDate
+
+from apps.callminutes.utils import format_duration
 
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -296,12 +302,127 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         return LeadCall.objects.select_related(
             'lead', 'created_by', 'branch',
         )
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        nepal_tz = ZoneInfo('Asia/Kathmandu')
+        queryset = self.filter_queryset(self.get_queryset())
+
+        totals = queryset.aggregate(
+            total_calls=Count('id'),
+            talk_time_seconds=Sum('duration_seconds'),
+            average_duration_seconds=Avg('duration_seconds'),
+            inbound_calls=Count('id', filter=Q(direction='inbound')),
+            outbound_calls=Count('id', filter=Q(direction='outbound')),
+            connected_calls=Count('id', filter=Q(duration_seconds__gt=0)),
+        )
+
+        total_calls = totals['total_calls']
+        connected_calls = totals['connected_calls']
+
+        connect_rate = (
+            round(connected_calls / total_calls * 100, 2)
+            if total_calls else 0
+        )
+
+        daily_calls = (
+            queryset.annotate(
+                day=TruncDate('call_timestamp', tzinfo=nepal_tz)
+            )
+            .values('day')
+            .annotate(count=Count('id'))
+            .order_by('day')
+        )
+        top_callers = (
+            queryset.values('created_by__name')
+            .annotate(call_count=Count('id'))
+            .order_by('-call_count', 'created_by__name')[:10]
+         )
+
+        return Response({
+            'total_calls': total_calls,
+            'inbound_calls': totals['inbound_calls'],
+            'outbound_calls': totals['outbound_calls'],
+            'talk_time_seconds': totals['talk_time_seconds'] or 0,
+            'average_duration_seconds': round(
+                totals['average_duration_seconds'] or 0, 2
+            ),
+            'connected_calls': connected_calls,
+            'connect_rate': connect_rate,
+            'daily_calls': [
+                {
+                    'date': item['day'].isoformat(),
+                    'count': item['count']
+                }
+                for item in daily_calls
+            ],
+            'top_callers': list(top_callers),
+        })
+
+    @action(detail=False, methods=['get'], url_path='export_csv')
+    def export_csv(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        nepal_tz = ZoneInfo('Asia/Kathmandu')
+
+        filename_date = timezone.localtime(
+            timezone.now(), nepal_tz
+        ).date().isoformat()
+
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = (
+            f'attachment; filename="calls-{filename_date}.csv"'
+        )
+
+        response.write('\ufeff')
+        writer = csv.writer(response)
+
+        writer.writerow([
+            'Date & time (NPT)',
+            'Direction',
+            'Lead',
+            'Reference',
+            'Phone',
+            'Caller',
+            'Logged by',
+            'Duration (MM:SS)',
+            'Seconds',
+            'Outcome',
+            'Notes',
+            'Recording',
+        ])
+
+        def safe(value):
+            if value is None:
+                return ''
+            value = str(value)
+            if value.startswith(('=', '+', '-', '@')):
+                return "'" + value
+            return value
+
+        for call in queryset.iterator(chunk_size=1000):
+            local_time = timezone.localtime(call.call_timestamp, nepal_tz)
+
+            writer.writerow([
+                local_time.strftime('%Y-%m-%d %H:%M:%S'),
+                safe(call.get_direction_display()),
+                safe(call.lead.full_name if call.lead else ''),
+                safe(call.lead.reference_number if call.lead else ''),
+                safe(call.phone_number),
+                safe(call.caller),
+                safe(call.created_by.name if call.created_by else ''),
+                format_duration(call.duration_seconds),
+                call.duration_seconds,
+                safe(call.outcome),
+                safe(call.notes),
+                safe(call.recording_url),
+            ])
+
+        return response
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary', 'export_csv']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
-
 
 class NotificationViewSet(viewsets.ModelViewSet):
     queryset = Notification.objects.all()

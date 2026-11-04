@@ -196,3 +196,196 @@ class GlobalCallListTests(APITestCase):
         self.client.force_authenticate(other_admin)
         response = self.client.get('/api/calls/')
         self.assertNotIn(self.recent_call.id, [r['id'] for r in response.data['results']])
+
+    def test_calls_summary_calculations(self):
+        response = self.client.get('/api/calls/summary/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['total_calls'], 2)
+        self.assertEqual(response.data['inbound_calls'], 1)
+        self.assertEqual(response.data['outbound_calls'], 1)
+        self.assertEqual(response.data['talk_time_seconds'], 330)
+        self.assertEqual(response.data['average_duration_seconds'], 165)
+        self.assertEqual(response.data['connected_calls'], 2)
+        self.assertEqual(response.data['connect_rate'], 100)
+
+    def test_calls_summary_respects_filters(self):
+        response = self.client.get(
+            '/api/calls/summary/?direction=outbound'
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['total_calls'], 1)
+        self.assertEqual(response.data['outbound_calls'], 1)
+        self.assertEqual(response.data['inbound_calls'], 0)
+        self.assertEqual(response.data['talk_time_seconds'], 270)
+
+    def test_calls_csv_export(self):
+        import csv
+        from io import StringIO
+
+        response = self.client.get('/api/calls/export_csv/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('text/csv', response['Content-Type'])
+        self.assertIn('attachment;', response['Content-Disposition'])
+
+        content = response.content.decode('utf-8-sig')
+        rows = list(csv.reader(StringIO(content)))
+
+        self.assertEqual(rows[0], [
+            'Date & time (NPT)',
+            'Direction',
+            'Lead',
+            'Reference',
+            'Phone',
+            'Caller',
+            'Logged by',
+            'Duration (MM:SS)',
+            'Seconds',
+            'Outcome',
+            'Notes',
+            'Recording',
+        ])
+
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[1][1], 'Outbound')
+        self.assertEqual(rows[1][2], 'Call Person')
+        self.assertEqual(rows[1][8], '270')
+
+    def test_csv_export_prevents_formula_injection(self):
+        import csv
+        from io import StringIO
+
+        self.recent_call.caller = '=1+1'
+        self.recent_call.phone_number = '+123456789'
+        self.recent_call.outcome = '-danger'
+        self.recent_call.notes = '@formula'
+        self.recent_call.save()
+
+        response = self.client.get('/api/calls/export_csv/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        content = response.content.decode('utf-8-sig')
+        rows = list(csv.reader(StringIO(content)))
+
+        # Find the exported row for the modified call.
+        call_row = next(row for row in rows if row[8] == '270')
+
+        self.assertEqual(call_row[5], "'=1+1")
+        self.assertEqual(call_row[4], "'+123456789")
+        self.assertEqual(call_row[9], "'-danger")
+        self.assertEqual(call_row[10], "'@formula")
+
+    def test_summary_and_export_respect_branch_scope(self):
+        from apps.branch.models import Branch
+        from apps.lead.models import LeadCall
+
+        other_branch = Branch.objects.create(
+            name='Dharan', code='DHR',
+        )
+
+        LeadCall.objects.create(
+            lead=self.lead,
+            call_timestamp=self.recent_call.call_timestamp,
+            direction='inbound',
+            caller='Other Branch Caller',
+            phone_number='9800000000',
+            duration_seconds=120,
+            branch=other_branch,
+        )
+
+        branch_user = User.objects.create_user(
+            email='branch@test.com',
+            name='Branch User',
+            password='pass',
+            branch=self.branch,
+        )
+
+        self.client.force_authenticate(branch_user)
+
+        # Summary
+        summary = self.client.get('/api/calls/summary/')
+        self.assertEqual(summary.status_code, status.HTTP_200_OK)
+        self.assertEqual(summary.data['total_calls'], 2)
+
+        # List
+        list_response = self.client.get('/api/calls/')
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data['count'], 2)
+
+        callers = [
+            call['caller']
+            for call in list_response.data['results']
+        ]
+        self.assertNotIn('Other Branch Caller', callers)
+
+        # CSV export
+        export = self.client.get('/api/calls/export_csv/')
+        self.assertEqual(export.status_code, status.HTTP_200_OK)
+
+        content = export.content.decode('utf-8-sig')
+        self.assertNotIn('Other Branch Caller', content)
+
+    def test_staff_can_view_all_calls_and_filter_by_branch(self):
+        from apps.branch.models import Branch
+        from apps.lead.models import LeadCall
+
+        other_branch = Branch.objects.create(
+            name='Dharan',
+            code='DHR',
+        )
+
+        LeadCall.objects.create(
+            lead=self.lead,
+            call_timestamp=self.recent_call.call_timestamp,
+            direction='inbound',
+            caller='Dharan Caller',
+            phone_number='9800000000',
+            duration_seconds=120,
+            branch=other_branch,
+        )
+
+        self.client.force_authenticate(self.admin)
+
+        response = self.client.get('/api/calls/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 3)
+
+        response = self.client.get(
+            f'/api/calls/?branch_id={other_branch.id}'
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(
+            response.data['results'][0]['caller'],
+            'Dharan Caller',
+        )
+
+        summary = self.client.get(
+            f'/api/calls/summary/?branch_id={other_branch.id}'
+        )
+        self.assertEqual(summary.status_code, status.HTTP_200_OK)
+        self.assertEqual(summary.data['total_calls'], 1)
+
+        export = self.client.get(
+            f'/api/calls/export_csv/?branch_id={other_branch.id}'
+        )
+        self.assertEqual(export.status_code, status.HTTP_200_OK)
+
+        content = export.content.decode('utf-8-sig')
+        self.assertIn('Dharan Caller', content)
+        self.assertNotIn('Counselor Nine', content)
+
+    def test_summary_uses_fixed_number_of_queries(self):
+        with self.assertNumQueries(3):
+            response = self.client.get('/api/calls/summary/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_csv_export_uses_single_query(self):
+        with self.assertNumQueries(1):
+            response = self.client.get('/api/calls/export_csv/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
