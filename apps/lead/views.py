@@ -332,12 +332,11 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
             .annotate(count=Count('id'))
             .order_by('day')
         )
-
         top_callers = (
-            queryset.values('caller')
+            queryset.values('created_by__name')
             .annotate(call_count=Count('id'))
-            .order_by('-call_count', 'caller')[:10]
-        )
+            .order_by('-call_count', 'created_by__name')[:10]
+         )
 
         return Response({
             'total_calls': total_calls,
