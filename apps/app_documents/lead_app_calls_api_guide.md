@@ -9,6 +9,7 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | Method | Endpoint | Description | Access |
 |--------|----------|-------------|--------|
 | GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated |
+| GET | `/api/calls/export/` | Export all matching calls as a CSV (not paginated) | Authenticated |
 | GET | `/api/leads/{lead_id}/calls/` | List calls for one lead (paginated) | Authenticated |
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
@@ -45,6 +46,7 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
     "caller": "Shikhar",
     "phone_number": "9877700111",
     "duration_seconds": 270,
+    "duration_formatted": "04:30",
     "outcome": "Interested",
     "notes": "",
     "branch": 1,
@@ -54,6 +56,50 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 ```
 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
+
+## Export Calls — `GET /api/calls/export/`
+
+Downloads all calls matching the global call log's search, filters, and branch
+scope, regardless of page size. The response is a streamed UTF-8 CSV with a
+BOM for spreadsheet compatibility. It is named `calls-YYYY-MM-DD.csv` using
+the current Nepal date.
+
+Columns are **Date & time (NPT)**, **Direction**, **Lead**, **Reference**,
+**Phone**, **Caller**, **Logged by**, **Duration (MM:SS)**, **Seconds**,
+**Outcome**, **Notes**, and **Recording**. Text cells beginning with `=`, `+`,
+`-`, or `@` are prefixed with an apostrophe to prevent spreadsheet formula
+execution.
+
+## Call Activity Summary — `GET /api/calls/summary/`
+
+Returns unpaginated call totals, daily activity in Nepal time, and the ten users
+with the most calls. It applies the same filters, search, and branch scoping as
+the global call log; for example, `?direction=outbound` narrows all summary
+values to outbound calls.
+
+```json
+{
+    "total_calls": 128,
+    "inbound": 40,
+    "outbound": 88,
+    "total_seconds": 30215,
+    "total_formatted": "08:23:35",
+    "avg_seconds": 236,
+    "connected_calls": 110,
+    "connect_rate": 0.859,
+    "by_day": [
+        {"date": "2026-10-28", "calls": 14, "seconds": 3310}
+    ],
+    "by_user": [
+        {"user_id": 9, "name": "Shikhar", "calls": 40, "seconds": 9800}
+    ]
+}
+```
+
+`connect_rate` is the fraction of calls with a duration greater than zero,
+rounded to three decimal places. Calls without a creator are grouped under
+`user_id: null` and `name: "Unknown"`. An empty result returns zero totals and
+empty `by_day` and `by_user` arrays.
 
 ## Call Minutes Deduction
 
