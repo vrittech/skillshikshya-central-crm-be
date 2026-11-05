@@ -225,7 +225,7 @@ class LeadCallSerializer(serializers.ModelSerializer):
     class Meta:
         model = LeadCall
         fields = '__all__'
-        read_only_fields = ['lead', 'created_by', 'created_at']
+        read_only_fields = ['lead', 'branch', 'created_by', 'created_at']
 
     def get_duration_formatted(self, obj):
         return format_duration(obj.duration_seconds)
@@ -256,6 +256,7 @@ class LeadCallSerializer(serializers.ModelSerializer):
 
 
 class GlobalCallSerializer(serializers.ModelSerializer):
+    duration_formatted = serializers.SerializerMethodField()
     lead_name = serializers.CharField(source='lead.full_name', read_only=True)
     lead_reference_number = serializers.CharField(
         source='lead.reference_number', read_only=True,
@@ -267,11 +268,14 @@ class GlobalCallSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'lead', 'lead_name', 'lead_reference_number',
             'call_timestamp', 'direction', 'caller', 'phone_number',
-            'duration_seconds', 'outcome', 'notes', 'recording_url',
+            'duration_seconds', 'duration_formatted', 'outcome', 'notes', 'recording_url',
             'next_followup_at', 'next_action',
             'branch', 'created_by', 'created_by_name', 'created_at',
         ]
         read_only_fields = fields
+
+    def get_duration_formatted(self, obj):
+        return format_duration(obj.duration_seconds)
 
 
 class LeadActivitySerializer(serializers.ModelSerializer):

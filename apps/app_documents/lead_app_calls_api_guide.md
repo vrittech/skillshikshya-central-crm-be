@@ -9,6 +9,8 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | Method | Endpoint | Description | Access |
 |--------|----------|-------------|--------|
 | GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated |
+| GET | `/api/calls/summary/` | Totals, Nepal-day activity and top 10 callers | Authenticated |
+| GET | `/api/calls/export/` | Download all matching calls as UTF-8 CSV | Authenticated |
 | GET | `/api/leads/{lead_id}/calls/` | List calls for one lead (paginated) | Authenticated |
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
@@ -45,6 +47,7 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
     "caller": "Shikhar",
     "phone_number": "9877700111",
     "duration_seconds": 270,
+    "duration_formatted": "04:30",
     "outcome": "Interested",
     "notes": "",
     "branch": 1,
@@ -54,6 +57,90 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 ```
 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
+
+## Call Summary — `GET /api/calls/summary/`
+
+Accepts the same filters and search as the global call log, including `branch_id`
+for staff. Pagination and ordering do not affect summary totals. No additional
+model permission is needed beyond authentication.
+
+**Example:**
+```
+GET /api/calls/summary/?direction=outbound&created_by=9
+```
+
+**Response:**
+```json
+{
+    "total_calls": 3,
+    "inbound": 0,
+    "outbound": 3,
+    "total_seconds": 300,
+    "total_formatted": "00:05:00",
+    "avg_seconds": 100.0,
+    "connected_calls": 2,
+    "connect_rate": 0.6666666666666666,
+    "by_day": [{"date": "2026-10-29", "calls": 3, "seconds": 300}],
+    "by_user": [{"user_id": 9, "name": "Sita", "calls": 3, "seconds": 300}]
+}
+```
+
+- Average duration includes zero-second calls and is rounded to two decimal places.
+- Connect rate is a fraction from 0 to 1; a connected call has `duration_seconds > 0`.
+- `total_formatted` uses `HH:MM:SS`; hours may exceed 23.
+- Daily buckets use `Asia/Kathmandu`, independently of the server timezone. Days
+  without calls are omitted. `by_user` is grouped by `created_by`, limited to 10,
+  and ordered by call count descending, then user ID. Missing users are `null` / `Unknown`.
+- An empty result returns zero metrics, `00:00:00`, and empty arrays.
+
+## Call Export — `GET /api/calls/export/`
+
+Accepts the same filters, search and ordering as the list, but exports **all**
+matching rows regardless of `page` or `page_size`.
+
+**Response headers:**
+```
+Content-Type: text/csv; charset=utf-8
+Content-Disposition: attachment; filename="calls-2026-10-29.csv"
+Cache-Control: private, no-store
+```
+
+The filename date and row timestamps use Nepal time. Columns, in order:
+
+```
+Date & time (NPT),Direction,Lead,Reference,Phone,Caller,Logged by,Duration (MM:SS),Seconds,Outcome,Notes,Recording
+```
+
+The stream starts with a UTF-8 BOM for Excel. Text beginning with `=`, `+`, `-`
+or `@` (including after whitespace) is prefixed with an apostrophe. Leading
+tabs and line breaks are also protected. Commas, quotes and embedded line breaks
+are handled by the CSV writer. Missing values produce empty cells.
+
+Rows use `select_related` and a 2,000-row iterator; the response does not build a
+full in-memory export. Report queries remain fixed at two for a paginated list,
+three for a summary, and one for an export, excluding authentication and branch lookup.
+
+### Inclusive date ranges
+
+Send timezone-aware boundaries for Nepal calendar days. For 29 October 2026:
+
+```
+call_timestamp__gte=2026-10-29T00:00:00+05:45
+call_timestamp__lte=2026-10-29T23:59:59.999999+05:45
+```
+
+Use a query encoder so the `+` offset is encoded as `%2B`. Date-only upper bounds
+mean midnight and should not be used for an inclusive last day.
+
+### Branch access
+
+List, detail, summary and export all pass through `BranchFilterBackend`. Non-staff
+with a branch cannot override it using `branch_id`; staff and superusers see all
+branches by default and can narrow the result. Existing behavior is intentionally
+preserved for non-staff users with **no assigned branch**: the backend returns the
+unrestricted queryset. This is a cross-branch disclosure risk. A separate change
+should deny access or return `.none()` until a branch is assigned, with an audit of
+existing accounts and regression tests across every branch-scoped endpoint.
 
 ## Call Minutes Deduction
 
@@ -136,7 +223,7 @@ Every call response includes `duration_formatted` (`"MM:SS"`, e.g. `"04:19"`) fo
 | `recording_url` | string | URL to call recording |
 | `next_followup_at` | datetime | Suggested next followup time |
 | `next_action` | text | Suggested next action |
-| `branch` | int (FK) | Branch ID |
+| `branch` | int (FK, read-only) | Inherited from the lead when the call is created |
 | `created_by` | int (FK, read-only) | Auto-set |
 | `created_by_name` | string (read-only) | Creator display name |
 | `created_at` | datetime (read-only) | Created timestamp |
@@ -209,4 +296,4 @@ GET /api/leads/1/calls/?ordering=-call_timestamp
 
 ## DELETE `/api/leads/{lead_id}/calls/{id}/` — Delete Call
 
-**Response:** `204 No Content`
+**Response:** `405 Method Not Allowed` — call records are permanent.

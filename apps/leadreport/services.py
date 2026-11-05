@@ -232,7 +232,7 @@ def lead_overview_report(request):
         },
         'enrollments': {
             'total': enrollments.count(),
-            'revenue_collected': str(revenue_collected),
+            'revenue_collected': format(revenue_collected, '.2f'),
         },
         'students': Student.objects.count(),
         'communication': {
@@ -387,7 +387,7 @@ def revenue_report(request):
             'end_date': end_date.isoformat() if end_date else None,
         },
         'summary': {
-            'total_collected': str(total_revenue),
+            'total_collected': format(total_revenue, '.2f'),
             'outstanding_to_collect': str(outstanding),
             'successful_payments': payments.count(),
         },
@@ -452,7 +452,7 @@ def enrollment_report(request):
             'total_enrollments': totals['count'],
             'total_listed_fee': str(totals['listed_total']),
             'total_agreed_amount': str(totals['agreed_total']),
-            'collected': str(collected),
+            'collected': format(collected, '.2f'),
         },
         'by_course': by_course,
         'by_status': by_status,

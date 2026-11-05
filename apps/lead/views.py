@@ -1,7 +1,10 @@
 import csv
 from datetime import datetime
 
-from django.http import HttpResponse
+from django.db.models import Avg, Count, Q, Sum
+from django.db.models.functions import TruncDate
+from django.http import HttpResponse, StreamingHttpResponse
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
 from rest_framework import viewsets, status
@@ -42,6 +45,7 @@ from apps.lead.filters import (
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission
 from apps.global_config.filters import BranchFilterBackend
+from apps.lead.call_export import NEPAL_TZ, call_csv_rows
 
 
 class ConfigViewSet(viewsets.ModelViewSet):
@@ -291,16 +295,68 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
     ]
     ordering_fields = ['call_timestamp', 'duration_seconds', 'created_at']
     ordering = ['-call_timestamp']
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         return LeadCall.objects.select_related(
             'lead', 'created_by', 'branch',
         )
 
-    def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
-            return [IsAuthenticated()]
-        return [IsAuthenticated(), IsStaffOrHasPermission()]
+    def filter_queryset(self, queryset):
+        queryset = super().filter_queryset(queryset)
+        return queryset.order_by(*queryset.query.order_by, '-pk')
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        calls = self.filter_queryset(self.get_queryset()).order_by()
+        totals = calls.aggregate(
+            total_calls=Count('id'),
+            inbound=Count('id', filter=Q(direction='inbound')),
+            outbound=Count('id', filter=Q(direction='outbound')),
+            total_seconds=Sum('duration_seconds', default=0),
+            avg_seconds=Avg('duration_seconds', default=0),
+            connected_calls=Count('id', filter=Q(duration_seconds__gt=0)),
+        )
+        hours, remainder = divmod(totals['total_seconds'], 3600)
+        minutes, seconds = divmod(remainder, 60)
+        totals['total_formatted'] = f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+        totals['avg_seconds'] = round(totals['avg_seconds'], 2)
+        totals['connect_rate'] = (
+            totals['connected_calls'] / totals['total_calls']
+            if totals['total_calls'] else 0
+        )
+        totals['by_day'] = list(
+            calls.annotate(date=TruncDate('call_timestamp', tzinfo=NEPAL_TZ))
+            .values('date')
+            .annotate(calls=Count('id'), seconds=Sum('duration_seconds'))
+            .order_by('date')
+        )
+        users = (
+            calls.values('created_by', 'created_by__name')
+            .annotate(calls=Count('id'), seconds=Sum('duration_seconds'))
+            .order_by('-calls', 'created_by')[:10]
+        )
+        totals['by_user'] = [
+            {
+                'user_id': row['created_by'],
+                'name': row['created_by__name'] or 'Unknown',
+                'calls': row['calls'],
+                'seconds': row['seconds'],
+            }
+            for row in users
+        ]
+        return Response(totals)
+
+    @action(detail=False, methods=['get'])
+    def export(self, request):
+        calls = self.filter_queryset(self.get_queryset())
+        response = StreamingHttpResponse(
+            call_csv_rows(calls), content_type='text/csv; charset=utf-8',
+        )
+        today = timezone.localdate(timezone=NEPAL_TZ)
+        response['Content-Disposition'] = f'attachment; filename="calls-{today}.csv"'
+        response['Cache-Control'] = 'private, no-store'
+        return response
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
@@ -522,11 +578,14 @@ class LeadCallViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         from apps.callminutes.services import charge_for_call
 
+        leads = BranchFilterBackend().filter_queryset(self.request, Lead.objects.all(), self)
+        lead = get_object_or_404(leads, pk=self.kwargs['lead_pk'])
         instance = charge_for_call(
             user=self.request.user,
             duration_seconds=serializer.validated_data.get('duration_seconds'),
             create_call=lambda: serializer.save(
-                lead_id=self.kwargs['lead_pk'],
+                lead=lead,
+                branch=lead.branch,
                 created_by=self.request.user,
             ),
         )
