@@ -6,7 +6,6 @@ from apps.lead.views import (
     LeadSourceViewSet, CampaignViewSet, LeadStatusViewSet,
     LeadPriorityViewSet, LeadTagViewSet, LeadTypeViewSet, LeadViewSet,
     LeadCourseInterestViewSet, EnrollmentViewSet, PaymentViewSet,
-    GlobalCallViewSet,
     LeadCallViewSet, LeadActivityViewSet, FollowUpViewSet, LeadDocumentViewSet,
     NotificationViewSet,
     GlobalFollowUpViewSet, GlobalEnrollmentViewSet, GlobalPaymentViewSet,
