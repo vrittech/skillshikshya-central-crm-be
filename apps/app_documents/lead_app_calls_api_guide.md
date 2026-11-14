@@ -9,6 +9,8 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | Method | Endpoint | Description | Access |
 |--------|----------|-------------|--------|
 | GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated |
+| GET | `/api/calls/summary/` | Totals, calls per day and top callers for the same filters | Authenticated |
+| GET | `/api/calls/export_csv/` | Every call matching the same filters as a CSV download | Authenticated |
 | GET | `/api/leads/{lead_id}/calls/` | List calls for one lead (paginated) | Authenticated |
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
@@ -28,7 +30,8 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 | `created_by` | User ID — calls logged by that user |
 | `student` | Student ID — calls on the lead linked to that student |
 | `lead` | Lead ID |
-| `call_timestamp__gte` / `__lte` | Date/time range (ISO 8601) |
+| `call_timestamp__gte` / `__lte` | Date/time range. Either a full ISO 8601 datetime or a bare `YYYY-MM-DD`. A bare date is a whole **Nepal-time** day: `__gte=2026-11-14` starts at 00:00 NPT and `__lte=2026-11-14` runs to the end of 23:59:59 NPT. A datetime without an offset is read as Nepal time. Invalid values return `400`. |
+| `branch_id` | Staff only — narrow to one branch. Ignored for non-staff (always locked to their branch). |
 | `search` | Matches caller, phone number, outcome, notes, lead name & reference number |
 | `ordering` | `call_timestamp`, `duration_seconds`, `created_at` (prefix `-` for desc) |
 | `page` / `page_size` | Standard pagination |
@@ -54,6 +57,53 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 ```
 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
+
+### Call Summary — `GET /api/calls/summary/`
+
+Same query params and branch scoping as `GET /api/calls/` (pagination and `ordering` are ignored). `total_calls` always equals the list's `count` for the same params. Runs a fixed three queries regardless of row count.
+
+| Field | Description |
+|-------|-------------|
+| `total_calls` | Calls matching the filters |
+| `inbound_calls` / `outbound_calls` | Split by direction |
+| `connected_calls` | Calls with `duration_seconds > 0` |
+| `connect_rate` | `connected_calls / total_calls × 100`, 1 decimal (`0` when there are no calls) |
+| `talk_time_seconds` | Sum of `duration_seconds` |
+| `avg_duration_seconds` | `talk_time_seconds / total_calls`, rounded (`0` when there are no calls) |
+| `per_day` | `[{date, count}]` per **Nepal-time** day, oldest first. Empty days inside the active date filter (or between the first and last call when there is none) are filled with `0`. |
+| `top_callers` | Top 10 users by calls logged (`created_by`): `[{user_id, name, calls, talk_time_seconds}]` |
+
+**Example:**
+```
+GET /api/calls/summary/?direction=outbound&call_timestamp__gte=2026-11-01&call_timestamp__lte=2026-11-14
+```
+```json
+{
+    "total_calls": 128,
+    "inbound_calls": 0,
+    "outbound_calls": 128,
+    "connected_calls": 97,
+    "connect_rate": 75.8,
+    "talk_time_seconds": 31740,
+    "avg_duration_seconds": 248,
+    "per_day": [{"date": "2026-11-01", "count": 9}, {"date": "2026-11-02", "count": 0}],
+    "top_callers": [{"user_id": 9, "name": "Sita", "calls": 41, "talk_time_seconds": 10230}]
+}
+```
+
+### Export CSV — `GET /api/calls/export_csv/`
+
+Same query params, scoping and `ordering` as `GET /api/calls/`, but returns **every** matching call (no pagination). Streamed from a single query, so large exports (20k+ rows) don't time out.
+
+- File name: `calls-YYYY-MM-DD.csv` (today in Nepal time).
+- Encoding: UTF-8 with BOM, so Excel shows Devanagari names correctly.
+- Columns, in order: `Date & time (NPT)` · `Direction` · `Lead` · `Reference` · `Phone` · `Caller` · `Logged by` · `Duration (MM:SS)` · `Seconds` · `Outcome` · `Notes` · `Recording`.
+- Formula safety: any text cell starting with `=`, `+`, `-`, `@`, tab or CR is prefixed with `'` so spreadsheets show it as text instead of running it.
+
+**Example:**
+```
+GET /api/calls/export_csv/?created_by=9&call_timestamp__gte=2026-11-14&call_timestamp__lte=2026-11-14
+```
 
 ## Call Minutes Deduction
 
