@@ -1,7 +1,7 @@
 import csv
 from datetime import datetime
 
-from django.http import HttpResponse
+from django.http import HttpResponse, StreamingHttpResponse
 from django.utils import timezone
 
 from rest_framework import viewsets, status
@@ -38,6 +38,9 @@ from apps.lead.filters import (
     LeadCallFilter, LeadActivityFilter, FollowUpFilter, LeadDocumentFilter,
     NotificationFilter,
     GlobalEnrollmentFilter, GlobalPaymentFilter, GlobalCallFilter,
+)
+from apps.lead.calls import (
+    CSV_HEADER, bound_to_nepal_date, build_call_summary, call_to_csv_row, export_filename,
 )
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission
@@ -298,9 +301,50 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        # Reading is open to any signed-in user; BranchFilterBackend (inside
+        # filter_queryset) decides *which* calls they can read. summary and
+        # export_csv must go through filter_queryset for the same reason.
+        if self.action in ['list', 'retrieve', 'summary', 'export_csv']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        """Totals, calls per Nepal day and top 10 callers for the current filters."""
+        queryset = self.filter_queryset(self.get_queryset())
+        params = request.query_params
+        return Response(build_call_summary(
+            queryset,
+            date_from=bound_to_nepal_date(params.get('call_timestamp__gte')),
+            date_to=bound_to_nepal_date(params.get('call_timestamp__lte')),
+        ))
+
+    @action(detail=False, methods=['get'])
+    def export_csv(self, request):
+        """
+        Every call matching the current filters (all pages) as a UTF-8 CSV.
+
+        Streamed row by row from one server-side cursor, so 20k+ calls neither
+        time out nor build the whole file in memory, and select_related keeps
+        it to a single query.
+        """
+        queryset = self.filter_queryset(self.get_queryset())
+
+        class Echo:
+            def write(self, value):
+                return value
+
+        writer = csv.writer(Echo())
+
+        def rows():
+            # BOM so Excel opens the file as UTF-8 (Devanagari names).
+            yield '﻿' + writer.writerow(CSV_HEADER)
+            for call in queryset.iterator(chunk_size=2000):
+                yield writer.writerow(call_to_csv_row(call))
+
+        response = StreamingHttpResponse(rows(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="{export_filename()}"'
+        return response
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
