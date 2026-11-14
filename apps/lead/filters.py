@@ -1,4 +1,5 @@
 import django_filters
+from apps.lead.calls import lower_bound, upper_bound_filter
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment,
@@ -167,14 +168,23 @@ class LeadCallFilter(django_filters.FilterSet):
 class GlobalCallFilter(django_filters.FilterSet):
     caller = django_filters.CharFilter(lookup_expr='icontains')
     notes = django_filters.CharFilter(lookup_expr='icontains')
-    call_timestamp__gte = django_filters.DateTimeFilter(field_name='call_timestamp', lookup_expr='gte')
-    call_timestamp__lte = django_filters.DateTimeFilter(field_name='call_timestamp', lookup_expr='lte')
+    # Accept a full ISO datetime or a bare YYYY-MM-DD. A bare date is a whole
+    # Nepal-time day, so ?call_timestamp__lte=2026-11-14 keeps calls made at
+    # 23:59:59 NPT that day (a plain DateTimeFilter stops at 00:00 UTC).
+    call_timestamp__gte = django_filters.CharFilter(method='filter_timestamp_from')
+    call_timestamp__lte = django_filters.CharFilter(method='filter_timestamp_to')
     created_by = django_filters.NumberFilter(field_name='created_by')
     student = django_filters.NumberFilter(field_name='lead__students')
 
     class Meta:
         model = LeadCall
         fields = ['lead', 'direction', 'outcome']
+
+    def filter_timestamp_from(self, queryset, name, value):
+        return queryset.filter(call_timestamp__gte=lower_bound(value))
+
+    def filter_timestamp_to(self, queryset, name, value):
+        return queryset.filter(upper_bound_filter(value))
 
 
 class LeadActivityFilter(django_filters.FilterSet):
