@@ -1,4 +1,7 @@
 import django_filters
+import datetime
+from apps.lead.tasks import NEPAL_TZ
+
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment,
@@ -169,9 +172,29 @@ class GlobalCallFilter(django_filters.FilterSet):
     notes = django_filters.CharFilter(lookup_expr='icontains')
     call_timestamp__gte = django_filters.DateTimeFilter(field_name='call_timestamp', lookup_expr='gte')
     call_timestamp__lte = django_filters.DateTimeFilter(field_name='call_timestamp', lookup_expr='lte')
+    date_from = django_filters.DateFilter(method='filter_date_from')
+    date_to = django_filters.DateFilter(method='filter_date_to')
     created_by = django_filters.NumberFilter(field_name='created_by')
     student = django_filters.NumberFilter(field_name='lead__students')
 
+    def filter_date_from(self, queryset, name, value):
+        start = datetime.datetime.combine(
+            value,
+            datetime.time.min,
+            tzinfo=NEPAL_TZ
+        )
+        return queryset.filter(call_timestamp__gte=start)
+
+    def filter_date_to(self, queryset, name, value):
+        next_day = value + datetime.timedelta(days=1)
+
+        end = datetime.datetime.combine(
+            next_day,
+            datetime.time.min,
+            tzinfo=NEPAL_TZ
+        )
+
+        return queryset.filter(call_timestamp__lt=end)
     class Meta:
         model = LeadCall
         fields = ['lead', 'direction', 'outcome']

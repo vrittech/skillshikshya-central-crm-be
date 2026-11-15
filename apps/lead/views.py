@@ -1,6 +1,10 @@
 import csv
-from datetime import datetime
+import re
 
+from django.shortcuts import get_object_or_404
+from django.contrib.auth import get_user_model
+from django.db.models import Count, Q , Sum
+from django.db.models.functions import TruncDate
 from django.http import HttpResponse
 from django.utils import timezone
 
@@ -12,6 +16,8 @@ from rest_framework.response import Response
 
 from django_filters.rest_framework import DjangoFilterBackend
 
+from apps.callminutes.utils import format_duration
+from apps.lead.tasks import NEPAL_TZ
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment,
@@ -37,7 +43,7 @@ from apps.lead.filters import (
     LeadCourseInterestFilter, EnrollmentFilter, PaymentFilter,
     LeadCallFilter, LeadActivityFilter, FollowUpFilter, LeadDocumentFilter,
     NotificationFilter,
-    GlobalEnrollmentFilter, GlobalPaymentFilter, GlobalCallFilter,
+    GlobalEnrollmentFilter, GlobalPaymentFilter, GlobalCallFilter
 )
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission
@@ -278,6 +284,46 @@ class GlobalPaymentViewSet(viewsets.ReadOnlyModelViewSet):
         return [IsAuthenticated(), IsStaffOrHasPermission()]
 
 
+FORMULA_TRIGGERS = ('=', '+', '-', '@')
+PHONE_LIKE = re.compile(r'^\+?\d[\d\s()-]{3,18}\d$')
+
+
+def csv_safe(value, allow_phone=False):
+    """Stop spreadsheet apps from running a text cell as a formula.
+
+    Checks the first non-whitespace character, so " =1+1" and "\\n=1+1" are
+    caught too. Real phone numbers are left alone when `allow_phone` is set.
+    """
+    if value is None:
+        return ''
+    text = str(value)
+    if allow_phone and PHONE_LIKE.match(text):
+        return text
+    if text.lstrip().startswith(FORMULA_TRIGGERS) or text.startswith(('\t', '\r')):
+        return "'" + text
+    return text
+
+def resolve_caller_names(caller_values):
+    """Map caller values to display names.
+
+    Numeric values are treated as user IDs. Other values are
+    already names and can be displayed as they are.
+    """
+    ids = {
+        int(v) for v in caller_values
+        if v and str(v).isascii() and str(v).isdigit() and len(str(v)) <= 9
+    }
+    if not ids:
+        return {}
+
+    User = get_user_model()
+
+    return {
+        str(pk): name
+        for pk, name in User.objects.filter(pk__in=ids).values_list('pk', 'name')
+    }
+
+
 class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
     """Flat, cross-lead call log. Newest calls first by default."""
     queryset = LeadCall.objects.none()
@@ -287,7 +333,7 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_class = GlobalCallFilter
     search_fields = [
         'caller', 'phone_number', 'outcome', 'notes', 'lead__full_name',
-        'lead__reference_number',
+        'lead__reference_number', 'created_by__name',
     ]
     ordering_fields = ['call_timestamp', 'duration_seconds', 'created_at']
     ordering = ['-call_timestamp']
@@ -298,9 +344,133 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary', 'export']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        qs = self.filter_queryset(self.get_queryset()).order_by()
+
+        totals = qs.aggregate(
+            total=Count('id'),
+            inbound=Count('id', filter=Q(direction='inbound')),
+            outbound=Count('id', filter=Q(direction='outbound')),
+            connected=Count('id', filter=Q(duration_seconds__gt=0)),
+            talk_seconds=Sum('duration_seconds'),
+        )
+
+        total = totals['total']
+        talk = totals['talk_seconds'] or 0
+
+        per_day = (
+            qs.annotate(day=TruncDate('call_timestamp', tzinfo=NEPAL_TZ))
+            .values('day')
+            .annotate(count=Count('id'))
+            .order_by('day')
+        )
+
+        caller_rows = list(
+            qs.values('caller')
+            .annotate(count=Count('id'))
+            .order_by('-count', 'caller')[:10]
+        )
+
+        names = resolve_caller_names(row['caller'] for row in caller_rows)
+
+        top_callers = [
+            {
+                'caller_id': row['caller'],
+                'caller': names.get(row['caller'], row['caller']),
+                'count': row['count'],
+            }
+            for row in caller_rows
+        ]
+
+        return Response({
+            'total_calls': total,
+            'inbound_calls': totals['inbound'],
+            'outbound_calls': totals['outbound'],
+            'talk_seconds': talk,
+            'avg_duration_seconds': round(talk / total) if total else 0,
+            'connected_calls': totals['connected'],
+            'connect_rate': round(
+                totals['connected'] * 100 / total, 1
+            ) if total else 0,
+            'calls_per_day': [
+                {
+                    'date': row['day'].isoformat(),
+                    'count': row['count'],
+                }
+                for row in per_day
+            ],
+            'top_callers': top_callers,
+        })
+
+    @action(detail=False, methods=['get'])
+    def export(self, request):
+        qs = self.filter_queryset(self.get_queryset())
+
+        caller_names = resolve_caller_names(
+            list(
+                qs.order_by()
+                .values_list('caller', flat=True)
+                .distinct()
+            )
+        )
+
+        today = timezone.now().astimezone(NEPAL_TZ).strftime('%Y-%m-%d')
+
+        response = HttpResponse(
+            content_type='text/csv; charset=utf-8'
+        )
+        response['Content-Disposition'] = (
+            f'attachment; filename="calls-{today}.csv"'
+        )
+
+        # UTF-8 BOM helps Excel display Nepali/Devanagari text correctly.
+        response.write('\ufeff')
+
+        writer = csv.writer(response)
+
+        writer.writerow([
+            'Date & time (NPT)',
+            'Direction',
+            'Lead',
+            'Reference',
+            'Phone',
+            'Caller',
+            'Logged by',
+            'Duration (MM:SS)',
+            'Seconds',
+            'Outcome',
+            'Notes',
+            'Recording',
+        ])
+
+        for call in qs.iterator(chunk_size=500):
+            writer.writerow([
+                call.call_timestamp.astimezone(NEPAL_TZ).strftime(
+                    '%Y-%m-%d %H:%M:%S'
+                ),
+                call.get_direction_display(),
+                csv_safe(call.lead.full_name),
+                csv_safe(call.lead.reference_number),
+                csv_safe(call.phone_number,allow_phone=True),
+                csv_safe(
+                    caller_names.get(call.caller, call.caller)
+                ),
+                csv_safe(
+                    call.created_by.name if call.created_by else ''
+                ),
+                format_duration(call.duration_seconds),
+                call.duration_seconds,
+                csv_safe(call.outcome),
+                csv_safe(call.notes),
+                csv_safe(call.recording_url),
+            ])
+
+        return response
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
@@ -522,14 +692,24 @@ class LeadCallViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         from apps.callminutes.services import charge_for_call
 
+        parent = get_object_or_404(Lead, pk=self.kwargs['lead_pk'])
+
+        # Calls inherit the lead's branch, otherwise the logger's branch.
+        branch = (
+            parent.branch
+            or getattr(self.request.user, 'branch', None)
+        )
+
         instance = charge_for_call(
             user=self.request.user,
             duration_seconds=serializer.validated_data.get('duration_seconds'),
             create_call=lambda: serializer.save(
                 lead_id=self.kwargs['lead_pk'],
                 created_by=self.request.user,
+                branch=branch,
             ),
         )
+
         lead = instance.lead
         if lead.last_contact_at is None or instance.call_timestamp > lead.last_contact_at:
             lead.last_contact_at = instance.call_timestamp

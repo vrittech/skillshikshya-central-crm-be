@@ -13,6 +13,8 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
 | PATCH | `/api/leads/{lead_id}/calls/{id}/` | Update call notes/outcome etc. | Staff or `lead.change_leadcall` permission |
+| GET | `/api/calls/summary/` | Call totals, per-day counts and top callers for the current filters | Authenticated |
+| GET | `/api/calls/export/` | Download the filtered calls as a CSV file | Authenticated |
 
 > **DELETE is disabled** — call records are permanent and cannot be deleted via the API (`405 Method Not Allowed`), so the call-minutes ledger stays trustworthy.
 
@@ -29,7 +31,10 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 | `student` | Student ID — calls on the lead linked to that student |
 | `lead` | Lead ID |
 | `call_timestamp__gte` / `__lte` | Date/time range (ISO 8601) |
-| `search` | Matches caller, phone number, outcome, notes, lead name & reference number |
+| | `date_from` | `YYYY-MM-DD` — calls from 00:00:00 Nepal time (NPT) of that day |
+| `date_to` | `YYYY-MM-DD` — calls up to and including 23:59:59 NPT of that day |
+| `branch_id` | Staff only — narrow to one branch (ignored for non-staff) |
+| `search` | Matches caller, phone number, outcome, notes, lead name & reference number, and the logging user's name |
 | `ordering` | `call_timestamp`, `duration_seconds`, `created_at` (prefix `-` for desc) |
 | `page` / `page_size` | Standard pagination |
 
@@ -54,6 +59,67 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 ```
 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
+
+## Calls Summary — `GET /api/calls/summary/`
+
+Totals for the calls that match the current filters. It takes the **same query params as `GET /api/calls/`** and applies the **same branch scoping**, so `total_calls` always equals the list's `count` for the same filters. `page`, `page_size` and `ordering` are ignored.
+
+**Example response (200):**
+```json
+{
+    "total_calls": 4,
+    "inbound_calls": 2,
+    "outbound_calls": 2,
+    "talk_seconds": 360,
+    "avg_duration_seconds": 90,
+    "connected_calls": 3,
+    "connect_rate": 75.0,
+    "calls_per_day": [
+        { "date": "2026-11-05", "count": 1 },
+        { "date": "2026-11-15", "count": 3 }
+    ],
+    "top_callers": [
+        { "caller_id": "12", "caller": "Sita Rai", "count": 2 }
+    ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `total_calls` | Number of matching calls |
+| `inbound_calls` / `outbound_calls` | Split by direction |
+| `talk_seconds` | Sum of `duration_seconds` |
+| `avg_duration_seconds` | `talk_seconds / total_calls`, rounded; includes unanswered calls |
+| `connected_calls` | Calls with `duration_seconds > 0` |
+| `connect_rate` | `connected_calls / total_calls × 100`, one decimal |
+| `calls_per_day` | One row per day that has calls, oldest first. Days are counted in **Nepal time (UTC+5:45)**: a call at 11 pm NPT belongs to that day |
+| `top_callers` | Top 10 callers by number of calls. `caller_id` is the raw `caller` value; `caller` is the display name (a numeric user id is resolved to the user's name, anything else is shown as stored) |
+
+With no matching calls every number is `0` and both lists are empty.
+
+## Calls Export — `GET /api/calls/export/`
+
+Downloads **all** calls that match the current filters as a CSV, across every page. Same query params and branch scoping as `GET /api/calls/`; `page` and `page_size` are ignored.
+
+- **Filename:** `calls-YYYY-MM-DD.csv` (today's date in NPT).
+- **Encoding:** UTF-8 with a byte-order mark, so Excel and Google Sheets show Nepali (Devanagari) names correctly.
+- **Formula safety:** a text cell that starts with `=`, `+`, `-` or `@` is prefixed with `'`, so spreadsheet apps show it as text instead of running it.
+- **Time zone:** `Date & time (NPT)` is Nepal time.
+
+| # | Column | Notes |
+|---|--------|-------|
+| 1 | Date & time (NPT) | `YYYY-MM-DD HH:MM:SS` |
+| 2 | Direction | `Inbound` / `Outbound` |
+| 3 | Lead | Lead name |
+| 4 | Reference | Lead reference number |
+| 5 | Phone | |
+| 6 | Caller | Display name (numeric user ids are resolved) |
+| 7 | Logged by | User who logged the call |
+| 8 | Duration (MM:SS) | e.g. `04:19` |
+| 9 | Seconds | Raw `duration_seconds` |
+| 10 | Outcome | |
+| 11 | Notes | |
+| 12 | Recording | Recording URL |
 
 ## Call Minutes Deduction
 
@@ -209,4 +275,4 @@ GET /api/leads/1/calls/?ordering=-call_timestamp
 
 ## DELETE `/api/leads/{lead_id}/calls/{id}/` — Delete Call
 
-**Response:** `204 No Content`
+**Response:** `405 Method Not Allowed` — call records cannot be deleted.
