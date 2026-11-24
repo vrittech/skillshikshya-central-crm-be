@@ -130,15 +130,25 @@ class EnrollmentSerializer(serializers.ModelSerializer):
         model = Enrollment
         fields = '__all__'
         read_only_fields = [
-            'lead', 'created_by', 'updated_by', 'created_at', 'updated_at',
+            # The student is linked by Confirm enrollment, never by hand.
+            'lead', 'student', 'created_by', 'updated_by', 'created_at', 'updated_at',
             'total_paid', 'remaining_amount', 'is_full_paid',
         ]
 
+    def _price_is_open(self):
+        """The price can change while the enrollment is pending and nothing is paid."""
+        enrollment = self.instance
+        return (
+            enrollment.status == Enrollment.Status.PENDING
+            and not enrollment.payments.filter(status=Payment.Status.SUCCESSFUL).exists()
+        )
+
     def validate(self, attrs):
-        # The price is fixed once saved. Later changes are money entries with a reason.
-        if self.instance is not None:
+        # Once confirmed or paid, the price is fixed. Later changes are money
+        # entries with a reason.
+        if self.instance is not None and not self._price_is_open():
             errors = {
-                field: 'The price is fixed once the enrollment is saved. '
+                field: 'The price is fixed once the enrollment is confirmed or paid. '
                        'Add an extra charge or a discount with a reason instead.'
                 for field in self.PRICE_FIELDS
                 if field in attrs and attrs[field] != getattr(self.instance, field)
@@ -148,9 +158,11 @@ class EnrollmentSerializer(serializers.ModelSerializer):
         return attrs
 
     def validate_status(self, value):
-        # Cancel and reinstate need a reason, so they have their own actions.
+        # Confirm, cancel and reinstate have their own actions (cancel and
+        # reinstate need a reason), so a plain edit cannot do them.
         current = self.instance.status if self.instance else None
         cancelled = Enrollment.Status.CANCELLED
+        pending = Enrollment.Status.PENDING
         if value == cancelled and current != cancelled:
             raise serializers.ValidationError(
                 'To cancel, use Cancel enrollment and give a reason.'
@@ -158,6 +170,17 @@ class EnrollmentSerializer(serializers.ModelSerializer):
         if current == cancelled and value != cancelled:
             raise serializers.ValidationError(
                 'To reopen, use Reinstate enrollment and give a reason.'
+            )
+        if self.instance is None and value != pending:
+            raise serializers.ValidationError(
+                'A new enrollment starts as pending. Confirm it to make the lead a student.'
+            )
+        if current == pending and value != pending:
+            raise serializers.ValidationError('To confirm, use Confirm enrollment.')
+        if current not in (None, pending) and value == pending:
+            raise serializers.ValidationError(
+                'A confirmed enrollment cannot go back to pending. '
+                'Cancel it with a reason instead.'
             )
         return value
 

@@ -44,22 +44,23 @@ class InvoiceTestBase(APITestCase):
         InvoiceEmailConfig.load()
 
 
-class StudentCreationInvoiceTests(InvoiceTestBase):
-    def test_student_creation_generates_enrollment_invoice(self):
-        response = self.client.post('/api/students/', {
-            'full_name': 'Rahul Sharma',
-            'phone': '9800000002',
-            'lead': self.lead.id,
-            'branch': self.branch.id,
-        }, format='json')
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+class FeeInvoiceOnConfirmTests(InvoiceTestBase):
+    def setUp(self):
+        super().setUp()
+        Enrollment.objects.filter(id=self.enrollment.id).update(status='pending')
+        self.confirm_url = f'/api/leads/{self.lead.id}/enrollments/{self.enrollment.id}/confirm/'
+
+    def test_confirm_generates_enrollment_invoice(self):
+        response = self.client.post(self.confirm_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
         invoice = Invoice.objects.get(type='enrollment')
+        self.enrollment.refresh_from_db()
         self.assertEqual(invoice.enrollment_id, self.enrollment.id)
         self.assertEqual(str(invoice.amount), '28000.00')
         self.assertEqual(invoice.course_name, 'Python Advanced')
         self.assertTrue(invoice.invoice_number.startswith('INV-'))
-        self.assertEqual(invoice.student_id, response.data['id'])
+        self.assertEqual(invoice.student_id, self.enrollment.student_id)
 
     def test_no_enrollment_means_no_invoice(self):
         Lead.objects.create(full_name='No Course', phone='111')
@@ -70,17 +71,10 @@ class StudentCreationInvoiceTests(InvoiceTestBase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(Invoice.objects.count(), 0)
 
-    def test_no_duplicate_invoice_on_second_student(self):
-        self.client.post('/api/students/', {
-            'full_name': 'First', 'phone': '333', 'lead': self.lead.id,
-        }, format='json')
-        # a second student from the same lead must not duplicate fee invoice
-        self.client.post('/api/students/', {
-            'full_name': 'Second', 'phone': '444', 'lead': self.lead.id,
-        }, format='json')
-        self.assertEqual(
-            Invoice.objects.filter(type='enrollment').count(), 1,
-        )
+    def test_no_duplicate_fee_invoice(self):
+        self.client.post(self.confirm_url)
+        self.client.post(self.confirm_url)
+        self.assertEqual(Invoice.objects.filter(type='enrollment').count(), 1)
 
 
 class PaymentInvoiceTests(InvoiceTestBase):

@@ -1,6 +1,9 @@
 from datetime import date
+from decimal import Decimal
+from io import StringIO
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.core.exceptions import ValidationError
 from django.db.models import ProtectedError
 from django.utils import timezone
@@ -8,7 +11,9 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.course.models import Course, CourseBatch
+from apps.invoices.models import Invoice
 from apps.lead.models import Adjustment, Lead, Enrollment, Payment, EnrollmentHistory
+from apps.student.models import Student
 
 User = get_user_model()
 
@@ -605,7 +610,7 @@ class AdjustmentTests(APITestCase):
             entry.delete()
         self.assertEqual(self.client.get(self.url).data['count'], 1)
 
-    def test_price_cannot_be_edited_after_saving(self):
+    def test_price_cannot_be_edited_once_confirmed(self):
         response = self.client.patch(
             self.enrollment_url, {'agreed_amount': '25000'}, format='json',
         )
@@ -728,3 +733,171 @@ class LeadActionRoutingTests(APITestCase):
         response = self.client.post(f'/api/notifications/{self.lead.id}/purge/')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertTrue(Lead._base_manager.filter(id=self.lead.id).exists())
+
+
+class ConfirmEnrollmentTests(APITestCase):
+    """A lead becomes a student when an enrollment is confirmed, not on payment."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email='confirm@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+        self.course = Course.objects.create(name='Python', full_amount=30000)
+        self.lead = Lead.objects.create(
+            full_name='Sita Rai', phone='9800000900', email='sita@example.com',
+        )
+        self.enrollments_url = f'/api/leads/{self.lead.id}/enrollments/'
+        self.enrollment = self._enroll()
+
+    def _enroll(self, **extra):
+        response = self.client.post(self.enrollments_url, {
+            'course': self.course.id, 'enrollment_date': str(date.today()),
+            'listed_fee': '30000', 'agreed_amount': '30000', **extra,
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        return Enrollment.objects.get(id=response.data['id'])
+
+    def _confirm(self, enrollment):
+        return self.client.post(f'{self.enrollments_url}{enrollment.id}/confirm/')
+
+    def test_new_enrollment_is_pending_and_not_a_student(self):
+        self.assertEqual(self.enrollment.status, 'pending')
+        self.assertFalse(Student.objects.exists())
+        self.lead.refresh_from_db()
+        self.assertFalse(self.lead.is_converted)
+
+    def test_confirm_makes_the_lead_a_student(self):
+        response = self._confirm(self.enrollment)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'confirmed')
+        student = Student.objects.get()
+        self.assertEqual((student.full_name, student.phone, student.email),
+                         ('Sita Rai', '9800000900', 'sita@example.com'))
+        self.assertEqual(student.lead, self.lead)
+        self.enrollment.refresh_from_db()
+        self.assertEqual(self.enrollment.student, student)
+        self.lead.refresh_from_db()
+        self.assertTrue(self.lead.is_converted)
+        self.assertIsNotNone(self.lead.converted_at)
+        row = self.enrollment.history.get()
+        self.assertEqual(row.action, 'confirm')
+        self.assertEqual(row.after, {'status': 'confirmed', 'student': student.student_id})
+
+    def test_confirm_makes_the_fee_invoice_once(self):
+        self._confirm(self.enrollment)
+        again = self._confirm(self.enrollment)
+        self.assertEqual(again.status_code, status.HTTP_400_BAD_REQUEST)
+        invoice = Invoice.objects.get(type='enrollment')
+        self.assertEqual(invoice.amount, Decimal('30000'))
+        self.assertEqual(invoice.student, Student.objects.get())
+
+    def test_second_course_uses_the_same_student(self):
+        self._confirm(self.enrollment)
+        second = self._enroll()
+        self._confirm(second)
+        second.refresh_from_db()
+        self.assertEqual(Student.objects.count(), 1)
+        self.assertEqual(second.student, Student.objects.get())
+        self.assertEqual(Invoice.objects.filter(type='enrollment').count(), 2)
+
+    def test_payment_does_not_make_a_student(self):
+        self.client.post(f'{self.enrollments_url}{self.enrollment.id}/payments/', {
+            'amount': '5000', 'payment_date': timezone.now().isoformat(),
+            'payment_method': 'cash', 'status': 'successful',
+        }, format='json')
+        self.assertFalse(Student.objects.exists())
+
+    def test_cancelled_enrollment_cannot_be_confirmed(self):
+        self.client.post(
+            f'{self.enrollments_url}{self.enrollment.id}/cancel/', {'reason': 'No'}, format='json',
+        )
+        self.assertEqual(self._confirm(self.enrollment).status_code, 400)
+        self.assertFalse(Student.objects.exists())
+
+    def test_new_enrollment_cannot_skip_pending(self):
+        response = self.client.post(self.enrollments_url, {
+            'course': self.course.id, 'enrollment_date': str(date.today()),
+            'listed_fee': '30000', 'agreed_amount': '30000', 'status': 'active',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('status', response.data)
+
+    def test_edit_cannot_confirm_or_go_back_to_pending(self):
+        url = f'{self.enrollments_url}{self.enrollment.id}/'
+        skip = self.client.patch(url, {'status': 'active'}, format='json')
+        self.assertEqual(skip.status_code, status.HTTP_400_BAD_REQUEST)
+        self._confirm(self.enrollment)
+        back = self.client.patch(url, {'status': 'pending'}, format='json')
+        self.assertEqual(back.status_code, status.HTTP_400_BAD_REQUEST)
+        onward = self.client.patch(url, {'status': 'active'}, format='json')
+        self.assertEqual(onward.status_code, status.HTTP_200_OK)
+
+    def test_price_can_change_only_while_pending_and_unpaid(self):
+        url = f'{self.enrollments_url}{self.enrollment.id}/'
+        ok = self.client.patch(url, {'listed_fee': '32000', 'agreed_amount': '32000'}, format='json')
+        self.assertEqual(ok.status_code, status.HTTP_200_OK)
+        Payment.objects.create(
+            enrollment=self.enrollment, amount=1000, payment_date=timezone.now(),
+            payment_method='cash', status='successful',
+        )
+        paid = self.client.patch(url, {'agreed_amount': '31000'}, format='json')
+        self.assertEqual(paid.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('agreed_amount', paid.data)
+
+    def test_price_is_fixed_once_confirmed(self):
+        self._confirm(self.enrollment)
+        response = self.client.patch(
+            f'{self.enrollments_url}{self.enrollment.id}/', {'listed_fee': '1'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_student_link_cannot_be_set_by_hand(self):
+        other = Student.objects.create(full_name='Other', phone='1')
+        self.client.patch(
+            f'{self.enrollments_url}{self.enrollment.id}/', {'student': other.id}, format='json',
+        )
+        self.enrollment.refresh_from_db()
+        self.assertIsNone(self.enrollment.student)
+
+    def test_confirm_needs_permission(self):
+        counselor = User.objects.create_user(email='c9@t.com', name='C9', password='x')
+        self.client.force_authenticate(counselor)
+        self.assertEqual(self._confirm(self.enrollment).status_code, status.HTTP_403_FORBIDDEN)
+
+
+class MakeStudentsForOldDataTests(APITestCase):
+    def setUp(self):
+        course = Course.objects.create(name='Python', full_amount=30000)
+        self.lead = Lead.objects.create(full_name='Old Lead', phone='9800000950')
+        self.active = Enrollment.objects.create(
+            lead=self.lead, course=course, enrollment_date=date.today(),
+            listed_fee=30000, agreed_amount=30000, status='active',
+        )
+        self.pending = Enrollment.objects.create(
+            lead=self.lead, course=course, enrollment_date=date.today(),
+            listed_fee=30000, agreed_amount=30000,
+        )
+        Lead.objects.create(full_name='Only pending', phone='9800000951')
+
+    def _run(self, *args):
+        out = StringIO()
+        call_command('make_students_for_enrolled_leads', *args, stdout=out)
+        return out.getvalue()
+
+    def test_dry_run_changes_nothing(self):
+        self.assertIn('Would make 1 students and link 1 enrollments', self._run('--dry-run'))
+        self.assertFalse(Student.objects.exists())
+
+    def test_makes_students_without_invoices(self):
+        self.assertIn('Made 1 students and linked 1 enrollments', self._run())
+        student = Student.objects.get()
+        self.active.refresh_from_db()
+        self.pending.refresh_from_db()
+        self.assertEqual(self.active.student, student)
+        self.assertIsNone(self.pending.student)
+        self.lead.refresh_from_db()
+        self.assertTrue(self.lead.is_converted)
+        self.assertFalse(Invoice.objects.exists())
+        # Running it again changes nothing.
+        self.assertIn('Made 0 students and linked 0 enrollments', self._run())

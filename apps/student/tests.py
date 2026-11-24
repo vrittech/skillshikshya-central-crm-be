@@ -20,32 +20,18 @@ class LeadConversionTests(APITestCase):
             full_name='Fresh Lead', phone='9800000077',
         )
 
-    def test_student_creation_flips_conversion_flags(self):
+    def test_student_from_a_lead_is_refused(self):
+        # A lead becomes a student only through Confirm enrollment.
         response = self.client.post('/api/students/', {
             'full_name': 'Converted Student',
             'phone': '9800000077',
             'lead': self.lead.id,
         }, format='json')
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-
-        self.lead.refresh_from_db()
-        self.assertTrue(self.lead.is_converted)
-        self.assertIsNotNone(self.lead.converted_at)
-
-    def test_duplicate_conversion_blocked(self):
-        self.client.post('/api/students/', {
-            'full_name': 'First Student',
-            'phone': '9800000078',
-            'lead': self.lead.id,
-        }, format='json')
-
-        response = self.client.post('/api/students/', {
-            'full_name': 'Second Student',
-            'phone': '9800000079',
-            'lead': self.lead.id,
-        }, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('already been converted', str(response.data))
+        self.assertIn('Confirm enrollment', str(response.data['lead']))
+        self.assertFalse(Student.objects.exists())
+        self.lead.refresh_from_db()
+        self.assertFalse(self.lead.is_converted)
 
     def test_standalone_student_does_not_touch_leads(self):
         other_lead = Lead.objects.create(full_name='Untouched', phone='1')

@@ -471,7 +471,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in [
-            'create', 'update', 'partial_update', 'destroy', 'cancel', 'reinstate',
+            'create', 'update', 'partial_update', 'destroy', 'confirm', 'cancel', 'reinstate',
         ]:
             permission_classes = [IsAuthenticated, IsStaffOrHasPermission]
         else:
@@ -482,6 +482,12 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         serializer = ReasonSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         return serializer.validated_data['reason']
+
+    @action(detail=True, methods=['post'])
+    def confirm(self, request, *args, **kwargs):
+        """Confirm a pending enrollment. This makes the lead a student."""
+        enrollment = services.confirm_enrollment(self.get_object(), user=request.user)
+        return Response(self.get_serializer(enrollment).data)
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, *args, **kwargs):

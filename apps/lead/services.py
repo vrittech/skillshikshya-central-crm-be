@@ -8,7 +8,7 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import APIException
 
-from apps.lead.models import Adjustment, Enrollment, EnrollmentHistory, Payment
+from apps.lead.models import Adjustment, Enrollment, EnrollmentHistory, Lead, Payment
 
 
 class ActionRefused(APIException):
@@ -67,6 +67,100 @@ def reinstate_enrollment(enrollment, *, reason, user):
         before={'status': Enrollment.Status.CANCELLED},
         after={'status': restored},
     )
+    return enrollment
+
+
+def mark_converted(lead):
+    """Note when the lead became a student (only the first time)."""
+    if lead.is_converted:
+        return
+    lead.is_converted = True
+    lead.converted_at = timezone.now()
+    lead.save(update_fields=['is_converted', 'converted_at', 'lead_score'])
+
+
+def student_for_lead(lead, *, enrollment, user):
+    """The lead's student, made from the lead's details the first time.
+
+    Also marks the lead converted. Returns (student, created).
+    """
+    from apps.student.models import Student
+
+    student = Student.objects.filter(lead=lead).order_by('id').first()
+    created = student is None
+    if created:
+        student = Student.objects.create(
+            full_name=lead.full_name,
+            phone=lead.phone or '',
+            secondary_phone=lead.secondary_phone,
+            email=lead.email,
+            address=lead.address,
+            source=lead.source,
+            branch=lead.branch or enrollment.branch,
+            assigned_counselor=lead.assigned_counselor,
+            lead=lead,
+            enrolled_at=enrollment.enrollment_date,
+            notes=(
+                f'Became a student when the {enrollment.course.name} enrollment was '
+                f'confirmed (lead {lead.reference_number}).'
+            ),
+            created_by=user,
+        )
+    mark_converted(lead)
+    return student, created
+
+
+def issue_fee_invoice(enrollment, *, user):
+    """Make the course-fee invoice for an enrollment, unless it has an active one."""
+    from apps.invoices.services import create_invoice
+
+    if enrollment.invoices.filter(type='enrollment', status='active').exists():
+        return None
+    invoice, _ = create_invoice(
+        enrollment=enrollment,
+        invoice_type='enrollment',
+        amount=enrollment.agreed_amount,
+        created_by=user,
+    )
+    return invoice
+
+
+@transaction.atomic
+def confirm_enrollment(enrollment, *, user):
+    """Confirm a pending enrollment: the moment a lead becomes a student.
+
+    In one step: the enrollment is confirmed, the lead's student is found or
+    made, the enrollment is linked to it, the lead is marked converted, a
+    history row is written and the fee invoice is made. Payment does not
+    decide this; a student can pay later or in parts.
+    """
+    enrollment = _lock(enrollment)
+    if enrollment.status != Enrollment.Status.PENDING:
+        raise ActionRefused('Only a pending enrollment can be confirmed.')
+    lead = Lead._base_manager.select_for_update().get(pk=enrollment.lead_id)
+
+    if enrollment.student_id:
+        student, created = enrollment.student, False
+        mark_converted(lead)
+    else:
+        student, created = student_for_lead(lead, enrollment=enrollment, user=user)
+
+    enrollment.student = student
+    enrollment.status = Enrollment.Status.CONFIRMED
+    enrollment.updated_by = user
+    enrollment.save(update_fields=['student', 'status', 'updated_by', 'updated_at'])
+    EnrollmentHistory.record(
+        enrollment=enrollment,
+        action=EnrollmentHistory.Action.CONFIRM,
+        reason=(
+            'Enrollment confirmed. The lead is now a student.' if created
+            else 'Enrollment confirmed.'
+        ),
+        performed_by=user,
+        before={'status': Enrollment.Status.PENDING},
+        after={'status': enrollment.status, 'student': student.student_id},
+    )
+    issue_fee_invoice(enrollment, user=user)
     return enrollment
 
 

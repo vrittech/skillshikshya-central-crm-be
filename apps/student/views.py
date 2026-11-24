@@ -1,7 +1,6 @@
 import csv
 
 from django.http import HttpResponse
-from django.utils import timezone
 
 from rest_framework import viewsets
 from rest_framework.decorators import action
@@ -12,7 +11,6 @@ from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 
 from apps.student.models import Student, StudentDocument, Attendance
-from apps.lead.models import Enrollment
 from apps.student.serializers import (
     StudentSerializer, StudentListSerializer,
     StudentDocumentSerializer, AttendanceSerializer,
@@ -60,42 +58,16 @@ class StudentViewSet(viewsets.ModelViewSet):
         return Response(profile)
 
     def perform_create(self, serializer):
-        from apps.invoices.services import create_invoice
         from rest_framework.exceptions import ValidationError
 
-        lead = serializer.validated_data.get('lead')
-        if lead and (
-            Student.objects.filter(lead=lead).exists() or lead.is_converted
-        ):
+        # A lead becomes a student only through Confirm enrollment, which also
+        # links the enrollment and makes the fee invoice.
+        if serializer.validated_data.get('lead'):
             raise ValidationError({
-                'lead': 'This lead has already been converted to a student.'
+                'lead': 'A lead becomes a student when one of their enrollments is '
+                        'confirmed. Use Confirm enrollment on the lead.'
             })
-
-        student = serializer.save(created_by=self.request.user)
-
-        enrollments = student.lead.enrollments.exclude(
-            status='cancelled',
-        ).select_related('course') if student.lead_id else Enrollment.objects.none()
-
-        for enrollment in enrollments:
-            # Claim enrollments from the same lead that have no student yet.
-            if enrollment.student_id is None:
-                enrollment.student = student
-                enrollment.save(update_fields=['student'])
-
-            has_fee_invoice = enrollment.invoices.filter(type='enrollment').exists()
-            if not has_fee_invoice:
-                create_invoice(
-                    enrollment=enrollment,
-                    invoice_type='enrollment',
-                    amount=enrollment.agreed_amount,
-                    created_by=self.request.user,
-                )
-
-        if student.lead_id and not student.lead.is_converted:
-            student.lead.is_converted = True
-            student.lead.converted_at = timezone.now()
-            student.lead.save(update_fields=['is_converted', 'converted_at', 'lead_score'])
+        serializer.save(created_by=self.request.user)
 
     def perform_update(self, serializer):
         serializer.save(updated_by=self.request.user)
