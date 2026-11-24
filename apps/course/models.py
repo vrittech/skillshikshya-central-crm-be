@@ -160,3 +160,12 @@ class CourseBatch(models.Model):
 
     def __str__(self):
         return self.coursebatch_id or self.name
+
+    def count_seats_taken(self, exclude=None):
+        """Students sitting in this batch now. Paused, left and cancelled ones don't count."""
+        from apps.lead.models import Enrollment
+
+        seated = self.seated_enrollments.filter(status__in=Enrollment.SEAT_STATUSES)
+        if exclude is not None:
+            seated = seated.exclude(pk=exclude.pk)
+        return seated.count()

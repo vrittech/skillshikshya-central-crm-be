@@ -12,7 +12,10 @@ from rest_framework.test import APITestCase
 
 from apps.course.models import Course, CourseBatch
 from apps.invoices.models import Invoice
-from apps.lead.models import Adjustment, Lead, Enrollment, Payment, EnrollmentHistory
+from apps.lead.models import (
+    Adjustment, Lead, Enrollment, Payment, EnrollmentHistory, Placement,
+)
+from apps.lead.seat_backfill import backfill_seats
 from apps.student.models import Student
 
 User = get_user_model()
@@ -782,7 +785,9 @@ class ConfirmEnrollmentTests(APITestCase):
         self.assertIsNotNone(self.lead.converted_at)
         row = self.enrollment.history.get()
         self.assertEqual(row.action, 'confirm')
-        self.assertEqual(row.after, {'status': 'confirmed', 'student': student.student_id})
+        self.assertEqual(
+            row.after, {'status': 'confirmed', 'student': student.student_id, 'batch': None},
+        )
 
     def test_confirm_makes_the_fee_invoice_once(self):
         self._confirm(self.enrollment)
@@ -901,3 +906,254 @@ class MakeStudentsForOldDataTests(APITestCase):
         self.assertFalse(Invoice.objects.exists())
         # Running it again changes nothing.
         self.assertIn('Made 0 students and linked 0 enrollments', self._run())
+
+
+class SeatTests(APITestCase):
+    """Confirm takes a seat in the batch, cancel frees it, and full or closed batches refuse."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email='seats@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+        self.course = Course.objects.create(name='Python', full_amount=30000)
+        self.other_course = Course.objects.create(name='Java', full_amount=20000)
+        self.batch = CourseBatch.objects.create(
+            name='Python Nov', course=self.course, capacity=2, status='running',
+        )
+        self.next_batch = CourseBatch.objects.create(
+            name='Python Dec', course=self.course, capacity=2,
+        )
+        self.java_batch = CourseBatch.objects.create(name='Java Nov', course=self.other_course)
+        self.leads = 0
+
+    def _lead(self):
+        self.leads += 1
+        return Lead.objects.create(full_name=f'Student {self.leads}', phone=f'98000010{self.leads:02d}')
+
+    def _url(self, enrollment, action=''):
+        return f'/api/leads/{enrollment.lead_id}/enrollments/{enrollment.id}/{action}'
+
+    def _enroll(self, batch=None, course=None, lead=None, expect=status.HTTP_201_CREATED):
+        lead = lead or self._lead()
+        body = {
+            'course': (course or self.course).id, 'enrollment_date': str(date.today()),
+            'listed_fee': '30000', 'agreed_amount': '30000',
+        }
+        if batch is not None:
+            body['batch'] = batch.id
+        response = self.client.post(f'/api/leads/{lead.id}/enrollments/', body, format='json')
+        self.assertEqual(response.status_code, expect, response.data)
+        if expect != status.HTTP_201_CREATED:
+            return response
+        return Enrollment.objects.get(id=response.data['id'])
+
+    def _confirm(self, enrollment):
+        return self.client.post(self._url(enrollment, 'confirm/'))
+
+    def _seats(self, batch):
+        return self.client.get(f'/api/course-batches/{batch.id}/').data
+
+    def test_confirm_takes_a_seat_in_the_chosen_batch(self):
+        enrollment = self._enroll(self.batch)
+        response = self._confirm(enrollment)
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data['current_batch'], self.batch.id)
+        self.assertEqual(response.data['current_batch_name'], 'Python Nov')
+        placement = Placement.objects.get(enrollment=enrollment)
+        self.assertEqual((placement.kind, placement.course_batch), ('join', self.batch))
+        self.assertEqual(placement.created_by, self.admin)
+        self.assertEqual(enrollment.history.get().after['batch'], self.batch.coursebatch_id)
+        seats = self._seats(self.batch)
+        self.assertEqual((seats['seats_taken'], seats['seats_left']), (1, 1))
+
+    def test_confirm_without_a_batch_takes_no_seat(self):
+        enrollment = self._enroll()
+        self.assertEqual(self._confirm(enrollment).status_code, status.HTTP_200_OK)
+        enrollment.refresh_from_db()
+        self.assertIsNone(enrollment.current_batch)
+        self.assertFalse(Placement.objects.exists())
+
+    def test_confirm_into_a_full_batch_is_refused_and_nothing_changes(self):
+        for _ in range(2):
+            self.assertEqual(self._confirm(self._enroll(self.batch)).status_code, 200)
+        late = self._enroll(self.batch)
+
+        response = self._confirm(late)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Python Nov is full (2 of 2 seats)', response.data['detail'])
+        late.refresh_from_db()
+        self.assertEqual(late.status, 'pending')
+        self.assertIsNone(late.student)
+        self.assertFalse(late.placements.exists())
+        self.assertFalse(late.history.exists())
+        self.assertEqual(Student.objects.count(), 2)
+        self.assertEqual(Invoice.objects.count(), 2)
+
+    def test_a_batch_with_no_seat_limit_never_fills(self):
+        open_batch = CourseBatch.objects.create(name='Python Open', course=self.course)
+        for _ in range(3):
+            self.assertEqual(self._confirm(self._enroll(open_batch)).status_code, 200)
+        seats = self._seats(open_batch)
+        self.assertEqual((seats['seats_taken'], seats['seats_left']), (3, None))
+
+    def test_confirm_into_a_closed_batch_is_refused(self):
+        enrollment = self._enroll(self.batch)
+        CourseBatch.objects.filter(pk=self.batch.pk).update(status='closed')
+        response = self._confirm(enrollment)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Python Nov is closed', response.data['detail'])
+
+    def test_cancel_frees_the_seat_and_reinstate_does_not_take_it_back(self):
+        enrollment = self._enroll(self.batch)
+        self._confirm(enrollment)
+        response = self.client.post(
+            self._url(enrollment, 'cancel/'), {'reason': 'Moved abroad'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        enrollment.refresh_from_db()
+        self.assertIsNone(enrollment.current_batch)
+        self.assertEqual(enrollment.batch, self.batch)  # the money batch stays
+        leave = enrollment.placements.first()
+        self.assertEqual((leave.kind, leave.course_batch, leave.from_batch, leave.reason),
+                         ('leave', None, self.batch, 'Moved abroad'))
+        self.assertEqual(self._seats(self.batch)['seats_taken'], 0)
+
+        self.client.post(self._url(enrollment, 'reinstate/'), {'reason': 'Came back'}, format='json')
+        enrollment.refresh_from_db()
+        self.assertEqual(enrollment.status, 'confirmed')
+        self.assertIsNone(enrollment.current_batch)
+
+    def test_cancel_of_a_pending_enrollment_adds_no_seat_row(self):
+        enrollment = self._enroll(self.batch)
+        self.client.post(self._url(enrollment, 'cancel/'), {'reason': 'Not joining'}, format='json')
+        self.assertFalse(Placement.objects.exists())
+
+    def test_batch_and_course_are_fixed_after_confirm(self):
+        enrollment = self._enroll(self.batch)
+        self._confirm(enrollment)
+        response = self.client.patch(self._url(enrollment), {'batch': self.next_batch.id}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Use Move', str(response.data['batch']))
+        response = self.client.patch(
+            self._url(enrollment), {'course': self.other_course.id}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('course', response.data)
+
+    def test_a_pending_enrollment_can_change_its_batch(self):
+        enrollment = self._enroll(self.batch)
+        response = self.client.patch(self._url(enrollment), {'batch': self.next_batch.id}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data['batch'], self.next_batch.id)
+
+    def test_seat_cannot_be_set_by_a_plain_edit(self):
+        enrollment = self._enroll(self.batch)
+        self.client.patch(self._url(enrollment), {'current_batch': self.next_batch.id}, format='json')
+        enrollment.refresh_from_db()
+        self.assertIsNone(enrollment.current_batch)
+
+    def test_batch_of_another_course_is_refused(self):
+        response = self._enroll(self.java_batch, expect=status.HTTP_400_BAD_REQUEST)
+        self.assertIn('another course', str(response.data['batch']))
+
+    def test_closed_batch_cannot_be_chosen(self):
+        CourseBatch.objects.filter(pk=self.batch.pk).update(status='closed')
+        response = self._enroll(self.batch, expect=status.HTTP_400_BAD_REQUEST)
+        self.assertIn('closed', str(response.data['batch']))
+
+    def test_dropped_out_students_do_not_hold_a_seat(self):
+        enrollment = self._enroll(self.batch)
+        self._confirm(enrollment)
+        self.client.patch(self._url(enrollment), {'status': 'dropped_out'}, format='json')
+        self.assertEqual(self._seats(self.batch)['seats_taken'], 0)
+
+    def test_batch_shows_who_is_waiting(self):
+        self._enroll(self.batch)
+        self._enroll(self.batch)
+        self._confirm(self._enroll(self.batch))
+        seats = self._seats(self.batch)
+        self.assertEqual((seats['seats_taken'], seats['waiting_count']), (1, 2))
+        row = next(
+            b for b in self.client.get('/api/course-batches/').data['results']
+            if b['id'] == self.batch.id
+        )
+        self.assertEqual((row['seats_taken'], row['seats_left'], row['waiting_count']), (1, 1, 2))
+
+    def test_seats_cannot_go_below_the_students_sitting_there(self):
+        self._confirm(self._enroll(self.batch))
+        self._confirm(self._enroll(self.batch))
+        response = self.client.patch(
+            f'/api/course-batches/{self.batch.id}/', {'capacity': 1}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('at least 2 seats', str(response.data['capacity']))
+        response = self.client.patch(
+            f'/api/course-batches/{self.batch.id}/', {'capacity': 5}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data['seats_left'], 3)
+
+    def test_a_batch_with_enrollments_cannot_change_course(self):
+        self._enroll(self.batch)
+        response = self.client.patch(
+            f'/api/course-batches/{self.batch.id}/', {'course': self.other_course.id}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('course', response.data)
+
+    def test_seat_history_rows_cannot_be_changed_or_deleted(self):
+        enrollment = self._enroll(self.batch)
+        self._confirm(enrollment)
+        placement = Placement.objects.get()
+        placement.reason = 'Changed'
+        with self.assertRaises(ValidationError):
+            placement.save()
+        with self.assertRaises(ValidationError):
+            placement.delete()
+
+    def test_a_seat_row_needs_a_reason_and_the_right_batch(self):
+        enrollment = self._enroll(self.batch)
+        with self.assertRaises(ValidationError):
+            Placement.objects.create(
+                enrollment=enrollment, course_batch=self.batch, kind='join',
+                started_on=date.today(), reason='  ',
+            )
+        with self.assertRaises(ValidationError):
+            Placement.objects.create(
+                enrollment=enrollment, course_batch=None, kind='join',
+                started_on=date.today(), reason='No batch',
+            )
+
+
+class BackfillSeatsTests(APITestCase):
+    """Old confirmed enrollments with a batch get a seat when seat tracking starts."""
+
+    def test_only_confirmed_enrollments_with_a_batch_get_a_seat_once(self):
+        course = Course.objects.create(name='Python', full_amount=30000)
+        batch = CourseBatch.objects.create(name='Python Nov', course=course)
+        lead = Lead.objects.create(full_name='Old Student', phone='9800002000')
+
+        def enrollment(status_, with_batch=True):
+            return Enrollment.objects.create(
+                lead=lead, course=course, batch=batch if with_batch else None,
+                enrollment_date=date(2026, 5, 1), status=status_,
+                listed_fee=30000, agreed_amount=30000,
+            )
+
+        active = enrollment('active')
+        pending = enrollment('pending')
+        cancelled = enrollment('cancelled')
+        no_batch = enrollment('confirmed', with_batch=False)
+
+        self.assertEqual(backfill_seats(Enrollment, Placement), 1)
+        self.assertEqual(backfill_seats(Enrollment, Placement), 0)
+
+        active.refresh_from_db()
+        self.assertEqual(active.current_batch, batch)
+        seat = active.placements.get()
+        self.assertEqual((seat.kind, seat.started_on, seat.created_by), ('join', date(2026, 5, 1), None))
+        for other in (pending, cancelled, no_batch):
+            other.refresh_from_db()
+            self.assertIsNone(other.current_batch)
+            self.assertFalse(other.placements.exists())

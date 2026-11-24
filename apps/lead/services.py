@@ -8,7 +8,8 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import APIException
 
-from apps.lead.models import Adjustment, Enrollment, EnrollmentHistory, Lead, Payment
+from apps.course.models import CourseBatch
+from apps.lead.models import Adjustment, Enrollment, EnrollmentHistory, Lead, Payment, Placement
 
 
 class ActionRefused(APIException):
@@ -24,6 +25,66 @@ def _lock(instance):
     return type(instance).objects.select_for_update().get(pk=instance.pk)
 
 
+# ---------------------------------------------------------------- seats
+
+
+def _take_seat(enrollment, batch, *, kind, reason, user, on=None, from_batch=None):
+    """Seat the (locked) enrollment in a batch and add a seat history row.
+
+    The batch row is locked while its seats are counted, so two people can't
+    take its last seat at the same time. The first batch an enrollment joins
+    becomes its money batch, if it has none yet.
+    """
+    batch = CourseBatch.objects.select_for_update().get(pk=batch.pk)
+    if batch.course_id != enrollment.course_id:
+        raise ActionRefused(
+            f'{batch.name} is a batch of another course. To switch course, cancel this '
+            'enrollment with a reason and add a new one.'
+        )
+    if batch.status == CourseBatch.Status.CLOSED:
+        raise ActionRefused(f'{batch.name} is closed. Pick an upcoming or running batch.')
+    if batch.capacity is not None:
+        taken = batch.count_seats_taken(exclude=enrollment)
+        if taken >= batch.capacity:
+            raise ActionRefused(
+                f'{batch.name} is full ({taken} of {batch.capacity} seats). '
+                'Pick another batch or add seats to it.'
+            )
+    Placement.objects.create(
+        enrollment=enrollment,
+        course_batch=batch,
+        from_batch=from_batch,
+        kind=kind,
+        started_on=on or timezone.localdate(),
+        reason=reason,
+        created_by=user,
+    )
+    enrollment.current_batch = batch
+    fields = ['current_batch', 'updated_at']
+    if enrollment.batch_id is None:
+        enrollment.batch = batch
+        fields.append('batch')
+    enrollment.save(update_fields=fields)
+    return batch
+
+
+def _free_seat(enrollment, *, kind, reason, user, on=None):
+    """Take the (locked) enrollment out of its batch and add a seat history row."""
+    left = enrollment.current_batch
+    Placement.objects.create(
+        enrollment=enrollment,
+        course_batch=None,
+        from_batch=left,
+        kind=kind,
+        started_on=on or timezone.localdate(),
+        reason=reason,
+        created_by=user,
+    )
+    enrollment.current_batch = None
+    enrollment.save(update_fields=['current_batch', 'updated_at'])
+    return left
+
+
 @transaction.atomic
 def cancel_enrollment(enrollment, *, reason, user):
     enrollment = _lock(enrollment)
@@ -33,6 +94,8 @@ def cancel_enrollment(enrollment, *, reason, user):
     enrollment.status = Enrollment.Status.CANCELLED
     enrollment.updated_by = user
     enrollment.save(update_fields=['status', 'updated_by', 'updated_at'])
+    if enrollment.current_batch_id:
+        _free_seat(enrollment, kind=Placement.Kind.LEAVE, reason=reason, user=user)
     EnrollmentHistory.record(
         enrollment=enrollment,
         action=EnrollmentHistory.Action.CANCEL,
@@ -139,6 +202,16 @@ def confirm_enrollment(enrollment, *, user):
         raise ActionRefused('Only a pending enrollment can be confirmed.')
     lead = Lead._base_manager.select_for_update().get(pk=enrollment.lead_id)
 
+    # Confirm takes a seat in the chosen batch. A full or closed batch stops
+    # the confirm, and the whole step is undone.
+    if enrollment.batch_id:
+        _take_seat(
+            enrollment, enrollment.batch,
+            kind=Placement.Kind.JOIN,
+            reason='Joined when the enrollment was confirmed.',
+            user=user,
+        )
+
     if enrollment.student_id:
         student, created = enrollment.student, False
         mark_converted(lead)
@@ -158,7 +231,11 @@ def confirm_enrollment(enrollment, *, user):
         ),
         performed_by=user,
         before={'status': Enrollment.Status.PENDING},
-        after={'status': enrollment.status, 'student': student.student_id},
+        after={
+            'status': enrollment.status,
+            'student': student.student_id,
+            'batch': enrollment.current_batch.coursebatch_id if enrollment.current_batch else None,
+        },
     )
     issue_fee_invoice(enrollment, user=user)
     return enrollment

@@ -1,3 +1,4 @@
+from django.db.models import Count, Q
 from rest_framework import viewsets
 from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.permissions import IsAuthenticated
@@ -80,6 +81,22 @@ class BatchViewSet(viewsets.ModelViewSet):
 class CourseBatchViewSet(viewsets.ModelViewSet):
     queryset = CourseBatch.objects.all()
     serializer_class = CourseBatchSerializer
+
+    def get_queryset(self):
+        from apps.lead.models import Enrollment
+
+        return CourseBatch.objects.select_related('course', 'batch', 'created_by').annotate(
+            seats_taken=Count(
+                'seated_enrollments',
+                filter=Q(seated_enrollments__status__in=Enrollment.SEAT_STATUSES),
+                distinct=True,
+            ),
+            waiting_count=Count(
+                'enrollments',
+                filter=Q(enrollments__status=Enrollment.Status.PENDING),
+                distinct=True,
+            ),
+        )
     pagination_class = CustomPagination
     filterset_class = CourseBatchFilter
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, BranchFilterBackend]

@@ -5,7 +5,7 @@ from rest_framework.exceptions import ValidationError
 from django.core.exceptions import ValidationError as DjangoValidationError
 
 from apps.callminutes.utils import format_duration, parse_duration_to_seconds
-from apps.course.models import Course
+from apps.course.models import Course, CourseBatch
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
@@ -114,6 +114,7 @@ class EnrollmentSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source='student.full_name', read_only=True)
     created_by_name = serializers.CharField(source='created_by.name', read_only=True)
     batch_name = serializers.CharField(source='batch.name', read_only=True)
+    current_batch_name = serializers.CharField(source='current_batch.name', read_only=True)
     total_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     extra_charges_total = serializers.DecimalField(
         max_digits=12, decimal_places=2, read_only=True,
@@ -130,8 +131,10 @@ class EnrollmentSerializer(serializers.ModelSerializer):
         model = Enrollment
         fields = '__all__'
         read_only_fields = [
-            # The student is linked by Confirm enrollment, never by hand.
-            'lead', 'student', 'created_by', 'updated_by', 'created_at', 'updated_at',
+            # The student is linked by Confirm enrollment, never by hand, and
+            # the seat changes only through the seat actions.
+            'lead', 'student', 'current_batch',
+            'created_by', 'updated_by', 'created_at', 'updated_at',
             'total_paid', 'remaining_amount', 'is_full_paid',
         ]
 
@@ -143,6 +146,9 @@ class EnrollmentSerializer(serializers.ModelSerializer):
             and not enrollment.payments.filter(status=Payment.Status.SUCCESSFUL).exists()
         )
 
+    def _changed(self, attrs, field):
+        return field in attrs and attrs[field] != getattr(self.instance, field)
+
     def validate(self, attrs):
         # Once confirmed or paid, the price is fixed. Later changes are money
         # entries with a reason.
@@ -151,10 +157,39 @@ class EnrollmentSerializer(serializers.ModelSerializer):
                 field: 'The price is fixed once the enrollment is confirmed or paid. '
                        'Add an extra charge or a discount with a reason instead.'
                 for field in self.PRICE_FIELDS
-                if field in attrs and attrs[field] != getattr(self.instance, field)
+                if self._changed(attrs, field)
             }
             if errors:
                 raise serializers.ValidationError(errors)
+
+        # Once confirmed, the course and the money batch are fixed too.
+        if self.instance is not None and self.instance.status != Enrollment.Status.PENDING:
+            errors = {}
+            if self._changed(attrs, 'course'):
+                errors['course'] = (
+                    'The course is fixed once the enrollment is confirmed. To switch '
+                    'course, cancel this enrollment with a reason and add a new one.'
+                )
+            if self._changed(attrs, 'batch'):
+                errors['batch'] = (
+                    'The batch is fixed once the enrollment is confirmed, because its '
+                    'money counts there. Use Move to change where the student sits.'
+                )
+            if errors:
+                raise serializers.ValidationError(errors)
+
+        if 'batch' in attrs or 'course' in attrs:
+            course = attrs.get('course', getattr(self.instance, 'course', None))
+            batch = attrs.get('batch', getattr(self.instance, 'batch', None))
+            if batch is not None and course is not None and batch.course_id != course.id:
+                raise serializers.ValidationError(
+                    {'batch': 'This batch is for another course. Pick a batch of this course.'}
+                )
+            batch_is_new = self.instance is None or self._changed(attrs, 'batch')
+            if batch is not None and batch_is_new and batch.status == CourseBatch.Status.CLOSED:
+                raise serializers.ValidationError(
+                    {'batch': f'{batch.name} is closed. Pick an upcoming or running batch.'}
+                )
         return attrs
 
     def validate_status(self, value):

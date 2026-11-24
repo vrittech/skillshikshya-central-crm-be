@@ -3,7 +3,7 @@ from django.contrib import admin
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, Adjustment,
-    EnrollmentHistory, LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
+    EnrollmentHistory, LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, Placement,
 )
 
 
@@ -35,10 +35,13 @@ class LeadAdmin(admin.ModelAdmin):
 
 @admin.register(Enrollment)
 class EnrollmentAdmin(ReadOnlyAdmin):
-    list_display = ['id', 'lead', 'course', 'batch', 'status', 'agreed_amount', 'branch', 'created_at']
+    list_display = [
+        'id', 'lead', 'course', 'batch', 'current_batch', 'status', 'agreed_amount',
+        'branch', 'created_at',
+    ]
     list_filter = ['status', 'branch']
     search_fields = ['lead__full_name', 'lead__phone', 'course__name']
-    list_select_related = ['lead', 'course', 'batch', 'branch']
+    list_select_related = ['lead', 'course', 'batch', 'current_batch', 'branch']
 
 
 @admin.register(Payment)
@@ -63,6 +66,17 @@ class EnrollmentHistoryAdmin(ReadOnlyAdmin):
     list_filter = ['action']
     search_fields = ['enrollment__lead__full_name', 'reason']
     list_select_related = ['enrollment__lead', 'performed_by']
+
+
+@admin.register(Placement)
+class PlacementAdmin(ReadOnlyAdmin):
+    list_display = [
+        'id', 'enrollment', 'kind', 'course_batch', 'from_batch', 'started_on', 'reason',
+        'created_by', 'created_at',
+    ]
+    list_filter = ['kind']
+    search_fields = ['enrollment__lead__full_name', 'reason']
+    list_select_related = ['enrollment__lead', 'course_batch', 'from_batch', 'created_by']
 
 
 admin.site.register(LearningMode)

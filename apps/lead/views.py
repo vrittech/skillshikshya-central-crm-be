@@ -457,7 +457,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return Enrollment.objects.filter(lead_id=self.kwargs['lead_pk']).select_related(
-            'course', 'student', 'created_by', 'updated_by',
+            'course', 'student', 'batch', 'current_batch', 'created_by', 'updated_by',
         ).prefetch_related('payments', 'adjustments')
 
     def perform_create(self, serializer):

@@ -385,6 +385,9 @@ class Enrollment(models.Model):
         DROPPED_OUT = 'dropped_out', 'Dropped Out'
         TRANSFERRED = 'transferred', 'Transferred'
 
+    # Enrollments in these statuses take a seat in their current batch.
+    SEAT_STATUSES = (Status.CONFIRMED, Status.ACTIVE, Status.COMPLETED)
+
     # PROTECT: a lead, course or batch with enrollments cannot be deleted, so
     # money records are never lost through a cascade.
     lead = models.ForeignKey(Lead, on_delete=models.PROTECT, related_name='enrollments')
@@ -393,9 +396,18 @@ class Enrollment(models.Model):
         null=True, blank=True, related_name='enrollments',
     )
     course = models.ForeignKey('course.Course', on_delete=models.PROTECT, related_name='enrollments')
+    # The money batch: the batch the student first joined. Fees and revenue
+    # count here, and it does not change when the student moves.
     batch = models.ForeignKey(
         'course.CourseBatch', on_delete=models.PROTECT,
         null=True, blank=True, related_name='enrollments',
+    )
+    # Where the student sits now. Empty when not in a batch (paused, left or
+    # not placed yet). Only the seat actions change it, each adding a
+    # Placement row.
+    current_batch = models.ForeignKey(
+        'course.CourseBatch', on_delete=models.PROTECT,
+        null=True, blank=True, related_name='seated_enrollments',
     )
     enrollment_date = models.DateField()
     status = models.CharField(
@@ -596,6 +608,7 @@ class EnrollmentHistory(models.Model):
 
     class Action(models.TextChoices):
         CONFIRM = 'confirm', 'Confirm'
+        JOIN_BATCH = 'join_batch', 'Join batch'
         CANCEL = 'cancel', 'Cancel'
         REINSTATE = 'reinstate', 'Reinstate'
         SWITCH_BATCH = 'switch_batch', 'Switch batch'
@@ -657,6 +670,79 @@ class EnrollmentHistory(models.Model):
             before=before or {},
             after=after or {},
         )
+
+
+class Placement(models.Model):
+    """Seat history: one row each time an enrollment's seat changes.
+
+    The newest row says where the student sits now, which is also kept on
+    Enrollment.current_batch. A row with no batch means they sit nowhere:
+    paused or left. Rows are only ever added. Editing or deleting one raises
+    ValidationError.
+    """
+
+    class Kind(models.TextChoices):
+        JOIN = 'join', 'Joined'
+        MOVE = 'move', 'Moved'
+        PAUSE = 'pause', 'Paused'
+        RESUME = 'resume', 'Resumed'
+        LEAVE = 'leave', 'Left'
+
+    TAKES_SEAT = (Kind.JOIN, Kind.MOVE, Kind.RESUME)
+
+    enrollment = models.ForeignKey(
+        Enrollment, on_delete=models.PROTECT, related_name='placements',
+    )
+    course_batch = models.ForeignKey(
+        'course.CourseBatch', on_delete=models.PROTECT,
+        null=True, blank=True, related_name='placements',
+    )
+    # The batch the student came from: the old batch on a move, the batch
+    # they paused out of on a resume, and the batch they left on a pause or
+    # leave.
+    from_batch = models.ForeignKey(
+        'course.CourseBatch', on_delete=models.PROTECT,
+        null=True, blank=True, related_name='placements_out',
+    )
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    started_on = models.DateField()
+    reason = models.TextField()
+    # Empty only on rows made by the migration from old data.
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        null=True, blank=True, related_name='placements_made',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'enrollment_placements'
+        ordering = ['-created_at', '-id']
+        constraints = [
+            models.CheckConstraint(
+                check=~models.Q(reason=''),
+                name='placement_reason_required',
+            ),
+            models.CheckConstraint(
+                check=(
+                    models.Q(kind__in=['join', 'move', 'resume'], course_batch__isnull=False)
+                    | models.Q(kind__in=['pause', 'leave'], course_batch__isnull=True)
+                ),
+                name='placement_batch_matches_kind',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.get_kind_display()} on enrollment {self.enrollment_id}'
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValidationError('Seat history rows cannot be changed.')
+        self.reason = (self.reason or '').strip()
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Seat history rows cannot be deleted.')
 
 
 class LeadCall(models.Model):
