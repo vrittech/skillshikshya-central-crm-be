@@ -4,7 +4,7 @@ from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, Adjustment,
     EnrollmentHistory, LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, Placement,
-    PaymentPlan, Installment,
+    PaymentPlan, Installment, ReminderConfig, ReminderLog,
 )
 
 
@@ -97,6 +97,27 @@ class PaymentPlanAdmin(ReadOnlyAdmin):
     search_fields = ['enrollment__lead__full_name', 'reason']
     list_select_related = ['enrollment__lead', 'created_by']
     inlines = [InstallmentInline]
+
+
+@admin.register(ReminderConfig)
+class ReminderConfigAdmin(admin.ModelAdmin):
+    list_display = ['__str__', 'is_active', 'days_before', 'late_days', 'call_days', 'updated_at']
+
+    def has_add_permission(self, request):
+        return not ReminderConfig.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ReminderLog)
+class ReminderLogAdmin(ReadOnlyAdmin):
+    list_display = [
+        'id', 'enrollment', 'due_on', 'amount', 'step', 'channel', 'sent_to', 'status', 'created_at',
+    ]
+    list_filter = ['step', 'channel', 'status']
+    search_fields = ['enrollment__lead__full_name', 'sent_to']
+    list_select_related = ['enrollment__lead']
 
 
 admin.site.register(LearningMode)

@@ -83,3 +83,15 @@ def send_followup_reminders_task():
             )
 
         FollowUp.objects.filter(pk=fup.pk).update(reminder_sent=True)
+
+
+@shared_task
+def send_payment_reminders_task():
+    """Daily at 09:00 Nepal time. Does nothing while payment reminders are off."""
+    from apps.lead.models import ReminderConfig
+    from apps.lead.reminders import send_payment_reminders
+
+    config = ReminderConfig.load()
+    if not config.is_active:
+        return 0
+    return len(send_payment_reminders(config=config))

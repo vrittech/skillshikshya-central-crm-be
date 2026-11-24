@@ -28,6 +28,12 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.lead.tasks.send_followup_reminders_task',
         'schedule': 300,  # every 5 minutes
     },
+    # Payment reminders: daily at UTC 03:15 == NPT 09:00. Off until turned on
+    # in Django Admin -> Lead -> Payment reminder settings.
+    'send-payment-reminders-daily': {
+        'task': 'apps.lead.tasks.send_payment_reminders_task',
+        'schedule': crontab(hour=3, minute=15),
+    },
     # OrbitChat lead sync — runs hourly on NPT hour boundaries.
     # minute=15 UTC == minute 0 Nepal time (UTC+5:45).
     # Enable/disable via Django Admin -> Orbitchat -> Sync states -> is_enabled

@@ -14,6 +14,7 @@ from apps.course.models import Course, CourseBatch
 from apps.invoices.models import Invoice
 from apps.lead.models import (
     Adjustment, Lead, Enrollment, Payment, EnrollmentHistory, Placement, PaymentPlan,
+    Installment, FollowUp, ReminderConfig, ReminderLog,
 )
 from apps.lead.seat_backfill import backfill_seats
 from apps.student.models import Student
@@ -1565,3 +1566,167 @@ class ReissueFeeInvoiceTests(SeatTestBase):
         response = self.client.post(self._url(enrollment, 'fee-invoice/'))
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(Invoice.objects.exists())
+
+
+class PaymentReminderTests(APITestCase):
+    """The daily job: each step once per due date, paused and paid get none."""
+
+    TODAY = date(2026, 12, 1)
+
+    def setUp(self):
+        from unittest import mock
+
+        from django.core import mail
+
+        self.mock = mock
+        self.mail = mail
+        self.counselor = User.objects.create_user(
+            email='counselor@test.com', name='Ram', password='pass',
+        )
+        self.course = Course.objects.create(name='Python', full_amount=30000)
+        self.config = ReminderConfig.load()
+        self.config.is_active = True
+        self.config.save()
+        self.people = 0
+
+    def _enrollment(self, parts, *, email='student@test.com', status='confirmed', paid=0):
+        """parts: list of (days from TODAY, amount)."""
+        self.people += 1
+        lead = Lead.objects.create(
+            full_name=f'Student {self.people}', phone=f'98000030{self.people:02d}',
+            email=email, assigned_counselor=self.counselor,
+        )
+        enrollment = Enrollment.objects.create(
+            lead=lead, course=self.course, enrollment_date=self.TODAY,
+            listed_fee=30000, agreed_amount=sum(a for _, a in parts), status=status,
+        )
+        plan = PaymentPlan.objects.create(enrollment=enrollment, reason='Plan', created_by=self.counselor)
+        for days, amount in parts:
+            Installment.objects.create(
+                plan=plan, due_on=self.TODAY + timedelta(days=days), amount=amount,
+            )
+        if paid:
+            Payment.objects.create(
+                enrollment=enrollment, amount=paid, payment_date=timezone.now(),
+                payment_method='cash', status='successful',
+            )
+        return enrollment
+
+    def _run(self, days=0, **kwargs):
+        from apps.lead.reminders import send_payment_reminders
+
+        return send_payment_reminders(
+            today=self.TODAY + timedelta(days=days), config=self.config, **kwargs,
+        )
+
+    def test_step_for_each_window(self):
+        from apps.lead.reminders import step_for
+
+        self.assertIsNone(step_for(-4, self.config))
+        self.assertEqual(step_for(-3, self.config), 'before_due')
+        self.assertEqual(step_for(0, self.config), 'due_today')
+        self.assertEqual(step_for(6, self.config), 'due_today')
+        self.assertEqual(step_for(7, self.config), 'late')
+        self.assertEqual(step_for(15, self.config), 'call')
+        self.assertEqual(step_for(90, self.config), 'call')
+
+    def test_each_step_goes_out_once(self):
+        enrollment = self._enrollment([(3, 30000)])
+        self._run(0)
+        self._run(0)  # the same day again sends nothing
+        self.assertEqual(len(self.mail.outbox), 1)
+        self.assertEqual(self.mail.outbox[0].subject, 'Payment reminder - Skill Shikshya')
+        self.assertEqual(self.mail.outbox[0].to, ['student@test.com'])
+        self.assertIn('NPR 30,000 due on 4 Dec 2026', self.mail.outbox[0].body)
+        for day in (1, 2, 3, 4, 10, 11, 18, 19, 30):
+            self._run(day)
+        steps = list(
+            ReminderLog.objects.filter(enrollment=enrollment).order_by('id').values_list('step', flat=True)
+        )
+        self.assertEqual(steps, ['before_due', 'due_today', 'late', 'call'])
+        self.assertEqual(len(self.mail.outbox), 3)
+        self.assertEqual(self.mail.outbox[1].subject, 'Payment due - Skill Shikshya')
+        self.assertEqual(self.mail.outbox[2].subject, 'Payment overdue - Skill Shikshya')
+
+    def test_the_call_step_makes_a_follow_up_for_the_counselor(self):
+        enrollment = self._enrollment([(-20, 30000)])
+        self._run()
+        followup = FollowUp.objects.get()
+        self.assertEqual(followup.enrollment, enrollment)
+        self.assertEqual(followup.assigned_to, self.counselor)
+        self.assertEqual(followup.status, 'pending')
+        self.assertIn('Payment late (Python): NPR 30,000 due on 11 Nov 2026 (20 days late)', followup.purpose)
+        log = ReminderLog.objects.get()
+        self.assertEqual((log.step, log.channel, log.status), ('call', 'follow_up', 'sent'))
+        self.assertEqual(log.followup, followup)
+        self.assertEqual(len(self.mail.outbox), 0)
+
+    def test_a_missed_day_sends_only_the_step_reached(self):
+        self._enrollment([(-10, 30000)])
+        self._run()
+        self.assertEqual(list(ReminderLog.objects.values_list('step', flat=True)), ['late'])
+
+    def test_paid_and_part_paid_due_dates(self):
+        self._enrollment([(0, 10000), (0, 10000)], paid=20000)
+        part_paid = self._enrollment([(0, 10000)], paid=4000)
+        report = self._run()
+        self.assertEqual([r['enrollment'] for r in report], [part_paid.id])
+        self.assertEqual(report[0]['amount'], Decimal('6000.00'))
+
+    def test_due_dates_on_the_same_run_go_in_one_email(self):
+        enrollment = self._enrollment([(-8, 10000), (0, 10000), (40, 10000)])
+        self._run()
+        self.assertEqual(len(self.mail.outbox), 1)
+        self.assertEqual(self.mail.outbox[0].subject, 'Payment overdue - Skill Shikshya')
+        self.assertEqual(
+            sorted(ReminderLog.objects.filter(enrollment=enrollment).values_list('step', flat=True)),
+            ['due_today', 'late'],
+        )
+
+    def test_paused_pending_and_cancelled_get_nothing(self):
+        paused = self._enrollment([(0, 30000)])
+        Placement.objects.create(
+            enrollment=paused, kind='pause', from_batch=CourseBatch.objects.create(
+                name='Python Nov', course=self.course,
+            ), started_on=self.TODAY, reason='Exams', created_by=self.counselor,
+        )
+        self._enrollment([(0, 30000)], status='pending')
+        self._enrollment([(0, 30000)], status='cancelled')
+        self.assertEqual(self._run(), [])
+
+    def test_no_email_address_is_logged_as_skipped_once(self):
+        self._enrollment([(0, 30000)], email=None)
+        self._run()
+        self._run()
+        log = ReminderLog.objects.get()
+        self.assertEqual((log.status, log.error), ('skipped', 'No email address.'))
+        self.assertEqual(len(self.mail.outbox), 0)
+
+    def test_a_failed_email_is_tried_again_next_run(self):
+        self._enrollment([(0, 30000)])
+        with self.mock.patch('apps.lead.reminders.send_mail', side_effect=OSError('SMTP down')):
+            self._run()
+        log = ReminderLog.objects.get()
+        self.assertEqual((log.status, log.error), ('failed', 'SMTP down'))
+        self._run(1)
+        self.assertEqual(
+            list(ReminderLog.objects.order_by('id').values_list('status', flat=True)),
+            ['failed', 'sent'],
+        )
+        self.assertEqual(len(self.mail.outbox), 1)
+
+    def test_dry_run_sends_nothing(self):
+        self._enrollment([(0, 30000)])
+        report = self._run(dry_run=True)
+        self.assertEqual(len(report), 1)
+        self.assertFalse(ReminderLog.objects.exists())
+        self.assertEqual(len(self.mail.outbox), 0)
+
+    def test_the_task_does_nothing_while_reminders_are_off(self):
+        from apps.lead.tasks import send_payment_reminders_task
+
+        self._enrollment([(0, 30000)])
+        self.config.is_active = False
+        self.config.save()
+        self.assertEqual(send_payment_reminders_task(), 0)
+        self.assertFalse(ReminderLog.objects.exists())

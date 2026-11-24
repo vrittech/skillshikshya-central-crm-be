@@ -915,6 +915,11 @@ class FollowUp(models.Model):
     )
     scheduled_at = models.DateTimeField()
     purpose = models.TextField(null=True, blank=True)
+    # Set on payment follow-ups (the call made when a due date is late).
+    enrollment = models.ForeignKey(
+        Enrollment, on_delete=models.PROTECT,
+        null=True, blank=True, related_name='followups',
+    )
     reminder_at = models.DateTimeField(null=True, blank=True)
     reminder_sent = models.BooleanField(default=False)
     status = models.CharField(
@@ -943,6 +948,97 @@ class FollowUp(models.Model):
 
     def __str__(self):
         return f'FollowUp for {self.lead.full_name} at {self.scheduled_at}'
+
+
+class ReminderConfig(models.Model):
+    """Singleton row (pk=1): payment reminder switch and days. Off until turned on."""
+
+    is_active = models.BooleanField(default=False)
+    days_before = models.PositiveSmallIntegerField(default=3)
+    late_days = models.PositiveSmallIntegerField(default=7)
+    call_days = models.PositiveSmallIntegerField(default=15)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'payment_reminder_config'
+        verbose_name = 'payment reminder settings'
+        verbose_name_plural = 'payment reminder settings'
+
+    def __str__(self):
+        return f'Payment reminders ({"on" if self.is_active else "off"})'
+
+    def clean(self):
+        if not (self.late_days < self.call_days):
+            raise ValidationError('The call follow-up must come after the overdue email.')
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def load(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+
+class ReminderLog(models.Model):
+    """One payment reminder for one due date of an enrollment.
+
+    Each step is sent once per due date: a row that did not fail blocks
+    another of the same step. A failed row stays, and the next run tries
+    again with a new row.
+    """
+
+    class Step(models.TextChoices):
+        BEFORE_DUE = 'before_due', 'Before due date'
+        DUE_TODAY = 'due_today', 'Due today'
+        LATE = 'late', 'Overdue'
+        CALL = 'call', 'Call follow-up'
+
+    class Channel(models.TextChoices):
+        EMAIL = 'email', 'Email'
+        SMS = 'sms', 'SMS'
+        FOLLOW_UP = 'follow_up', 'Follow-up'
+
+    class Status(models.TextChoices):
+        SENDING = 'sending', 'Sending'
+        SENT = 'sent', 'Sent'
+        FAILED = 'failed', 'Failed'
+        SKIPPED = 'skipped', 'Skipped'
+
+    enrollment = models.ForeignKey(
+        Enrollment, on_delete=models.PROTECT, related_name='reminders',
+    )
+    due_on = models.DateField()
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    step = models.CharField(max_length=12, choices=Step.choices)
+    channel = models.CharField(max_length=10, choices=Channel.choices)
+    sent_to = models.CharField(max_length=255, blank=True, default='')
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.SENDING)
+    error = models.TextField(blank=True, default='')
+    followup = models.ForeignKey(
+        'lead.FollowUp', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    branch = models.ForeignKey(
+        'branch.Branch', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='reminder_logs',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'payment_reminder_logs'
+        ordering = ['-created_at', '-id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['enrollment', 'due_on', 'step'],
+                condition=~models.Q(status='failed'),
+                name='reminder_once_per_due_date_and_step',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.get_step_display()} for enrollment {self.enrollment_id} ({self.due_on})'
 
 
 class LeadDocument(models.Model):
