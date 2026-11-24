@@ -13,6 +13,8 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
 | PATCH | `/api/leads/{lead_id}/calls/{id}/` | Update call notes/outcome etc. | Staff or `lead.change_leadcall` permission |
+| GET | `/api/calls/summary/` | **Totals and chart data** for the filtered calls | Authenticated |
+| GET | `/api/calls/export/` | **CSV download** of the filtered calls (all pages) | Authenticated |
 
 > **DELETE is disabled** — call records are permanent and cannot be deleted via the API (`405 Method Not Allowed`), so the call-minutes ledger stays trustworthy.
 
@@ -32,6 +34,7 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 | `search` | Matches caller, phone number, outcome, notes, lead name & reference number |
 | `ordering` | `call_timestamp`, `duration_seconds`, `created_at` (prefix `-` for desc) |
 | `page` / `page_size` | Standard pagination |
+| `branch_id` | Staff only: narrow to one branch |
 
 **Example response row:**
 ```json
@@ -45,6 +48,7 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
     "caller": "Shikhar",
     "phone_number": "9877700111",
     "duration_seconds": 270,
+    "duration_formatted": "04:30",
     "outcome": "Interested",
     "notes": "",
     "branch": 1,
@@ -54,6 +58,53 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 ```
 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
+
+## Global Call Summary — `GET /api/calls/summary/`
+
+Totals for the same calls `GET /api/calls/` would return. It takes the **same query params** (`direction`, `created_by`, `search`, `call_timestamp__gte` / `__lte`, `branch_id` for staff, …) and the **same branch scoping**, so for equal filters `total_calls` equals the list's `count`. `page`, `page_size` and `ordering` are ignored. The response is one unpaginated object.
+
+**Response (200):**
+```json
+{
+    "total_calls": 128,
+    "inbound": 40,
+    "outbound": 88,
+    "total_seconds": 30215,
+    "total_formatted": "08:23:35",
+    "avg_seconds": 236,
+    "connected_calls": 110,
+    "connect_rate": 0.859,
+    "by_day": [
+        { "date": "2026-10-28", "calls": 14, "seconds": 3310 }
+    ],
+    "by_user": [
+        { "user_id": 9, "name": "Shikhar", "calls": 40, "seconds": 9800 }
+    ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `total_seconds` / `total_formatted` | Total talk time, in seconds and as `HH:MM:SS` |
+| `avg_seconds` | `total_seconds / total_calls`, rounded; `0` when there are no calls |
+| `connected_calls` | Calls with `duration_seconds > 0` |
+| `connect_rate` | `connected_calls / total_calls` as a **fraction** (0–1, 3 decimals); `0` when there are no calls |
+| `by_day` | Calls per day in **Nepal time** (`Asia/Kathmandu`), oldest first. Only days with calls appear. A call at 20:00 UTC on Oct 28 counts under `2026-10-29`. |
+| `by_user` | Top 10 callers by number of calls. Calls with no `created_by` appear as `user_id: null`, `name: "Unknown"`. |
+
+With no matching calls every number is `0`, `total_formatted` is `"00:00:00"` and both arrays are empty.
+
+## Global Call Export — `GET /api/calls/export/`
+
+Downloads **all** calls matching the current filters as a CSV, across every page. It takes the same query params and branch scoping as the list; `page` and `ordering` are ignored (rows are newest first).
+
+**Response (200):** `Content-Type: text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="calls-YYYY-MM-DD.csv"` (today's date in Nepal time). The body is streamed, in a fixed number of database queries however many rows there are.
+
+**Columns, in order:** Date & time (NPT) · Direction · Lead · Reference · Phone · Caller · Logged by · Duration (MM:SS) · Seconds · Outcome · Notes · Recording.
+
+**Excel and Sheets:** the file starts with a UTF-8 BOM so Devanagari names display correctly. Any text cell starting with `=`, `+`, `-`, `@`, a tab or a carriage return is prefixed with `'`, so a note like `=HYPERLINK(...)` is shown as plain text and never runs as a formula.
+
+**Frontend:** fetch it with `responseType: "blob"` through the axios instance (a plain link would skip the cookie refresh) and save it from an object URL.
 
 ## Call Minutes Deduction
 

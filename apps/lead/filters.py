@@ -4,6 +4,10 @@ from apps.lead.models import (
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
 )
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
+NPT = ZoneInfo("Asia/Kathmandu")
 
 
 class LearningModeFilter(django_filters.FilterSet):
@@ -171,6 +175,20 @@ class GlobalCallFilter(django_filters.FilterSet):
     call_timestamp__lte = django_filters.DateTimeFilter(field_name='call_timestamp', lookup_expr='lte')
     created_by = django_filters.NumberFilter(field_name='created_by')
     student = django_filters.NumberFilter(field_name='lead__students')
+    date_from = django_filters.DateFilter(method="filter_date_from")
+    date_to = django_filters.DateFilter(method="filter_date_to")
+
+    def filter_date_from(self, queryset, name, value):
+        if value:
+            start_datetime = datetime.combine(value, time.min).replace(tzinfo=NPT)
+            return queryset.filter(call_timestamp__gte=start_datetime)
+        return queryset
+
+    def filter_date_to(self, queryset, name, value):
+        if value:
+            end = datetime.combine(value + timedelta(days=1), time.min, tzinfo=NPT)
+            return queryset.filter(call_timestamp__lt=end)
+        return queryset
 
     class Meta:
         model = LeadCall

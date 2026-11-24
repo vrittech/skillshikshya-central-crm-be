@@ -3,6 +3,7 @@ from datetime import datetime
 
 from django.http import HttpResponse
 from django.utils import timezone
+from django.http import StreamingHttpResponse
 
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -42,6 +43,11 @@ from apps.lead.filters import (
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission
 from apps.global_config.filters import BranchFilterBackend
+
+from django.db.models import Count, Sum, Q
+from django.db.models.functions import TruncDate, Coalesce
+from apps.callminutes.utils import format_duration
+from .filters import NPT
 
 
 class ConfigViewSet(viewsets.ModelViewSet):
@@ -232,7 +238,7 @@ class GlobalFollowUpViewSet(viewsets.ReadOnlyModelViewSet):
             'lead', 'assigned_to', 'branch',
         )
 
-    def get_permissions(self):
+    def get_permissions(self):                      
         if self.action in ['list', 'retrieve']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
@@ -277,6 +283,21 @@ class GlobalPaymentViewSet(viewsets.ReadOnlyModelViewSet):
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
 
+class Echo:
+    """File-like object that returns what is written (for streaming csv)."""
+    def write(self, value):
+        return value
+
+
+def _safe(value):
+    """Stop spreadsheet formula injection: =, +, -, @ (and tab/CR) at the start."""
+    if value is None:
+        return ''
+    text = str(value)
+    if text and text[0] in ('=', '+', '-', '@', '\t', '\r'):
+        return "'" + text
+    return text
+
 
 class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
     """Flat, cross-lead call log. Newest calls first by default."""
@@ -298,9 +319,93 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary', 'export']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        qs = self.filter_queryset(self.get_queryset()).order_by()
+
+        t = qs.aggregate(
+            total_calls=Count('id'),
+            inbound=Count('id', filter=Q(direction='inbound')),
+            outbound=Count('id', filter=Q(direction='outbound')),
+            total_seconds=Coalesce(Sum('duration_seconds'), 0),
+            connected_calls=Count('id', filter=Q(duration_seconds__gt=0)),
+        )
+        total = t['total_calls']
+
+        by_day = (
+            qs.annotate(day=TruncDate('call_timestamp', tzinfo=NPT))
+            .values('day')
+            .annotate(calls=Count('id'), seconds=Coalesce(Sum('duration_seconds'), 0))
+            .order_by('day')
+        )
+        by_user = (
+            qs.values('created_by', 'created_by__name')
+            .annotate(calls=Count('id'), seconds=Coalesce(Sum('duration_seconds'), 0))
+            .order_by('-calls', 'created_by__name')[:10]
+        )
+
+        s = t['total_seconds']
+        return Response({
+            **t,
+            'total_formatted': f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}",
+            'avg_seconds': round(s / total) if total else 0,
+            'connect_rate': round(t['connected_calls'] / total, 3) if total else 0,
+            'by_day': [
+                {'date': r['day'].isoformat(), 'calls': r['calls'], 'seconds': r['seconds']}
+                for r in by_day
+            ],
+            'by_user': [
+                {
+                    'user_id': r['created_by'],
+                    'name': r['created_by__name'] or 'Unknown',
+                    'calls': r['calls'],
+                    'seconds': r['seconds'],
+                }
+                for r in by_user
+            ],
+        })
+
+    @action(detail=False, methods=['get'], url_path='export')
+    def export(self, request):
+        qs = (
+            self.filter_queryset(self.get_queryset())
+            .order_by('-call_timestamp')
+        )
+
+        header = [
+            'Date & time (NPT)', 'Direction', 'Lead', 'Reference', 'Phone',
+            'Caller', 'Logged by', 'Duration (MM:SS)', 'Seconds',
+            'Outcome', 'Notes', 'Recording',
+        ]
+
+        def rows():
+            writer = csv.writer(Echo())
+            yield '\ufeff'                      # BOM so Excel reads UTF-8 (Devanagari)
+            yield writer.writerow(header)
+            for c in qs.iterator(chunk_size=2000):
+                yield writer.writerow([
+                    c.call_timestamp.astimezone(NPT).strftime('%Y-%m-%d %H:%M:%S'),
+                    c.direction,
+                    _safe(c.lead.full_name),
+                    _safe(c.lead.reference_number),
+                    _safe(c.phone_number),
+                    _safe(c.caller),
+                    _safe(c.created_by.name if c.created_by else ''),
+                    format_duration(c.duration_seconds),
+                    c.duration_seconds,
+                    _safe(c.outcome),
+                    _safe(c.notes),
+                    _safe(c.recording_url),
+                ])
+
+        filename = f"calls-{timezone.now().astimezone(NPT).date().isoformat()}.csv"
+        response = StreamingHttpResponse(rows(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
@@ -657,3 +762,5 @@ class LeadDocumentViewSet(viewsets.ModelViewSet):
         else:
             permission_classes = [IsAuthenticated]
         return [p() for p in permission_classes]
+    
+    
