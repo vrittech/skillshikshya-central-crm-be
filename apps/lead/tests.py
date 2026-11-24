@@ -1268,6 +1268,8 @@ class MovePauseResumeTests(SeatTestBase):
         self.assertEqual(response.data['current_batch'], self.batch.id)
         resume = self.enrollment.placements.first()
         self.assertEqual((resume.kind, resume.from_batch), ('resume', self.batch))
+        row = self.enrollment.history.get(action='resume')
+        self.assertEqual((row.before, row.after), ({'batch': None}, {'batch': self.batch.coursebatch_id}))
 
     def test_resume_into_a_later_batch(self):
         self._act('pause', reason='Exams')

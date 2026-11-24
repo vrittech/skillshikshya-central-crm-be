@@ -203,7 +203,8 @@ def resume_enrollment(enrollment, batch, *, reason, user, on=None):
         action=EnrollmentHistory.Action.RESUME,
         reason=reason,
         performed_by=user,
-        before={'batch': None, 'paused_from': _code(last.from_batch)},
+        # The batch they paused from is on the seat history row (from_batch).
+        before={'batch': None},
         after={'batch': _code(batch)},
     )
     return enrollment
