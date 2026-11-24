@@ -15,7 +15,7 @@ from apps.invoices.models import Invoice
 from apps.lead.models import (
     Adjustment, Lead, Enrollment, Payment, EnrollmentHistory, Placement, PaymentPlan,
     Installment, FollowUp, ReminderConfig, ReminderLog, TeamsLicence, LeadCourseInterest,
-    EnquiryStageChange, LeadSource,
+    EnquiryStageChange, LeadSource, VoiceNote,
 )
 from apps.lead import services
 from apps.lead.seat_backfill import backfill_seats
@@ -2230,3 +2230,116 @@ class PhoneMatchTests(APITestCase):
         }, format='json')
         self.assertEqual(self.lead.course_interests.count(), 1)
 
+
+
+class VoiceNoteTests(APITestCase):
+    """Voice notes on an enquiry: private recordings, removed with the row or the lead."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+
+        from django.test import override_settings
+
+        from apps.branch.models import Branch
+
+        media = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, media, ignore_errors=True)
+        settings_override = override_settings(MEDIA_ROOT=media, R2_BUCKET_NAME='', R2_ACCESS_KEY_ID='')
+        settings_override.enable()
+        self.addCleanup(settings_override.disable)
+
+        self.ktm = Branch.objects.create(name='Kathmandu', code='KTM')
+        self.pkr = Branch.objects.create(name='Pokhara', code='PKR')
+        self.counselor = User.objects.create_user(
+            email='voice@test.com', name='Sita', password='pass', branch=self.ktm,
+        )
+        from django.contrib.auth.models import Permission
+
+        self.counselor.user_permissions.add(Permission.objects.get(codename='change_leadcourseinterest'))
+        self.client.force_authenticate(self.counselor)
+        self.course = Course.objects.create(name='Python', full_amount=30000)
+        self.lead = Lead.objects.create(full_name='Ram Thapa', phone='9800000900', branch=self.ktm)
+        self.enquiry = LeadCourseInterest.objects.create(lead=self.lead, course=self.course, branch=self.ktm)
+
+    def _url(self, lead=None, rest=''):
+        return f'/api/leads/{(lead or self.lead).id}/voice-notes/{rest}'
+
+    def _record(self, expect=201, content_type='audio/webm;codecs=opus', body=b'voice-bytes', **extra):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        data = {
+            'file': SimpleUploadedFile('note.webm', body, content_type=content_type),
+            'enquiry': self.enquiry.id, 'duration_seconds': 42, **extra,
+        }
+        response = self.client.post(self._url(), data, format='multipart')
+        self.assertEqual(response.status_code, expect, response.data)
+        return response.data
+
+    def _file_exists(self, note_id):
+        from django.core.files.storage import default_storage
+
+        return default_storage.exists(VoiceNote.objects.get(pk=note_id).file_key)
+
+    def test_record_and_play(self):
+        data = self._record(note='Asked about weekend classes')
+        self.assertEqual(
+            (data['content_type'], data['size_bytes'], data['duration_seconds'], data['course_name']),
+            ('audio/webm', 11, 42, 'Python'),
+        )
+        self.assertEqual((data['created_by_name'], data['branch']), ('Sita', self.ktm.id))
+        self.assertNotIn('file', data)
+        audio = self.client.get(self._url(rest=f'{data["id"]}/audio/'))
+        self.assertEqual(audio.status_code, 200)
+        self.assertEqual(audio['Content-Type'], 'audio/webm')
+        self.assertEqual(audio.content, b'voice-bytes')
+        listed = self.client.get(self._url(), {'enquiry': self.enquiry.id}).data['results']
+        self.assertEqual([n['id'] for n in listed], [data['id']])
+
+    def test_only_sound_and_sensible_sizes_are_saved(self):
+        refused = self._record(expect=400, content_type='application/pdf')
+        self.assertEqual(str(refused['file'][0]), 'Only a sound recording can be saved.')
+        refused = self._record(expect=400, duration_seconds=11 * 60)
+        self.assertEqual(str(refused['duration_seconds'][0]), 'A voice note can be 10 minutes at most.')
+        other_lead = Lead.objects.create(full_name='Hari', phone='9800000901', branch=self.ktm)
+        other = LeadCourseInterest.objects.create(lead=other_lead, course=self.course)
+        refused = self._record(expect=400, enquiry=other.id)
+        self.assertEqual(str(refused['enquiry'][0]), 'This enquiry belongs to another lead.')
+        self.assertFalse(VoiceNote.objects.exists())
+
+    def test_recording_needs_enquiry_rights(self):
+        viewer = User.objects.create_user(email='view@test.com', name='Viewer', password='pass', branch=self.ktm)
+        self.client.force_authenticate(viewer)
+        self._record(expect=403)
+
+    def test_another_branch_cannot_hear_it(self):
+        note = self._record()
+        outsider = User.objects.create_user(email='pkr@test.com', name='Pkr', password='pass', branch=self.pkr)
+        self.client.force_authenticate(outsider)
+        self.assertEqual(self.client.get(self._url(rest=f'{note["id"]}/audio/')).status_code, 404)
+        self.assertEqual(self.client.get(self._url()).status_code, 404)
+
+    def test_only_the_recorder_or_staff_deletes_and_the_file_goes(self):
+        note = self._record()
+        self.assertTrue(self._file_exists(note['id']))
+        key = VoiceNote.objects.get(pk=note['id']).file_key
+        colleague = User.objects.create_user(email='col@test.com', name='Col', password='pass', branch=self.ktm)
+        self.client.force_authenticate(colleague)
+        refused = self.client.delete(self._url(rest=f'{note["id"]}/'))
+        self.assertEqual(refused.status_code, 403)
+        self.client.force_authenticate(self.counselor)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.assertEqual(self.client.delete(self._url(rest=f'{note["id"]}/')).status_code, 204)
+        from django.core.files.storage import default_storage
+
+        self.assertFalse(default_storage.exists(key))
+
+    def test_deleting_the_lead_forever_removes_its_recordings(self):
+        from django.core.files.storage import default_storage
+
+        note = self._record()
+        key = VoiceNote.objects.get(pk=note['id']).file_key
+        with self.captureOnCommitCallbacks(execute=True):
+            self.lead.delete()
+        self.assertFalse(VoiceNote.objects.exists())
+        self.assertFalse(default_storage.exists(key))

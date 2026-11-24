@@ -5,7 +5,7 @@ from apps.lead.models import (
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, Adjustment,
     EnrollmentHistory, LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, Placement,
     PaymentPlan, Installment, ReminderConfig, ReminderLog, TeamsConfig, TeamsLicence,
-    EnquiryStageChange,
+    EnquiryStageChange, VoiceNote,
 )
 
 
@@ -173,3 +173,11 @@ class EnquiryAdmin(admin.ModelAdmin):
 class EnquiryStageChangeAdmin(ReadOnlyAdmin):
     list_display = ['enquiry', 'from_stage', 'to_stage', 'changed_by', 'created_at']
     list_filter = ['to_stage']
+
+
+@admin.register(VoiceNote)
+class VoiceNoteAdmin(ReadOnlyAdmin):
+    """Look only. Deleting through the app also removes the recording."""
+
+    list_display = ['id', 'lead', 'enquiry', 'duration_seconds', 'created_by', 'created_at']
+    list_select_related = ['lead', 'enquiry', 'created_by']

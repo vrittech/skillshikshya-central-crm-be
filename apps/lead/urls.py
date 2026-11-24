@@ -8,7 +8,7 @@ from apps.lead.views import (
     LeadCourseInterestViewSet, EnrollmentViewSet, PaymentViewSet, EnrollmentHistoryViewSet,
     AdjustmentViewSet, EnrollmentReminderViewSet, TeamsLicenceViewSet,
     GlobalCallViewSet,
-    LeadCallViewSet, LeadActivityViewSet, FollowUpViewSet, LeadDocumentViewSet,
+    LeadCallViewSet, LeadActivityViewSet, FollowUpViewSet, LeadDocumentViewSet, VoiceNoteViewSet,
     NotificationViewSet,
     GlobalFollowUpViewSet, GlobalEnrollmentViewSet, GlobalPaymentViewSet,
     GlobalCallViewSet,
@@ -38,6 +38,7 @@ lead_router.register(r'calls', LeadCallViewSet, basename='lead-call')
 lead_router.register(r'activities', LeadActivityViewSet, basename='lead-activity')
 lead_router.register(r'followups', FollowUpViewSet, basename='lead-followup')
 lead_router.register(r'documents', LeadDocumentViewSet, basename='lead-document')
+lead_router.register(r'voice-notes', VoiceNoteViewSet, basename='lead-voice-note')
 lead_router.register(r'course-interests', LeadCourseInterestViewSet, basename='lead-course-interest')
 lead_router.register(r'enrollments', EnrollmentViewSet, basename='lead-enrollment')
 

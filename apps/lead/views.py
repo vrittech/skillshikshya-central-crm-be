@@ -8,6 +8,7 @@ from django.utils import timezone
 from rest_framework import mixins, viewsets, status
 from rest_framework.decorators import action
 from rest_framework.filters import SearchFilter, OrderingFilter
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
@@ -18,7 +19,7 @@ from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
     Adjustment, ReminderLog, TeamsLicence,
-    LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
+    LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, VoiceNote,
 )
 from apps.lead.serializers import (
     LearningModeSerializer, InstitutionSerializer,
@@ -31,7 +32,7 @@ from apps.lead.serializers import (
     EnquiryStageChangeSerializer, EnquiryStageSerializer, EnquiryLostSerializer,
     PhoneMatchSerializer,
     LeadCallSerializer, LeadActivitySerializer, FollowUpSerializer,
-    LeadDocumentSerializer, NotificationSerializer,
+    LeadDocumentSerializer, NotificationSerializer, VoiceNoteSerializer,
     LeadListSerializer, LeadMinSerializer,
     GlobalFollowUpSerializer, GlobalEnrollmentSerializer, GlobalPaymentSerializer,
     GlobalCallSerializer,
@@ -965,6 +966,85 @@ class LeadDocumentViewSet(viewsets.ModelViewSet):
         else:
             permission_classes = [IsAuthenticated]
         return [p() for p in permission_classes]
+
+
+def visible_lead(request, lead_pk):
+    """The lead, if this user may see it (their branch's leads, or all for staff); else 404."""
+    leads = LeadBranchFilterBackend().filter_queryset(
+        request, Lead.objects.filter(is_deleted=False), view=None,
+    )
+    return get_object_or_404(leads, pk=lead_pk)
+
+
+class VoiceNoteViewSet(
+    mixins.ListModelMixin, mixins.CreateModelMixin, mixins.RetrieveModelMixin,
+    mixins.DestroyModelMixin, viewsets.GenericViewSet,
+):
+    """Voice notes on a lead's enquiries. GET {id}/audio/ plays the recording.
+
+    Anyone who can work enquiries records. Only the person who recorded a
+    note, or staff, deletes it; the file goes with it.
+    """
+
+    serializer_class = VoiceNoteSerializer
+    pagination_class = CustomPagination
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get_queryset(self):
+        lead = visible_lead(self.request, self.kwargs['lead_pk'])
+        qs = lead.voice_notes.select_related('created_by', 'enquiry__course')
+        enquiry = self.request.query_params.get('enquiry')
+        if enquiry:
+            qs = qs.filter(enquiry_id=enquiry)
+        return qs
+
+    def get_serializer_context(self):
+        return {**super().get_serializer_context(), 'lead_pk': self.kwargs.get('lead_pk')}
+
+    def get_permissions(self):
+        if self.action == 'create':
+            return [IsAuthenticated(), needs('lead.change_leadcourseinterest')()]
+        return [IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        from apps.lead import voice_notes
+
+        lead = visible_lead(self.request, self.kwargs['lead_pk'])
+        file = serializer.validated_data.pop('file')
+        content_type = voice_notes.base_type(file.content_type)
+        key = voice_notes.save_file(file, lead_id=lead.id, content_type=content_type)
+        serializer.save(
+            lead=lead,
+            file_key=key,
+            content_type=content_type,
+            size_bytes=file.size,
+            branch=getattr(self.request.user, 'branch', None) or lead.branch,
+            created_by=self.request.user,
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        note = self.get_object()
+        if not (request.user.is_staff or note.created_by_id == request.user.id):
+            return Response(
+                {'detail': 'Only the person who recorded it or an admin can delete a voice note.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        note.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['get'])
+    def audio(self, request, lead_pk=None, pk=None):
+        from apps.lead import voice_notes
+
+        note = self.get_object()
+        try:
+            body = voice_notes.read_file(note.file_key)
+        except Exception:
+            return Response({'detail': 'The recording could not be found.'}, status=status.HTTP_404_NOT_FOUND)
+        response = HttpResponse(body, content_type=note.content_type)
+        response['Content-Disposition'] = 'inline'
+        response['Cache-Control'] = 'private, max-age=3600'
+        return response
 
 
 class TeamsLicenceViewSet(

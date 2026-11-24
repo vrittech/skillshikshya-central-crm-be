@@ -1270,6 +1270,42 @@ class LeadDocument(models.Model):
         return f'{self.document_type} - {self.lead.full_name}'
 
 
+class VoiceNote(models.Model):
+    """A short recording a counselor makes on an enquiry.
+
+    The file is private: it is kept under `file_key` (in R2, or the local
+    media folder when R2 is not set up) and only the CRM plays it, to users
+    who can see the lead. Deleting the row removes the file (see voice_notes.py).
+    """
+
+    lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name='voice_notes')
+    enquiry = models.ForeignKey(
+        LeadCourseInterest, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='voice_notes',
+    )
+    file_key = models.CharField(max_length=255, editable=False)
+    content_type = models.CharField(max_length=50)
+    size_bytes = models.PositiveIntegerField()
+    duration_seconds = models.PositiveIntegerField(default=0)
+    note = models.CharField(max_length=255, blank=True, default='')
+    branch = models.ForeignKey(
+        'branch.Branch', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='voice_notes',
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='voice_notes_recorded',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'lead_voice_notes'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'Voice note {self.pk} - {self.lead.full_name}'
+
+
 class Notification(models.Model):
     recipient = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE,

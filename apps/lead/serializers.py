@@ -10,7 +10,7 @@ from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
     Adjustment, Placement, ReminderLog, TeamsLicence, EnquiryStageChange,
-    LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
+    LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, VoiceNote,
 )
 
 
@@ -625,6 +625,53 @@ class LeadDocumentSerializer(serializers.ModelSerializer):
         model = LeadDocument
         fields = '__all__'
         read_only_fields = ['lead', 'uploaded_by', 'uploaded_at']
+
+
+class VoiceNoteSerializer(serializers.ModelSerializer):
+    """Upload: multipart with `file` (audio), optional `enquiry`, `duration_seconds`, `note`."""
+
+    file = serializers.FileField(write_only=True)
+    course_name = serializers.SerializerMethodField()
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True, default=None)
+
+    class Meta:
+        model = VoiceNote
+        fields = [
+            'id', 'lead', 'enquiry', 'course_name', 'content_type', 'size_bytes',
+            'duration_seconds', 'note', 'branch', 'created_by', 'created_by_name', 'created_at',
+            'file',
+        ]
+        read_only_fields = ['lead', 'content_type', 'size_bytes', 'branch', 'created_by', 'created_at']
+
+    def get_course_name(self, obj):
+        enquiry = obj.enquiry
+        if enquiry is None:
+            return None
+        return enquiry.course.name if enquiry.course else enquiry.course_name
+
+    def validate_file(self, file):
+        from apps.lead import voice_notes
+
+        if voice_notes.base_type(file.content_type) not in voice_notes.AUDIO_TYPES:
+            raise ValidationError('Only a sound recording can be saved.')
+        if file.size > voice_notes.MAX_BYTES:
+            raise ValidationError('The recording is too large (10 MB at most).')
+        if file.size == 0:
+            raise ValidationError('The recording is empty.')
+        return file
+
+    def validate_duration_seconds(self, value):
+        from apps.lead.voice_notes import MAX_SECONDS
+
+        if value > MAX_SECONDS:
+            raise ValidationError('A voice note can be 10 minutes at most.')
+        return value
+
+    def validate_enquiry(self, enquiry):
+        lead_pk = self.context.get('lead_pk')
+        if enquiry is not None and lead_pk is not None and enquiry.lead_id != int(lead_pk):
+            raise ValidationError('This enquiry belongs to another lead.')
+        return enquiry
 
 
 class GlobalFollowUpSerializer(serializers.ModelSerializer):
