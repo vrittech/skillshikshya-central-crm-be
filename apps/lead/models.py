@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Sum, Count, Max
 from django.db.models.fields.json import KeyTextTransform
@@ -483,6 +484,74 @@ class Payment(models.Model):
 
     def __str__(self):
         return f'{self.amount} ({self.get_status_display()}) — {self.enrollment}'
+
+
+class EnrollmentHistory(models.Model):
+    """Reason trail: one row per major change to an enrollment.
+
+    Rows are only ever added. Editing or deleting one raises ValidationError.
+    """
+
+    class Action(models.TextChoices):
+        CANCEL = 'cancel', 'Cancel'
+        SWITCH_BATCH = 'switch_batch', 'Switch batch'
+        PAUSE = 'pause', 'Pause'
+        RESUME = 'resume', 'Resume'
+        CHANGE_FEE = 'change_fee', 'Change fee'
+        EXTRA_CHARGE = 'extra_charge', 'Extra charge'
+        DISCOUNT = 'discount', 'Discount'
+        REFUND = 'refund', 'Refund'
+        WRITE_OFF = 'write_off', 'Write-off'
+        VOID_PAYMENT = 'void_payment', 'Void payment'
+        CANCEL_INVOICE = 'cancel_invoice', 'Cancel invoice'
+        CHANGE_DUE_DATES = 'change_due_dates', 'Change due dates'
+
+    enrollment = models.ForeignKey(
+        Enrollment, on_delete=models.PROTECT, related_name='history',
+    )
+    action = models.CharField(max_length=20, choices=Action.choices)
+    reason = models.TextField()
+    before = models.JSONField(default=dict, blank=True)
+    after = models.JSONField(default=dict, blank=True)
+    performed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        related_name='enrollment_changes',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'enrollment_history'
+        ordering = ['-created_at']
+        constraints = [
+            models.CheckConstraint(
+                check=~models.Q(reason=''),
+                name='enrollment_history_reason_required',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.get_action_display()} on enrollment {self.enrollment_id}'
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValidationError('History rows cannot be changed.')
+        self.reason = (self.reason or '').strip()
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('History rows cannot be deleted.')
+
+    @classmethod
+    def record(cls, *, enrollment, action, reason, performed_by, before=None, after=None):
+        return cls.objects.create(
+            enrollment=enrollment,
+            action=action,
+            reason=reason,
+            performed_by=performed_by,
+            before=before or {},
+            after=after or {},
+        )
 
 
 class LeadCall(models.Model):

@@ -14,7 +14,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
-    LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment,
+    LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
 )
 from apps.lead.serializers import (
@@ -23,6 +23,7 @@ from apps.lead.serializers import (
     LeadSourceSerializer, CampaignSerializer, LeadStatusSerializer,
     LeadPrioritySerializer, LeadTagSerializer, LeadTypeSerializer, LeadSerializer,
     LeadCourseInterestSerializer, EnrollmentSerializer, PaymentSerializer,
+    EnrollmentHistorySerializer,
     LeadCallSerializer, LeadActivitySerializer, FollowUpSerializer,
     LeadDocumentSerializer, NotificationSerializer,
     LeadListSerializer, LeadMinSerializer,
@@ -508,6 +509,23 @@ class PaymentViewSet(viewsets.ModelViewSet):
         else:
             permission_classes = [IsAuthenticated]
         return [p() for p in permission_classes]
+
+
+class EnrollmentHistoryViewSet(viewsets.ReadOnlyModelViewSet):
+    """Reason trail of one enrollment, newest first.
+
+    Read-only: rows are only written by EnrollmentHistory.record().
+    """
+    serializer_class = EnrollmentHistorySerializer
+    pagination_class = CustomPagination
+    filter_backends = [BranchFilterBackend]
+    branch_field = 'enrollment__branch'
+
+    def get_queryset(self):
+        return EnrollmentHistory.objects.filter(
+            enrollment_id=self.kwargs['enrollment_pk'],
+            enrollment__lead_id=self.kwargs['lead_pk'],
+        ).select_related('performed_by').order_by('-created_at', '-id')
 
 
 class LeadCallViewSet(viewsets.ModelViewSet):

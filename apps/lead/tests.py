@@ -1,12 +1,13 @@
 from datetime import date
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.course.models import Course
-from apps.lead.models import Lead, Enrollment, Payment
+from apps.lead.models import Lead, Enrollment, Payment, EnrollmentHistory
 
 User = get_user_model()
 
@@ -229,3 +230,103 @@ class MoneyCannotBeDeletedTests(APITestCase):
         response = self.client.delete(url)
         self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         self.assertTrue(Enrollment.objects.filter(id=self.enrollment.id).exists())
+
+
+class EnrollmentHistoryTests(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email='history@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        course = Course.objects.create(name='Python', full_amount=30000)
+        self.lead = Lead.objects.create(full_name='Ram', phone='9800000200')
+        self.enrollment = Enrollment.objects.create(
+            lead=self.lead, course=course, enrollment_date=date.today(),
+            listed_fee=30000, agreed_amount=30000,
+        )
+        self.client.force_authenticate(self.admin)
+        self.history_url = (
+            f'/api/leads/{self.lead.id}/enrollments/{self.enrollment.id}/history/'
+        )
+
+    def test_change_is_recorded_with_who_what_why(self):
+        row = EnrollmentHistory.record(
+            enrollment=self.enrollment,
+            action=EnrollmentHistory.Action.DISCOUNT,
+            reason='Scholarship for top student',
+            performed_by=self.admin,
+            before={'agreed_amount': '30000.00'},
+            after={'agreed_amount': '25000.00'},
+        )
+        self.assertEqual(row.enrollment, self.enrollment)
+        self.assertEqual(row.action, 'discount')
+        self.assertEqual(row.reason, 'Scholarship for top student')
+        self.assertEqual(row.performed_by, self.admin)
+        self.assertEqual(row.before, {'agreed_amount': '30000.00'})
+        self.assertEqual(row.after, {'agreed_amount': '25000.00'})
+        self.assertIsNotNone(row.created_at)
+
+    def test_reason_is_required(self):
+        with self.assertRaises(ValidationError):
+            EnrollmentHistory.record(
+                enrollment=self.enrollment,
+                action=EnrollmentHistory.Action.CANCEL,
+                reason='   ',
+                performed_by=self.admin,
+            )
+        self.assertEqual(EnrollmentHistory.objects.count(), 0)
+
+    def test_history_row_cannot_be_changed_or_deleted(self):
+        row = EnrollmentHistory.record(
+            enrollment=self.enrollment,
+            action=EnrollmentHistory.Action.CANCEL,
+            reason='Student moved abroad',
+            performed_by=self.admin,
+        )
+        row.reason = 'Something else'
+        with self.assertRaises(ValidationError):
+            row.save()
+        with self.assertRaises(ValidationError):
+            row.delete()
+        saved = EnrollmentHistory.objects.get(id=row.id)
+        self.assertEqual(saved.reason, 'Student moved abroad')
+
+    def test_history_api_lists_changes_newest_first(self):
+        paused = EnrollmentHistory.record(
+            enrollment=self.enrollment,
+            action=EnrollmentHistory.Action.PAUSE,
+            reason='Exams next month',
+            performed_by=self.admin,
+        )
+        resumed = EnrollmentHistory.record(
+            enrollment=self.enrollment,
+            action=EnrollmentHistory.Action.RESUME,
+            reason='Exams finished',
+            performed_by=self.admin,
+        )
+        response = self.client.get(self.history_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [r['id'] for r in response.data['results']]
+        self.assertEqual(ids, [resumed.id, paused.id])
+        row = response.data['results'][0]
+        self.assertEqual(row['action_display'], 'Resume')
+        self.assertEqual(row['reason'], 'Exams finished')
+        self.assertEqual(row['performed_by_name'], 'Admin')
+
+    def test_history_api_is_read_only(self):
+        row = EnrollmentHistory.record(
+            enrollment=self.enrollment,
+            action=EnrollmentHistory.Action.CANCEL,
+            reason='Student moved abroad',
+            performed_by=self.admin,
+        )
+        post = self.client.post(
+            self.history_url, {'action': 'cancel', 'reason': 'x'}, format='json',
+        )
+        self.assertEqual(post.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        patch = self.client.patch(
+            f'{self.history_url}{row.id}/', {'reason': 'changed'}, format='json',
+        )
+        self.assertEqual(patch.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        delete = self.client.delete(f'{self.history_url}{row.id}/')
+        self.assertEqual(delete.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertEqual(EnrollmentHistory.objects.count(), 1)

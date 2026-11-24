@@ -6,7 +6,7 @@ from apps.callminutes.utils import format_duration, parse_duration_to_seconds
 from apps.course.models import Course
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
-    LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment,
+    LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
 )
 
@@ -131,6 +131,19 @@ class PaymentSerializer(serializers.ModelSerializer):
         model = Payment
         fields = '__all__'
         read_only_fields = ['enrollment', 'received_by', 'created_at']
+
+
+class EnrollmentHistorySerializer(serializers.ModelSerializer):
+    action_display = serializers.CharField(source='get_action_display', read_only=True)
+    performed_by_name = serializers.CharField(source='performed_by.name', read_only=True)
+
+    class Meta:
+        model = EnrollmentHistory
+        fields = [
+            'id', 'enrollment', 'action', 'action_display', 'reason',
+            'before', 'after', 'performed_by', 'performed_by_name', 'created_at',
+        ]
+        read_only_fields = fields
 
 
 class LeadMinSerializer(serializers.ModelSerializer):

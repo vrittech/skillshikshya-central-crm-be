@@ -5,7 +5,7 @@ from apps.lead.views import (
     ProvinceViewSet, CityViewSet,
     LeadSourceViewSet, CampaignViewSet, LeadStatusViewSet,
     LeadPriorityViewSet, LeadTagViewSet, LeadTypeViewSet, LeadViewSet,
-    LeadCourseInterestViewSet, EnrollmentViewSet, PaymentViewSet,
+    LeadCourseInterestViewSet, EnrollmentViewSet, PaymentViewSet, EnrollmentHistoryViewSet,
     GlobalCallViewSet,
     LeadCallViewSet, LeadActivityViewSet, FollowUpViewSet, LeadDocumentViewSet,
     NotificationViewSet,
@@ -41,6 +41,7 @@ lead_router.register(r'enrollments', EnrollmentViewSet, basename='lead-enrollmen
 
 enrollment_router = DefaultRouter()
 enrollment_router.register(r'payments', PaymentViewSet, basename='enrollment-payment')
+enrollment_router.register(r'history', EnrollmentHistoryViewSet, basename='enrollment-history')
 
 urlpatterns = [
     path('', include(router.urls)),
