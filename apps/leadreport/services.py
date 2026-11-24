@@ -827,10 +827,18 @@ def batch_profit_report(request):
     """Each batch's fees, collected, owed, costs and profit, newest batch first.
 
     Money counts on the batch the student first joined. A closed batch also
-    has its figures at close. Optional filters: course, status.
+    has its figures at close. Optional filters: course, status, and
+    start_date / end_date for batches that start in that range.
     """
+    start_date, end_date, error = _resolve_date_range(request)
+    if error:
+        return {'error': error}
     branch_id = _branch_scope(request)
     batches = CourseBatch.objects.select_related('course')
+    if start_date:
+        batches = batches.filter(start_date__gte=start_date)
+    if end_date:
+        batches = batches.filter(start_date__lte=end_date)
     if branch_id:
         batches = batches.filter(branch_id=branch_id)
     course = _query_param(request, 'course')

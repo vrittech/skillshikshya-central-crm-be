@@ -170,6 +170,9 @@ class GlobalCallFilter(django_filters.FilterSet):
     notes = django_filters.CharFilter(lookup_expr='icontains')
     call_timestamp__gte = django_filters.DateTimeFilter(field_name='call_timestamp', lookup_expr='gte')
     call_timestamp__lte = django_filters.DateTimeFilter(field_name='call_timestamp', lookup_expr='lte')
+    # Whole days, in local time: date_from=2026-11-01&date_to=2026-11-30.
+    date_from = django_filters.DateFilter(field_name='call_timestamp', lookup_expr='date__gte')
+    date_to = django_filters.DateFilter(field_name='call_timestamp', lookup_expr='date__lte')
     created_by = django_filters.NumberFilter(field_name='created_by')
     student = django_filters.NumberFilter(field_name='lead__students')
 

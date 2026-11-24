@@ -1,4 +1,4 @@
-from django.db.models import Count, Q
+from django.db.models import Count, F, Q
 from django.shortcuts import get_object_or_404
 from rest_framework import viewsets
 from rest_framework.decorators import action
@@ -70,8 +70,9 @@ class BatchViewSet(viewsets.ModelViewSet):
     filterset_class = BatchFilter
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, BranchFilterBackend]
     search_fields = ['name', 'description']
-    ordering_fields = ['id', 'name']
-    ordering = ['name']
+    ordering_fields = ['id', 'name', 'start_time']
+    # Morning first; a shift with no time set goes last.
+    ordering = [F('start_time').asc(nulls_last=True), 'name']
     # A shift with no branch is shared by every branch.
     shared_when_no_branch = True
 

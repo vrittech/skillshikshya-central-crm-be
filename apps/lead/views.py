@@ -1,6 +1,8 @@
 import csv
 from datetime import datetime
 
+from django.db.models import Count, Q, Sum
+from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -439,8 +441,24 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
             'lead', 'created_by', 'branch',
         )
 
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        """Totals for the calls the same filters pick: count, talk time, in/out."""
+        calls = self.filter_queryset(self.get_queryset()).order_by()
+        totals = calls.aggregate(
+            calls=Count('id'),
+            talk_seconds=Coalesce(Sum('duration_seconds'), 0),
+            inbound=Count('id', filter=Q(direction=LeadCall.Direction.INBOUND)),
+            outbound=Count('id', filter=Q(direction=LeadCall.Direction.OUTBOUND)),
+            leads=Count('lead', distinct=True),
+        )
+        totals['average_seconds'] = (
+            round(totals['talk_seconds'] / totals['calls']) if totals['calls'] else 0
+        )
+        return Response(totals)
+
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
 

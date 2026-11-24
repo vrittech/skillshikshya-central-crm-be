@@ -326,6 +326,24 @@ class BatchMoneyTests(BatchTestBase):
         self.assertEqual([r['name'] for r in data['results']], ['Python Nov'])
         self.assertIn('error', self.client.get('/api/reports/batch-profit/', {'status': 'x'}).data)
 
+    def test_profit_report_filters_by_start_date(self):
+        self._enrollment(paid=30000, seat=self.batch)
+        self._enrollment(batch=self.other, paid=5000)
+        today = timezone.localdate()
+        url = '/api/reports/batch-profit/'
+
+        data = self.client.get(url, {'start_date': (today + timedelta(days=1)).isoformat()}).data
+        self.assertEqual([r['name'] for r in data['results']], ['Python Dec'])
+        self.assertEqual(data['summary']['collected'], '5000.00')
+        data = self.client.get(url, {'end_date': today.isoformat()}).data
+        self.assertEqual([r['name'] for r in data['results']], ['Python Nov'])
+        data = self.client.get(url, {'start_date': today.isoformat(), 'end_date': today.isoformat()}).data
+        self.assertEqual(data['summary']['batches'], 1)
+
+        self.assertIn('error', self.client.get(url, {'start_date': 'nope'}).data)
+        later = {'start_date': (today + timedelta(days=5)).isoformat(), 'end_date': today.isoformat()}
+        self.assertIn('error', self.client.get(url, later).data)
+
 
 class CloseBatchTests(BatchTestBase):
     """Closing keeps the figures of that day; later money shows as after close."""
@@ -484,6 +502,14 @@ class ShiftTests(APITestCase):
         response = self.client.patch(f'/api/batches/{old.id}/', {'is_active': False}, format='json')
         self.assertEqual(response.status_code, 200, response.data)
         self.assertIsNone(response.data['duration_minutes'])
+
+    def test_list_is_morning_first_and_no_time_last(self):
+        self._create(name='Evening', start_time='17:00', end_time='19:00')
+        Batch.objects.create(name='Old')
+        self._create(name='Day', start_time='12:00', end_time='14:00')
+        self._create(name='Early', start_time='06:00', end_time='08:00')
+        names = [s['name'] for s in self.client.get('/api/batches/').data['results']]
+        self.assertEqual(names, ['Early', 'Day', 'Evening', 'Old'])
 
     def test_old_typed_times_are_read_into_start_and_end(self):
         from importlib import import_module

@@ -194,6 +194,34 @@ class GlobalCallListTests(APITestCase):
             [r['id'] for r in response.data['results']], [self.recent_call.id],
         )
 
+    def test_filter_whole_days(self):
+        from django.utils import timezone as tz
+        today = tz.localdate().isoformat()
+        response = self.client.get('/api/calls/', {'date_from': today, 'date_to': today})
+        self.assertEqual([r['id'] for r in response.data['results']], [self.recent_call.id])
+        old_day = tz.localdate(self.old_call.call_timestamp).isoformat()
+        response = self.client.get('/api/calls/', {'date_to': old_day})
+        self.assertEqual([r['id'] for r in response.data['results']], [self.old_call.id])
+
+    def test_summary_counts_the_filtered_calls(self):
+        from apps.lead.models import LeadCall
+
+        other = Lead.objects.create(full_name='Other Person', phone='9811111112')
+        LeadCall.objects.create(
+            lead=other, call_timestamp=self.recent_call.call_timestamp, direction='outbound',
+            caller='Counselor Nine', phone_number='9811111112', duration_seconds=0,
+            created_by=self.counselor, branch=self.branch,
+        )
+        data = self.client.get('/api/calls/summary/').data
+        self.assertEqual(data, {
+            'calls': 3, 'talk_seconds': 330, 'inbound': 1, 'outbound': 2,
+            'leads': 2, 'average_seconds': 110,
+        })
+        data = self.client.get('/api/calls/summary/', {'direction': 'inbound'}).data
+        self.assertEqual((data['calls'], data['talk_seconds'], data['leads']), (1, 60, 1))
+        data = self.client.get('/api/calls/summary/', {'search': 'nobody'}).data
+        self.assertEqual((data['calls'], data['average_seconds']), (0, 0))
+
     def test_search(self):
         response = self.client.get('/api/calls/?search=Counselor Nine')
         self.assertEqual(response.data['count'], 1)
