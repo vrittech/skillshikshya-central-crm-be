@@ -24,17 +24,48 @@ class CourseBatchDetailsTests(APITestCase):
         self.slot = Batch.objects.create(name='Morning')
 
     def _create(self, **extra):
-        body = {'name': 'Python Nov', 'course': self.course.id, 'batch': self.slot.id, **extra}
+        body = {
+            'name': 'Python Nov', 'course': self.course.id, 'batch': self.slot.id, 'capacity': 20,
+            **extra,
+        }
+        body = {k: v for k, v in body.items() if v is not ...}
         return self.client.post('/api/course-batches/', body, format='json')
 
-    def test_new_batch_is_upcoming_physical_with_no_seat_limit(self):
+    def test_new_batch_is_upcoming_and_physical(self):
         response = self._create()
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         self.assertEqual(response.data['status'], 'upcoming')
         self.assertEqual(response.data['status_display'], 'Upcoming')
         self.assertEqual(response.data['mode'], 'physical')
-        self.assertIsNone(response.data['capacity'])
+        self.assertEqual((response.data['capacity'], response.data['seats_left']), (20, 20))
         self.assertIsNone(response.data['trainer'])
+
+    def test_seats_are_required_and_at_least_one(self):
+        for capacity, message in [
+            (..., 'Enter the number of seats.'),
+            (None, 'Enter the number of seats.'),
+            (0, 'A batch needs at least 1 seat.'),
+        ]:
+            response = self._create(capacity=capacity)
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertEqual(response.data['capacity'], [message])
+        self.assertFalse(CourseBatch.objects.exists())
+
+    def test_seats_can_be_changed_but_not_cleared(self):
+        batch_id = self._create().data['id']
+        url = f'/api/course-batches/{batch_id}/'
+        response = self.client.patch(url, {'capacity': 30}, format='json')
+        self.assertEqual(response.data['capacity'], 30)
+        response = self.client.patch(url, {'capacity': None}, format='json')
+        self.assertEqual(response.data['capacity'], ['Enter the number of seats.'])
+
+    def test_batch_shows_its_time_slot_times(self):
+        Batch.objects.filter(pk=self.slot.pk).update(start_time='06:00', end_time='08:00')
+        response = self._create()
+        self.assertEqual(
+            (response.data['batch_name'], response.data['batch_start_time'], response.data['batch_end_time']),
+            ('Morning', '06:00', '08:00'),
+        )
 
     def test_seats_mode_status_and_trainer_are_saved(self):
         response = self._create(capacity=25, mode='online', status='running', trainer='Ram')

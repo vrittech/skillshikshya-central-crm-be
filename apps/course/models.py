@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.utils import timezone
 
@@ -138,8 +139,10 @@ class CourseBatch(models.Model):
     )
     start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)
+    # Required for every new batch. Older batches made before seats were
+    # required may still have none: they take no student until seats are set.
     capacity = models.PositiveIntegerField(
-        null=True, blank=True, help_text='Number of seats. Blank means no limit.',
+        null=True, validators=[MinValueValidator(1)], help_text='Number of seats.',
     )
     mode = models.CharField(max_length=10, choices=Mode.choices, default=Mode.PHYSICAL)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.UPCOMING)
@@ -186,6 +189,24 @@ class CourseBatch(models.Model):
         if exclude is not None:
             seated = seated.exclude(pk=exclude.pk)
         return seated.count()
+
+    def seat_refusal(self, exclude=None):
+        """Why a student can't sit in this batch now, or None when they can.
+
+        The seat count is the limit: a closed batch, a batch with no seats set
+        and a full batch take no one.
+        """
+        if self.status == self.Status.CLOSED:
+            return f'{self.name} is closed. Pick an upcoming or running batch.'
+        if self.capacity is None:
+            return f'{self.name} has no seats set. Edit the batch and set its seats first.'
+        taken = self.count_seats_taken(exclude=exclude)
+        if taken >= self.capacity:
+            return (
+                f'{self.name} is full ({taken} of {self.capacity} seats). '
+                'Pick another batch or add seats to it.'
+            )
+        return None
 
 
 class BatchCost(models.Model):

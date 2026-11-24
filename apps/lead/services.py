@@ -45,15 +45,9 @@ def _take_seat(enrollment, batch, *, kind, reason, user, on=None, from_batch=Non
             f'{batch.name} is a batch of another course. To switch course, cancel this '
             'enrollment with a reason and add a new one.'
         )
-    if batch.status == CourseBatch.Status.CLOSED:
-        raise ActionRefused(f'{batch.name} is closed. Pick an upcoming or running batch.')
-    if batch.capacity is not None:
-        taken = batch.count_seats_taken(exclude=enrollment)
-        if taken >= batch.capacity:
-            raise ActionRefused(
-                f'{batch.name} is full ({taken} of {batch.capacity} seats). '
-                'Pick another batch or add seats to it.'
-            )
+    refusal = batch.seat_refusal(exclude=enrollment)
+    if refusal:
+        raise ActionRefused(refusal)
     Placement.objects.create(
         enrollment=enrollment,
         course_batch=batch,

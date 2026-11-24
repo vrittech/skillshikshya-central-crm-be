@@ -339,11 +339,12 @@ class EnrollmentSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {'batch': 'This batch is for another course. Pick a batch of this course.'}
                 )
+            # The seat count decides: a closed, full or seatless batch can't be
+            # picked. The seat itself is taken on confirm, checked again there.
             batch_is_new = self.instance is None or self._changed(attrs, 'batch')
-            if batch is not None and batch_is_new and batch.status == CourseBatch.Status.CLOSED:
-                raise serializers.ValidationError(
-                    {'batch': f'{batch.name} is closed. Pick an upcoming or running batch.'}
-                )
+            refusal = batch.seat_refusal() if batch is not None and batch_is_new else None
+            if refusal:
+                raise serializers.ValidationError({'batch': refusal})
         return attrs
 
     def validate_status(self, value):

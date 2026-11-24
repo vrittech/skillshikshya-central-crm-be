@@ -928,7 +928,9 @@ class SeatTestBase(APITestCase):
         self.next_batch = CourseBatch.objects.create(
             name='Python Dec', course=self.course, capacity=2,
         )
-        self.java_batch = CourseBatch.objects.create(name='Java Nov', course=self.other_course)
+        self.java_batch = CourseBatch.objects.create(
+            name='Java Nov', course=self.other_course, capacity=2,
+        )
         self.leads = 0
 
     def _lead(self):
@@ -983,9 +985,9 @@ class SeatTests(SeatTestBase):
         self.assertFalse(Placement.objects.exists())
 
     def test_confirm_into_a_full_batch_is_refused_and_nothing_changes(self):
+        late = self._enroll(self.batch)  # picked while seats were free
         for _ in range(2):
             self.assertEqual(self._confirm(self._enroll(self.batch)).status_code, 200)
-        late = self._enroll(self.batch)
 
         response = self._confirm(late)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -998,12 +1000,34 @@ class SeatTests(SeatTestBase):
         self.assertEqual(Student.objects.count(), 2)
         self.assertEqual(Invoice.objects.count(), 2)
 
-    def test_a_batch_with_no_seat_limit_never_fills(self):
-        open_batch = CourseBatch.objects.create(name='Python Open', course=self.course)
-        for _ in range(3):
-            self.assertEqual(self._confirm(self._enroll(open_batch)).status_code, 200)
-        seats = self._seats(open_batch)
-        self.assertEqual((seats['seats_taken'], seats['seats_left']), (3, None))
+    def test_a_full_batch_cannot_be_picked_for_a_new_enrollment(self):
+        for _ in range(2):
+            self.assertEqual(self._confirm(self._enroll(self.batch)).status_code, 200)
+        response = self._enroll(self.batch, expect=status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data['batch'],
+            ['Python Nov is full (2 of 2 seats). Pick another batch or add seats to it.'],
+        )
+        self._enroll(self.next_batch)
+
+    def test_an_old_batch_with_no_seats_set_takes_no_one_until_seats_are_set(self):
+        old = CourseBatch.objects.create(name='Python Old', course=self.course)
+        response = self._enroll(old, expect=status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data['batch'],
+            ['Python Old has no seats set. Edit the batch and set its seats first.'],
+        )
+        waiting = Enrollment.objects.create(
+            lead=self._lead(), course=self.course, enrollment_date=date.today(),
+            listed_fee=30000, agreed_amount=30000, batch=old,
+        )
+        response = self._confirm(waiting)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Python Old has no seats set', response.data['detail'])
+
+        self.client.patch(f'/api/course-batches/{old.id}/', {'capacity': 10}, format='json')
+        self.assertEqual(self._confirm(waiting).status_code, status.HTTP_200_OK)
+        self.assertEqual(self._seats(old)['seats_left'], 9)
 
     def test_confirm_into_a_closed_batch_is_refused(self):
         enrollment = self._enroll(self.batch)
@@ -1798,7 +1822,9 @@ class TeamsLicenceTests(APITestCase):
         )
         self.client.force_authenticate(self.admin)
         self.course = Course.objects.create(name='Python', full_amount=30000)
-        self.batch = CourseBatch.objects.create(name='Python Nov', course=self.course, status='running')
+        self.batch = CourseBatch.objects.create(
+            name='Python Nov', course=self.course, status='running', capacity=10,
+        )
         TeamsConfig.objects.create(total_licences=2)
         self.people = 0
 

@@ -83,6 +83,21 @@ class CourseBatchSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source='created_by.name', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     mode_display = serializers.CharField(source='get_mode_display', read_only=True)
+    batch_start_time = serializers.TimeField(
+        source='batch.start_time', read_only=True, default=None, format='%H:%M',
+    )
+    batch_end_time = serializers.TimeField(
+        source='batch.end_time', read_only=True, default=None, format='%H:%M',
+    )
+    capacity = serializers.IntegerField(
+        min_value=1,
+        error_messages={
+            'required': 'Enter the number of seats.',
+            'null': 'Enter the number of seats.',
+            'invalid': 'Enter the number of seats.',
+            'min_value': 'A batch needs at least 1 seat.',
+        },
+    )
     seats_taken = serializers.SerializerMethodField()
     seats_left = serializers.SerializerMethodField()
     waiting_count = serializers.SerializerMethodField()
@@ -111,7 +126,7 @@ class CourseBatchSerializer(serializers.ModelSerializer):
         return waiting
 
     def validate_capacity(self, value):
-        if self.instance is not None and value is not None:
+        if self.instance is not None:
             taken = self.instance.count_seats_taken()
             if value < taken:
                 raise serializers.ValidationError(
