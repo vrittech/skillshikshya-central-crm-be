@@ -1,14 +1,16 @@
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Prefetch, Q, Sum
 from django.db.models.functions import Coalesce, TruncDate, TruncMonth, TruncWeek
 from django.utils import timezone
 
 from apps.lead.models import (
     Enrollment, FollowUp, Lead, LeadActivity, LeadCall,
-    LeadCourseInterest, Payment,
+    LeadCourseInterest, Payment, PaymentPlan,
 )
+from apps.lead.services import due_rows
 from apps.callminutes.models import CallMinutesTransaction
 from apps.student.models import Student
 
@@ -592,4 +594,171 @@ def counselor_performance_report(request):
             'end_date': end_date.isoformat() if end_date else None,
         },
         'results': results,
+    }
+
+# ---------------------------------------------------------------- money owed
+
+# How late a late part is, for the Who owes totals: (key, first day, last day).
+LATE_BUCKETS = [
+    ('days_1_30', 1, 30),
+    ('days_31_60', 31, 60),
+    ('days_61_90', 61, 90),
+    ('over_90', 91, None),
+]
+
+
+def _owing_enrollments(request):
+    """Confirmed, active and completed enrollments in the user's branch, ready for due_rows()."""
+    branch_id = _branch_scope(request)
+    qs = Enrollment.objects.filter(status__in=Enrollment.SEAT_STATUSES)
+    if branch_id:
+        qs = qs.filter(branch_id=branch_id)
+    for name in ('course', 'batch'):
+        value = _query_param(request, name)
+        if value and str(value).isdigit():
+            qs = qs.filter(**{f'{name}_id': int(value)})
+    return qs.select_related('lead', 'student', 'course', 'batch', 'branch').annotate(
+        paid_total=Coalesce(
+            Sum('payments__amount', filter=Q(payments__status='successful')),
+            Decimal('0'),
+        ),
+    ).prefetch_related(
+        'adjustments',
+        Prefetch('payment_plans', queryset=PaymentPlan.objects.prefetch_related('installments')),
+    )
+
+
+def _who(enrollment):
+    student = enrollment.student
+    return {
+        'enrollment': enrollment.id,
+        'lead': enrollment.lead_id,
+        'name': student.full_name if student else enrollment.lead.full_name,
+        'phone': (student.phone if student else None) or enrollment.lead.phone,
+        'student_id': student.student_id if student else None,
+        'course_name': enrollment.course.name,
+        'batch_name': enrollment.batch.name if enrollment.batch else None,
+        'branch_name': enrollment.branch.name if enrollment.branch else None,
+    }
+
+
+def who_owes_report(request):
+    """Every student who owes money: how much, how much is late, and how late.
+
+    Optional filters: course, batch (the money batch), late_only.
+    """
+    today = timezone.localdate()
+    late_only = _to_bool(_query_param(request, 'late_only'))
+    results = []
+    totals = {'owed': Decimal('0'), 'late': Decimal('0')}
+    buckets = {key: Decimal('0') for key, _, _ in LATE_BUCKETS}
+
+    for enrollment in _owing_enrollments(request):
+        rows = due_rows(enrollment, today=today, paid=enrollment.paid_total)
+        open_rows = [r for r in rows if r['left'] > 0]
+        late_rows = [r for r in open_rows if r['status'] == 'late']
+        owed = sum((r['left'] for r in open_rows), Decimal('0'))
+        if owed <= 0 or (late_only and not late_rows):
+            continue
+        late = sum((r['left'] for r in late_rows), Decimal('0'))
+        upcoming = next((r for r in open_rows if r['status'] != 'late'), None)
+        results.append({
+            **_who(enrollment),
+            'owed': owed,
+            'late': late,
+            'days_late': max((r['days_late'] for r in late_rows), default=0),
+            'next_due_on': upcoming['due_on'] if upcoming else None,
+            'next_due_amount': upcoming['left'] if upcoming else None,
+        })
+        totals['owed'] += owed
+        totals['late'] += late
+        for row in late_rows:
+            for key, first, last in LATE_BUCKETS:
+                if row['days_late'] >= first and (last is None or row['days_late'] <= last):
+                    buckets[key] += row['left']
+
+    results.sort(key=lambda r: (-r['days_late'], -r['owed'], r['name']))
+    return {
+        'as_of': today.isoformat(),
+        'summary': {
+            'students': len(results),
+            'total_owed': str(totals['owed']),
+            'total_late': str(totals['late']),
+            'not_late': str(totals['owed'] - totals['late']),
+            **{key: str(amount) for key, amount in buckets.items()},
+        },
+        'results': [
+            {
+                **r,
+                'owed': str(r['owed']),
+                'late': str(r['late']),
+                'next_due_on': r['next_due_on'].isoformat() if r['next_due_on'] else None,
+                'next_due_amount': (
+                    str(r['next_due_amount']) if r['next_due_amount'] is not None else None
+                ),
+            }
+            for r in results
+        ],
+    }
+
+
+def _month_range(value, today):
+    """First and last day of 'YYYY-MM', or of next month when value is empty."""
+    if value:
+        try:
+            year, month = (int(part) for part in str(value).split('-'))
+            first = date(year, month, 1)
+        except (TypeError, ValueError):
+            return None, None, 'Invalid month. Use YYYY-MM format.'
+    else:
+        first = date(today.year + today.month // 12, today.month % 12 + 1, 1)
+    following = date(first.year + first.month // 12, first.month % 12 + 1, 1)
+    return first, following - timedelta(days=1), None
+
+
+def due_in_month_report(request):
+    """Every unpaid part due in a month (next month by default), less what is paid on it.
+
+    Optional filters: month (YYYY-MM), course, batch (the money batch).
+    """
+    today = timezone.localdate()
+    first, last, error = _month_range(_query_param(request, 'month'), today)
+    if error:
+        return {'error': error}
+
+    results = []
+    for enrollment in _owing_enrollments(request):
+        rows = due_rows(enrollment, today=today, paid=enrollment.paid_total)
+        for row in rows:
+            if row['left'] > 0 and row['due_on'] and first <= row['due_on'] <= last:
+                results.append({
+                    **_who(enrollment),
+                    'kind': row['kind'],
+                    'due_on': row['due_on'],
+                    'amount': row['amount'],
+                    'paid': row['paid'],
+                    'left': row['left'],
+                })
+
+    results.sort(key=lambda r: (r['due_on'], r['name']))
+    total = sum((r['left'] for r in results), Decimal('0'))
+    return {
+        'month': first.strftime('%Y-%m'),
+        'start_date': first.isoformat(),
+        'end_date': last.isoformat(),
+        'summary': {
+            'total_due': str(total),
+            'parts': len(results),
+            'students': len({r['enrollment'] for r in results}),
+        },
+        'results': [
+            {
+                **r,
+                'due_on': r['due_on'].isoformat(),
+                'amount': str(r['amount']),
+                'paid': str(r['paid']),
+                'left': str(r['left']),
+            }
+            for r in results
+        ],
     }

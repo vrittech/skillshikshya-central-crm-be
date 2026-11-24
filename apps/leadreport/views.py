@@ -15,7 +15,7 @@ class ReportViewSet(viewsets.ViewSet):
             'overview', 'leads-by-status', 'leads-by-source', 'leads-by-type',
             'leads-by-branch', 'leads-by-campaign', 'leads-by-counselor',
             'lead-trend', 'revenue', 'enrollments', 'conversion',
-            'counselor-performance',
+            'counselor-performance', 'who-owes', 'due-in-month',
         ]})
 
     @action(detail=False, methods=['get'])
@@ -65,3 +65,11 @@ class ReportViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='counselor-performance')
     def counselor_performance(self, request):
         return Response(services.counselor_performance_report(request))
+
+    @action(detail=False, methods=['get'], url_path='who-owes')
+    def who_owes(self, request):
+        return Response(services.who_owes_report(request))
+
+    @action(detail=False, methods=['get'], url_path='due-in-month')
+    def due_in_month(self, request):
+        return Response(services.due_in_month_report(request))

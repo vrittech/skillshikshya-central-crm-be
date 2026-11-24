@@ -146,3 +146,114 @@ class LeadReportViewTests(APITestCase):
         response = self.client.get(self._path('list'))
         self.assertEqual(response.status_code, 200)
         self.assertIn('available_reports', response.json())
+
+class OwedReportTests(APITestCase):
+    """Who owes, and what is due in a month, from the due dates."""
+
+    def setUp(self):
+        from datetime import timedelta
+
+        self.timedelta = timedelta
+        self.user = get_user_model().objects.create_user(
+            email='owed@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.user)
+        self.branch = Branch.objects.create(name='Kathmandu', code='KTM')
+        self.other_branch = Branch.objects.create(name='Pokhara', code='PKR')
+        self.course = Course.objects.create(name='Python', full_amount=30000)
+        self.today = timezone.localdate()
+        self.people = 0
+
+    def _enrollment(self, parts, paid=0, status='confirmed', branch=None):
+        """parts: list of (days from today, amount)."""
+        from apps.lead.models import Installment, PaymentPlan
+
+        self.people += 1
+        lead = Lead.objects.create(full_name=f'Student {self.people}', phone=f'98000020{self.people:02d}')
+        enrollment = Enrollment.objects.create(
+            lead=lead, course=self.course, enrollment_date=self.today, listed_fee=30000,
+            agreed_amount=sum(amount for _, amount in parts), status=status,
+            branch=branch or self.branch,
+        )
+        plan = PaymentPlan.objects.create(enrollment=enrollment, reason='Plan', created_by=self.user)
+        for days, amount in parts:
+            Installment.objects.create(
+                plan=plan, due_on=self.today + self.timedelta(days=days), amount=amount,
+            )
+        if paid:
+            Payment.objects.create(
+                enrollment=enrollment, amount=paid, payment_date=timezone.now(),
+                payment_method='cash', status='successful',
+            )
+        return enrollment
+
+    def _get(self, url, **params):
+        response = self.client.get(url, params)
+        self.assertEqual(response.status_code, 200)
+        return response.data
+
+    def test_who_owes_shows_owed_late_and_next_due(self):
+        enrollment = self._enrollment([(-40, 10000), (-10, 10000), (20, 10000)], paid=5000)
+        data = self._get('/api/reports/who-owes/')
+        self.assertEqual(len(data['results']), 1)
+        row = data['results'][0]
+        self.assertEqual(row['enrollment'], enrollment.id)
+        self.assertEqual(row['owed'], '25000.00')
+        self.assertEqual(row['late'], '15000.00')
+        self.assertEqual(row['days_late'], 40)
+        self.assertEqual(row['next_due_on'], str(self.today + self.timedelta(days=20)))
+        self.assertEqual(row['next_due_amount'], '10000.00')
+        summary = data['summary']
+        self.assertEqual(summary['students'], 1)
+        self.assertEqual(summary['total_owed'], '25000.00')
+        self.assertEqual(summary['not_late'], '10000.00')
+        self.assertEqual(summary['days_1_30'], '10000.00')
+        self.assertEqual(summary['days_31_60'], '5000.00')
+        self.assertEqual(summary['over_90'], '0')
+
+    def test_who_owes_leaves_out_paid_pending_and_cancelled(self):
+        self._enrollment([(-5, 10000)], paid=10000)
+        self._enrollment([(-5, 10000)], status='pending')
+        self._enrollment([(-5, 10000)], status='cancelled')
+        owing = self._enrollment([(-5, 10000)])
+        data = self._get('/api/reports/who-owes/')
+        self.assertEqual([r['enrollment'] for r in data['results']], [owing.id])
+
+    def test_who_owes_sorts_by_days_late_and_filters_late_only(self):
+        not_late = self._enrollment([(10, 10000)])
+        a_bit_late = self._enrollment([(-3, 10000)])
+        very_late = self._enrollment([(-100, 10000)])
+        data = self._get('/api/reports/who-owes/')
+        self.assertEqual(
+            [r['enrollment'] for r in data['results']], [very_late.id, a_bit_late.id, not_late.id],
+        )
+        self.assertEqual(data['summary']['over_90'], '10000.00')
+        data = self._get('/api/reports/who-owes/', late_only='true')
+        self.assertNotIn(not_late.id, [r['enrollment'] for r in data['results']])
+
+    def test_who_owes_stays_inside_a_branch(self):
+        here = self._enrollment([(-5, 10000)])
+        self._enrollment([(-5, 10000)], branch=self.other_branch)
+        data = self._get('/api/reports/who-owes/', branch_id=self.branch.id)
+        self.assertEqual([r['enrollment'] for r in data['results']], [here.id])
+
+    def test_due_in_month_defaults_to_next_month_and_takes_off_what_is_paid(self):
+        first = (self.today.replace(day=1) + self.timedelta(days=32)).replace(day=1)
+        days_to = (first - self.today).days + 4  # the 5th of next month
+        enrollment = self._enrollment([(days_to, 30000)], paid=10000)
+        self._enrollment([(0, 10000)])  # due this month
+        self._enrollment([(days_to + 40, 10000)])  # due the month after
+        data = self._get('/api/reports/due-in-month/')
+        self.assertEqual(data['month'], first.strftime('%Y-%m'))
+        self.assertEqual(len(data['results']), 1)
+        row = data['results'][0]
+        self.assertEqual(row['enrollment'], enrollment.id)
+        self.assertEqual(row['left'], '20000.00')
+        self.assertEqual(data['summary']['total_due'], '20000.00')
+
+    def test_due_in_month_takes_a_month_and_refuses_a_bad_one(self):
+        self._enrollment([(0, 10000)])
+        data = self._get('/api/reports/due-in-month/', month=self.today.strftime('%Y-%m'))
+        self.assertEqual(data['summary']['parts'], 1)
+        data = self._get('/api/reports/due-in-month/', month='2026-13')
+        self.assertEqual(data['error'], 'Invalid month. Use YYYY-MM format.')
