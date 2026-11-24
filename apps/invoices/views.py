@@ -13,7 +13,9 @@ from apps.invoices.models import Invoice, InvoiceEmailConfig
 from apps.invoices.serializers import (
     InvoiceEmailConfigSerializer, InvoiceSerializer,
 )
+from apps.invoices.services import cancel_invoice as cancel_invoice_service
 from apps.invoices.tasks import send_invoice_email_task
+from apps.lead.serializers import ReasonSerializer
 
 
 class InvoiceListAPIView(generics.ListAPIView):
@@ -44,6 +46,11 @@ def resend_invoice(request, pk):
     invoice = get_object_or_404(
         Invoice.objects.select_related('enrollment', 'student'), pk=pk,
     )
+    if invoice.status == Invoice.Status.CANCELLED:
+        return Response(
+            {'detail': 'A cancelled invoice is not sent again.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     recipient = (
         invoice.emailed_to
         or (invoice.student.email if invoice.student and invoice.student.email else None)
@@ -59,6 +66,19 @@ def resend_invoice(request, pk):
         'detail': f'Invoice {invoice.invoice_number} queued for re-send.',
         'to': recipient,
     })
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def cancel_invoice(request, pk):
+    """Cancel a wrong invoice with a reason. Invoices are never edited or deleted."""
+    invoice = get_object_or_404(Invoice, pk=pk)
+    reason = ReasonSerializer(data=request.data)
+    reason.is_valid(raise_exception=True)
+    invoice = cancel_invoice_service(
+        invoice, reason=reason.validated_data['reason'], user=request.user,
+    )
+    return Response(InvoiceSerializer(invoice).data)
 
 
 @api_view(['GET', 'PUT'])

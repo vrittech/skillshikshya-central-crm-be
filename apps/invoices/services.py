@@ -2,6 +2,7 @@ import logging
 
 from django.conf import settings
 from django.core.mail import EmailMessage
+from django.db import transaction
 from django.utils import timezone
 
 from apps.invoices.models import Invoice, InvoiceEmailConfig
@@ -114,3 +115,28 @@ def send_invoice_email(invoice):
     invoice.sent_at = timezone.now()
     invoice.save(update_fields=['emailed_to', 'cc_emails', 'sent_at'])
     return recipient
+
+
+@transaction.atomic
+def cancel_invoice(invoice, *, reason, user):
+    """Cancel an invoice with a reason and note it in the enrollment's history."""
+    from apps.lead.models import EnrollmentHistory
+    from apps.lead.services import ActionRefused
+
+    invoice = Invoice.objects.select_for_update().get(pk=invoice.pk)
+    if invoice.status == Invoice.Status.CANCELLED:
+        raise ActionRefused('This invoice is already cancelled.')
+    invoice.status = Invoice.Status.CANCELLED
+    invoice.cancel_reason = reason
+    invoice.cancelled_by = user
+    invoice.cancelled_at = timezone.now()
+    invoice.save(update_fields=['status', 'cancel_reason', 'cancelled_by', 'cancelled_at'])
+    EnrollmentHistory.record(
+        enrollment=invoice.enrollment,
+        action=EnrollmentHistory.Action.CANCEL_INVOICE,
+        reason=reason,
+        performed_by=user,
+        before={'invoice': invoice.invoice_number, 'status': Invoice.Status.ACTIVE},
+        after={'invoice': invoice.invoice_number, 'status': invoice.status},
+    )
+    return invoice

@@ -120,6 +120,11 @@ def void_payment(payment, *, reason, user):
         before={'payment': payment.id, 'amount': str(payment.amount), 'status': old_status},
         after={'payment': payment.id, 'amount': str(payment.amount), 'status': payment.status},
     )
+    # Its receipt no longer stands for real money, so it is cancelled too.
+    from apps.invoices.services import cancel_invoice
+
+    for receipt in payment.invoices.filter(status='active'):
+        cancel_invoice(receipt, reason=f'Payment voided: {reason}', user=user)
     return payment
 
 

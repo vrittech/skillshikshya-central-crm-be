@@ -229,3 +229,75 @@ class InvoiceBranchScopingTests(InvoiceTestBase):
         invoice, _ = __import__('apps.invoices.services', fromlist=['create_invoice']) \
             .create_invoice(enrollment=enr, invoice_type='enrollment', amount=10)
         self.assertEqual(invoice.branch_id, self.branch.id)
+
+
+class InvoiceCancelTests(InvoiceTestBase):
+    def _invoice(self):
+        return Invoice.objects.create(
+            enrollment=self.enrollment, type='enrollment',
+            course_name='Python Advanced', amount=28000,
+        )
+
+    def test_cancel_with_reason(self):
+        invoice = self._invoice()
+        response = self.client.post(
+            f'/api/invoices/{invoice.id}/cancel/', {'reason': 'Wrong amount'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'cancelled')
+        self.assertEqual(response.data['cancelled_by_name'], 'Admin')
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.cancel_reason, 'Wrong amount')
+        self.assertIsNotNone(invoice.cancelled_at)
+        row = self.enrollment.history.get()
+        self.assertEqual(row.action, 'cancel_invoice')
+        self.assertEqual(row.after, {'invoice': invoice.invoice_number, 'status': 'cancelled'})
+
+    def test_cancel_needs_reason_and_happens_once(self):
+        invoice = self._invoice()
+        url = f'/api/invoices/{invoice.id}/cancel/'
+        self.assertEqual(self.client.post(url, {}, format='json').status_code, 400)
+        self.assertEqual(self.client.post(url, {'reason': 'Wrong'}, format='json').status_code, 200)
+        again = self.client.post(url, {'reason': 'Again'}, format='json')
+        self.assertEqual(again.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self.enrollment.history.count(), 1)
+
+    def test_cancel_is_staff_only(self):
+        invoice = self._invoice()
+        counselor = User.objects.create_user(email='c3@t.com', name='C3', password='x')
+        self.client.force_authenticate(counselor)
+        response = self.client.post(
+            f'/api/invoices/{invoice.id}/cancel/', {'reason': 'Wrong'}, format='json',
+        )
+        self.assertIn(response.status_code, (403, 401))
+
+    @mock.patch('apps.invoices.views.send_invoice_email_task.delay')
+    def test_cancelled_invoice_is_not_resent(self, mock_delay):
+        invoice = self._invoice()
+        self.client.post(f'/api/invoices/{invoice.id}/cancel/', {'reason': 'Wrong'}, format='json')
+        response = self.client.post(f'/api/invoices/{invoice.id}/resend/')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        mock_delay.assert_not_called()
+
+    def test_voiding_a_payment_cancels_its_receipt(self):
+        payments_url = f'/api/leads/{self.lead.id}/enrollments/{self.enrollment.id}/payments/'
+        payment = self.client.post(payments_url, {
+            'amount': '5000', 'payment_date': timezone.now().isoformat(),
+            'payment_method': 'cash', 'status': 'successful',
+        }, format='json').data
+        receipt = Invoice.objects.get(type='payment', payment_id=payment['id'])
+        self.client.post(
+            f"{payments_url}{payment['id']}/void/", {'reason': 'Duplicate'}, format='json',
+        )
+        receipt.refresh_from_db()
+        self.assertEqual(receipt.status, 'cancelled')
+        self.assertEqual(receipt.cancel_reason, 'Payment voided: Duplicate')
+        actions = set(self.enrollment.history.values_list('action', flat=True))
+        self.assertEqual(actions, {'void_payment', 'cancel_invoice'})
+
+    def test_filter_by_status(self):
+        self._invoice()
+        cancelled = self._invoice()
+        self.client.post(f'/api/invoices/{cancelled.id}/cancel/', {'reason': 'x'}, format='json')
+        response = self.client.get('/api/invoices/?status=cancelled')
+        self.assertEqual([r['id'] for r in response.data['results']], [cancelled.id])

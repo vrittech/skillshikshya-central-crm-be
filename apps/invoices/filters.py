@@ -11,6 +11,7 @@ class InvoiceFilter(django_filters.FilterSet):
         model = Invoice
         fields = {
             'type': ['exact'],
+            'status': ['exact'],
             'student': ['exact'],
             'enrollment': ['exact'],
         }

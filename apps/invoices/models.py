@@ -9,6 +9,10 @@ class Invoice(models.Model):
         ENROLLMENT = 'enrollment', 'Enrollment (Course Fee)'
         PAYMENT = 'payment', 'Payment Receipt'
 
+    class Status(models.TextChoices):
+        ACTIVE = 'active', 'Active'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     invoice_number = models.CharField(max_length=20, unique=True, editable=False)
     enrollment = models.ForeignKey(
         'lead.Enrollment', on_delete=models.CASCADE, related_name='invoices',
@@ -22,6 +26,14 @@ class Invoice(models.Model):
         null=True, blank=True, related_name='invoices',
     )
     type = models.CharField(max_length=12, choices=Type.choices)
+    # An invoice is never edited or deleted: a wrong one is cancelled with a reason.
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.ACTIVE)
+    cancel_reason = models.TextField(null=True, blank=True)
+    cancelled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        null=True, blank=True, related_name='invoices_cancelled',
+    )
+    cancelled_at = models.DateTimeField(null=True, blank=True)
     course_name = models.CharField(max_length=255)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     total_paid_so_far = models.DecimalField(max_digits=12, decimal_places=2, default=0)

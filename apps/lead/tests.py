@@ -473,8 +473,7 @@ class PaymentActionTests(APITestCase):
         # A voided payment no longer counts as paid.
         self.enrollment.refresh_from_db()
         self.assertEqual(self.enrollment.total_paid, 0)
-        row = self.enrollment.history.get()
-        self.assertEqual(row.action, 'void_payment')
+        row = self.enrollment.history.get(action='void_payment')
         self.assertEqual(row.before['status'], 'successful')
         self.assertEqual(row.after['status'], 'voided')
 
@@ -493,7 +492,11 @@ class PaymentActionTests(APITestCase):
         self.client.post(url, {'reason': 'Duplicate entry'}, format='json')
         again = self.client.post(url, {'reason': 'Again'}, format='json')
         self.assertEqual(again.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(self.enrollment.history.count(), 1)
+        # One row for the void, one for its receipt; the refused try adds none.
+        self.assertEqual(
+            sorted(self.enrollment.history.values_list('action', flat=True)),
+            ['cancel_invoice', 'void_payment'],
+        )
 
     def test_confirm_only_a_pending_payment(self):
         payment_id = self._pay(pay_status='pending').data['id']
