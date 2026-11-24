@@ -1,7 +1,10 @@
 from datetime import date
+from decimal import Decimal
 from unittest import mock
 
+from django.contrib import admin as django_admin
 from django.contrib.auth import get_user_model
+from django.test import RequestFactory
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -10,7 +13,8 @@ from django.test import override_settings
 from apps.branch.models import Branch
 from apps.course.models import Course
 from apps.invoices.models import Invoice, InvoiceEmailConfig
-from apps.lead.models import Enrollment, Lead, Payment
+from apps.invoices.services import create_invoice
+from apps.lead.models import Adjustment, Enrollment, EnrollmentHistory, Lead, Payment
 
 User = get_user_model()
 
@@ -301,3 +305,71 @@ class InvoiceCancelTests(InvoiceTestBase):
         self.client.post(f'/api/invoices/{cancelled.id}/cancel/', {'reason': 'x'}, format='json')
         response = self.client.get('/api/invoices/?status=cancelled')
         self.assertEqual([r['id'] for r in response.data['results']], [cancelled.id])
+
+
+class CreateInvoiceMoneyTests(InvoiceTestBase):
+    def test_remaining_counts_money_entries_in_decimal(self):
+        Payment.objects.create(
+            enrollment=self.enrollment, amount=Decimal('10000.50'),
+            payment_date=timezone.now(), payment_method='cash', status='successful',
+        )
+        Adjustment.objects.create(
+            enrollment=self.enrollment, kind='discount', amount=Decimal('1000.25'),
+            reason='Scholarship', created_by=self.admin,
+        )
+        invoice, _ = create_invoice(self.enrollment, 'enrollment', self.enrollment.agreed_amount)
+        invoice.refresh_from_db()
+        expected = self.enrollment.agreed_amount - Decimal('10000.50') - Decimal('1000.25')
+        self.assertEqual(invoice.remaining_balance, expected)
+        self.assertEqual(invoice.total_paid_so_far, Decimal('10000.50'))
+
+    def test_credit_shows_as_zero_remaining(self):
+        Adjustment.objects.create(
+            enrollment=self.enrollment, kind='discount',
+            amount=self.enrollment.agreed_amount + 500, reason='Waived', created_by=self.admin,
+        )
+        invoice, _ = create_invoice(self.enrollment, 'enrollment', self.enrollment.agreed_amount)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.remaining_balance, Decimal('0'))
+
+    @mock.patch('apps.invoices.tasks.send_invoice_email_task.delay')
+    def test_email_is_queued_only_after_commit(self, mock_delay):
+        self.enrollment.lead.email = 'student@example.com'
+        self.enrollment.lead.save(update_fields=['email'])
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            invoice, queued = create_invoice(self.enrollment, 'enrollment', 1000)
+            self.assertTrue(queued)
+            mock_delay.assert_not_called()
+        self.assertEqual(len(callbacks), 1)
+        callbacks[0]()
+        mock_delay.assert_called_once_with(invoice.id)
+
+
+class ReadOnlyMoneyAdminTests(InvoiceTestBase):
+    def setUp(self):
+        super().setUp()
+        self.superuser = User.objects.create_superuser(
+            email='root@t.com', name='Root', password='x',
+        )
+        self.client.force_login(self.superuser)
+
+    def test_money_models_are_view_only(self):
+        request = RequestFactory().get('/admin/')
+        request.user = self.superuser
+        for model in (Enrollment, Payment, Adjustment, EnrollmentHistory, Invoice):
+            model_admin = django_admin.site._registry[model]
+            self.assertFalse(model_admin.has_add_permission(request), model)
+            self.assertFalse(model_admin.has_change_permission(request), model)
+            self.assertFalse(model_admin.has_delete_permission(request), model)
+            self.assertTrue(model_admin.has_view_permission(request), model)
+
+    def test_admin_pages(self):
+        payment = Payment.objects.create(
+            enrollment=self.enrollment, amount=500,
+            payment_date=timezone.now(), payment_method='cash',
+        )
+        self.assertEqual(self.client.get('/admin/lead/payment/').status_code, 200)
+        self.assertEqual(self.client.get(f'/admin/lead/payment/{payment.id}/change/').status_code, 200)
+        self.assertEqual(self.client.get('/admin/lead/payment/add/').status_code, 403)
+        self.assertEqual(self.client.get(f'/admin/lead/payment/{payment.id}/delete/').status_code, 403)
+        self.assertEqual(self.client.get('/admin/invoices/invoice/').status_code, 200)

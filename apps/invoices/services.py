@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal
 
 from django.conf import settings
 from django.core.mail import EmailMessage
@@ -32,10 +33,10 @@ def create_invoice(enrollment, invoice_type, amount, payment=None, created_by=No
     """
     from apps.invoices.tasks import send_invoice_email_task
 
-    enrollment_total_paid = enrollment.total_paid
-    remaining = max(
-        float(enrollment.agreed_amount) - float(enrollment_total_paid), 0,
-    )
+    # Decimal, not float, and the same math as the enrollment card: money
+    # entries count, and refunds are taken off what was paid.
+    paid_so_far = Decimal(enrollment.total_paid) - enrollment.refunds_total
+    remaining = max(enrollment.remaining_amount, Decimal('0'))
 
     invoice = Invoice.objects.create(
         enrollment=enrollment,
@@ -44,7 +45,7 @@ def create_invoice(enrollment, invoice_type, amount, payment=None, created_by=No
         type=invoice_type,
         course_name=enrollment.course.name,
         amount=amount,
-        total_paid_so_far=enrollment_total_paid,
+        total_paid_so_far=paid_so_far,
         remaining_balance=remaining,
         branch=enrollment.branch,
         created_by=created_by,
@@ -52,7 +53,10 @@ def create_invoice(enrollment, invoice_type, amount, payment=None, created_by=No
 
     recipient = _recipient_for(invoice.student, enrollment)
     if recipient:
-        send_invoice_email_task.delay(invoice.id)
+        # Queue after commit, so the worker never looks for an invoice that is
+        # not saved yet (or was rolled back).
+        invoice_id = invoice.id
+        transaction.on_commit(lambda: send_invoice_email_task.delay(invoice_id))
         queued = True
     else:
         logger.warning(
