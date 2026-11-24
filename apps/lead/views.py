@@ -197,7 +197,10 @@ class LeadViewSet(viewsets.ModelViewSet):
         if self.action == 'export_csv':
             return qs.filter(is_deleted=False).select_related('source', 'status', 'priority', 'assigned_counselor')
         qs = qs.filter(is_deleted=False)
-        include_archived = self.request.query_params.get('include_archived', '').lower() in ('true', '1')
+        # Restore has to find the archived lead it brings back.
+        include_archived = self.action == 'restore' or (
+            self.request.query_params.get('include_archived', '').lower() in ('true', '1')
+        )
         if not include_archived:
             qs = qs.filter(is_archived=False)
         return qs
@@ -220,6 +223,76 @@ class LeadViewSet(viewsets.ModelViewSet):
         else:
             permission_classes = [IsAuthenticated]
         return [p() for p in permission_classes]
+
+    @action(detail=False, methods=['get'])
+    def export_csv(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="leads.csv"'
+        writer = csv.writer(response)
+        writer.writerow([
+            'Reference', 'Full Name', 'Phone', 'Email', 'Lead Type',
+            'Source', 'Status', 'Priority', 'Assigned Counselor',
+            'Lead Score', 'Expected Revenue', 'Is Converted',
+            'Created At', 'Updated At',
+        ])
+        for lead in queryset.iterator(chunk_size=500):
+            writer.writerow([
+                lead.reference_number, lead.full_name, lead.phone, lead.email,
+                lead.lead_type.name if lead.lead_type else '',
+                lead.source.name if lead.source else '',
+                lead.status.name if lead.status else '',
+                lead.priority.name if lead.priority else '',
+                lead.assigned_counselor.name if lead.assigned_counselor else '',
+                lead.lead_score, lead.expected_revenue,
+                lead.is_converted,
+                lead.created_at, lead.updated_at,
+            ])
+        return response
+
+    @action(detail=True, methods=['post'])
+    def archive(self, request, pk=None):
+        lead = self.get_object()
+        lead.is_archived = True
+        lead.save(update_fields=['is_archived'])
+        return Response({'detail': 'Lead archived.'})
+
+    @action(detail=True, methods=['post'])
+    def restore(self, request, pk=None):
+        lead = self.get_object()
+        lead.is_archived = False
+        lead.save(update_fields=['is_archived'])
+        return Response({'detail': 'Lead restored.'})
+
+    @action(detail=True, methods=['post'])
+    def purge(self, request, pk=None):
+        if not request.user.is_staff:
+            return Response(
+                {'detail': 'Only staff members can permanently delete leads.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        lead = Lead._base_manager.filter(pk=pk).first()
+        if not lead:
+            return Response({'detail': 'Lead not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if lead.enrollments.exists():
+            return Response(
+                {'detail': 'This lead has enrollments with money records, so it cannot be '
+                           'deleted forever. It can stay in the recycle bin.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        lead.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=False, methods=['get'])
+    def recycle_bin(self, request):
+        self.action = 'recycle_bin'
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = LeadListSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        serializer = LeadListSerializer(queryset, many=True)
+        return Response(serializer.data)
 
 
 class GlobalFollowUpViewSet(viewsets.ReadOnlyModelViewSet):
@@ -345,70 +418,6 @@ class NotificationViewSet(viewsets.ModelViewSet):
     def unread_count(self, request):
         count = self.get_queryset().filter(is_read=False).count()
         return Response({'unread_count': count})
-
-    @action(detail=False, methods=['get'])
-    def export_csv(self, request):
-        queryset = self.filter_queryset(self.get_queryset())
-        response = HttpResponse(content_type='text/csv')
-        response['Content-Disposition'] = 'attachment; filename="leads.csv"'
-        writer = csv.writer(response)
-        writer.writerow([
-            'Reference', 'Full Name', 'Phone', 'Email', 'Lead Type',
-            'Source', 'Status', 'Priority', 'Assigned Counselor',
-            'Lead Score', 'Expected Revenue', 'Is Converted',
-            'Created At', 'Updated At',
-        ])
-        for lead in queryset.iterator(chunk_size=500):
-            writer.writerow([
-                lead.reference_number, lead.full_name, lead.phone, lead.email,
-                lead.lead_type.name if lead.lead_type else '',
-                lead.source.name if lead.source else '',
-                lead.status.name if lead.status else '',
-                lead.priority.name if lead.priority else '',
-                lead.assigned_counselor.name if lead.assigned_counselor else '',
-                lead.lead_score, lead.expected_revenue,
-                lead.is_converted,
-                lead.created_at, lead.updated_at,
-            ])
-        return response
-
-    @action(detail=True, methods=['post'])
-    def archive(self, request, pk=None):
-        lead = self.get_object()
-        lead.is_archived = True
-        lead.save(update_fields=['is_archived'])
-        return Response({'detail': 'Lead archived.'})
-
-    @action(detail=True, methods=['post'])
-    def restore(self, request, pk=None):
-        lead = self.get_object()
-        lead.is_archived = False
-        lead.save(update_fields=['is_archived'])
-        return Response({'detail': 'Lead restored.'})
-
-    @action(detail=True, methods=['post'])
-    def purge(self, request, pk=None):
-        if not request.user.is_staff:
-            return Response(
-                {'detail': 'Only staff members can permanently delete leads.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        lead = Lead._base_manager.filter(pk=pk).first()
-        if not lead:
-            return Response({'detail': 'Lead not found.'}, status=status.HTTP_404_NOT_FOUND)
-        lead.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
-    @action(detail=False, methods=['get'])
-    def recycle_bin(self, request):
-        self.action = 'recycle_bin'
-        queryset = self.filter_queryset(self.get_queryset())
-        page = self.paginate_queryset(queryset)
-        if page is not None:
-            serializer = LeadListSerializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-        serializer = LeadListSerializer(queryset, many=True)
-        return Response(serializer.data)
 
 
 class LeadCourseInterestViewSet(viewsets.ModelViewSet):

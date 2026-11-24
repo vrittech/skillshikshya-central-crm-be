@@ -2,11 +2,12 @@ from datetime import date
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.db.models import ProtectedError
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from apps.course.models import Course
+from apps.course.models import Course, CourseBatch
 from apps.lead.models import Adjustment, Lead, Enrollment, Payment, EnrollmentHistory
 
 User = get_user_model()
@@ -617,3 +618,97 @@ class AdjustmentTests(APITestCase):
             format='json',
         )
         self.assertEqual(same.status_code, status.HTTP_200_OK)
+
+
+class MoneyIsNeverCascadedTests(APITestCase):
+    """A lead, course or batch that has enrollments cannot be deleted."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email='protect@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+        self.course = Course.objects.create(name='Python', full_amount=30000)
+        self.batch = CourseBatch.objects.create(name='Morning', course=self.course)
+        self.lead = Lead.objects.create(full_name='Hari', phone='9800000700')
+        self.enrollment = Enrollment.objects.create(
+            lead=self.lead, course=self.course, batch=self.batch,
+            enrollment_date=date.today(), listed_fee=30000, agreed_amount=30000,
+        )
+        Payment.objects.create(
+            enrollment=self.enrollment, amount=5000,
+            payment_date=timezone.now(), payment_method='cash',
+        )
+
+    def test_purge_refuses_a_lead_with_enrollments(self):
+        response = self.client.post(f'/api/leads/{self.lead.id}/purge/')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('money records', response.data['detail'])
+        self.assertTrue(Lead._base_manager.filter(id=self.lead.id).exists())
+        self.assertEqual(Payment.objects.count(), 1)
+
+    def test_purge_still_works_without_enrollments(self):
+        lead = Lead.objects.create(full_name='Empty', phone='9800000701')
+        response = self.client.post(f'/api/leads/{lead.id}/purge/')
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Lead._base_manager.filter(id=lead.id).exists())
+
+    def test_course_with_enrollments_cannot_be_deleted(self):
+        response = self.client.delete(f'/api/courses/{self.course.id}/')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('enrollments', response.data['detail'])
+        self.assertTrue(Course.objects.filter(id=self.course.id).exists())
+        self.assertEqual(Payment.objects.count(), 1)
+
+    def test_batch_with_enrollments_cannot_be_deleted(self):
+        response = self.client.delete(f'/api/course-batches/{self.batch.id}/')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.enrollment.refresh_from_db()
+        self.assertEqual(self.enrollment.batch_id, self.batch.id)
+
+    def test_orm_delete_is_refused_too(self):
+        with self.assertRaises(ProtectedError):
+            self.lead.delete()
+        with self.assertRaises(ProtectedError):
+            Enrollment.objects.filter(id=self.enrollment.id).delete()
+        self.assertEqual(Payment.objects.count(), 1)
+
+    def test_course_without_enrollments_can_still_be_deleted(self):
+        course = Course.objects.create(name='Unused', full_amount=1000)
+        response = self.client.delete(f'/api/courses/{course.id}/')
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+
+class LeadActionRoutingTests(APITestCase):
+    """Archive, recycle bin, export and purge live on /api/leads/, not /api/notifications/."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email='routes@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+        self.lead = Lead.objects.create(full_name='Gita', phone='9800000800')
+
+    def test_archive_and_restore(self):
+        self.assertEqual(self.client.post(f'/api/leads/{self.lead.id}/archive/').status_code, 200)
+        self.lead.refresh_from_db()
+        self.assertTrue(self.lead.is_archived)
+        self.assertEqual(self.client.post(f'/api/leads/{self.lead.id}/restore/').status_code, 200)
+        self.lead.refresh_from_db()
+        self.assertFalse(self.lead.is_archived)
+
+    def test_recycle_bin_lists_deleted_leads(self):
+        self.client.delete(f'/api/leads/{self.lead.id}/')
+        response = self.client.get('/api/leads/recycle_bin/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([r['id'] for r in response.data['results']], [self.lead.id])
+
+    def test_export_csv(self):
+        response = self.client.get('/api/leads/export_csv/')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('Gita', response.content.decode())
+
+    def test_notifications_url_cannot_purge_a_lead(self):
+        response = self.client.post(f'/api/notifications/{self.lead.id}/purge/')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(Lead._base_manager.filter(id=self.lead.id).exists())

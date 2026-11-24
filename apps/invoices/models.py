@@ -15,14 +15,14 @@ class Invoice(models.Model):
 
     invoice_number = models.CharField(max_length=20, unique=True, editable=False)
     enrollment = models.ForeignKey(
-        'lead.Enrollment', on_delete=models.CASCADE, related_name='invoices',
+        'lead.Enrollment', on_delete=models.PROTECT, related_name='invoices',
     )
     student = models.ForeignKey(
         'student.Student', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='invoices',
     )
     payment = models.ForeignKey(
-        'lead.Payment', on_delete=models.SET_NULL,
+        'lead.Payment', on_delete=models.PROTECT,
         null=True, blank=True, related_name='invoices',
     )
     type = models.CharField(max_length=12, choices=Type.choices)

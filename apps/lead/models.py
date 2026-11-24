@@ -385,14 +385,16 @@ class Enrollment(models.Model):
         DROPPED_OUT = 'dropped_out', 'Dropped Out'
         TRANSFERRED = 'transferred', 'Transferred'
 
-    lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name='enrollments')
+    # PROTECT: a lead, course or batch with enrollments cannot be deleted, so
+    # money records are never lost through a cascade.
+    lead = models.ForeignKey(Lead, on_delete=models.PROTECT, related_name='enrollments')
     student = models.ForeignKey(
         'student.Student', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='enrollments',
     )
-    course = models.ForeignKey('course.Course', on_delete=models.CASCADE, related_name='enrollments')
+    course = models.ForeignKey('course.Course', on_delete=models.PROTECT, related_name='enrollments')
     batch = models.ForeignKey(
-        'course.CourseBatch', on_delete=models.SET_NULL,
+        'course.CourseBatch', on_delete=models.PROTECT,
         null=True, blank=True, related_name='enrollments',
     )
     enrollment_date = models.DateField()
@@ -492,7 +494,7 @@ class Payment(models.Model):
         VOIDED = 'voided', 'Voided'
 
     enrollment = models.ForeignKey(
-        Enrollment, on_delete=models.CASCADE, related_name='payments',
+        Enrollment, on_delete=models.PROTECT, related_name='payments',
     )
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     payment_date = models.DateTimeField()
@@ -560,6 +562,8 @@ class Adjustment(models.Model):
 
     class Meta:
         db_table = 'enrollment_adjustments'
+        verbose_name = 'money entry'
+        verbose_name_plural = 'money entries'
         ordering = ['-created_at']
         constraints = [
             models.CheckConstraint(
@@ -620,6 +624,7 @@ class EnrollmentHistory(models.Model):
 
     class Meta:
         db_table = 'enrollment_history'
+        verbose_name_plural = 'enrollment history'
         ordering = ['-created_at']
         constraints = [
             models.CheckConstraint(

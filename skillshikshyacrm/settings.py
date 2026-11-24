@@ -234,6 +234,7 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PAGINATION_CLASS': 'apps.global_config.pagination.CustomPagination',
     'PAGE_SIZE': 10,
+    'EXCEPTION_HANDLER': 'apps.global_config.exceptions.exception_handler',
 }
 
 
