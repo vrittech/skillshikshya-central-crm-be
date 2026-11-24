@@ -703,6 +703,22 @@ class LeadActionRoutingTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([r['id'] for r in response.data['results']], [self.lead.id])
 
+    def test_restore_brings_a_deleted_lead_back(self):
+        self.client.delete(f'/api/leads/{self.lead.id}/')
+        response = self.client.post(f'/api/leads/{self.lead.id}/restore/')
+        self.assertEqual(response.status_code, 200)
+        self.lead.refresh_from_db()
+        self.assertFalse(self.lead.is_deleted)
+        self.assertIsNone(self.lead.deleted_at)
+        self.assertIsNone(self.lead.deleted_by)
+        listed = [r['id'] for r in self.client.get('/api/leads/').data['results']]
+        self.assertIn(self.lead.id, listed)
+        self.assertEqual(self.client.get('/api/leads/recycle_bin/').data['results'], [])
+
+    def test_restore_of_a_missing_lead_is_404(self):
+        response = self.client.post('/api/leads/999999/restore/')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
     def test_export_csv(self):
         response = self.client.get('/api/leads/export_csv/')
         self.assertEqual(response.status_code, 200)

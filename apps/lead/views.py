@@ -196,11 +196,11 @@ class LeadViewSet(viewsets.ModelViewSet):
             return qs.filter(is_deleted=True)
         if self.action == 'export_csv':
             return qs.filter(is_deleted=False).select_related('source', 'status', 'priority', 'assigned_counselor')
+        if self.action == 'restore':
+            # Restore has to find the deleted or archived lead it brings back.
+            return qs
         qs = qs.filter(is_deleted=False)
-        # Restore has to find the archived lead it brings back.
-        include_archived = self.action == 'restore' or (
-            self.request.query_params.get('include_archived', '').lower() in ('true', '1')
-        )
+        include_archived = self.request.query_params.get('include_archived', '').lower() in ('true', '1')
         if not include_archived:
             qs = qs.filter(is_archived=False)
         return qs
@@ -259,9 +259,13 @@ class LeadViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def restore(self, request, pk=None):
+        """Bring a lead back to the active list, from the recycle bin or from archive."""
         lead = self.get_object()
         lead.is_archived = False
-        lead.save(update_fields=['is_archived'])
+        lead.is_deleted = False
+        lead.deleted_at = None
+        lead.deleted_by = None
+        lead.save(update_fields=['is_archived', 'is_deleted', 'deleted_at', 'deleted_by'])
         return Response({'detail': 'Lead restored.'})
 
     @action(detail=True, methods=['post'])
