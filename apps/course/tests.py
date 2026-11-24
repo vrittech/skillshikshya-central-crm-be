@@ -90,8 +90,8 @@ class MarkStartedBatchesRunningTests(APITestCase):
             self.assertEqual(batch.status, expected, batch.name)
 
 
-class BatchMoneyTests(APITestCase):
-    """A batch's fees, collected, owed, costs and profit count on the money batch."""
+class BatchTestBase(APITestCase):
+    """Two batches of one course, and helpers to add students with money."""
 
     def setUp(self):
         from apps.branch.models import Branch
@@ -140,6 +140,10 @@ class BatchMoneyTests(APITestCase):
         response = self.client.get(f'/api/course-batches/{(batch or self.batch).id}/money/')
         self.assertEqual(response.status_code, 200)
         return response.data
+
+
+class BatchMoneyTests(BatchTestBase):
+    """A batch's fees, collected, owed, costs and profit count on the money batch."""
 
     def test_figures_count_on_the_money_batch(self):
         from apps.lead.models import Payment
@@ -257,3 +261,111 @@ class BatchMoneyTests(APITestCase):
         data = self.client.get('/api/reports/batch-profit/', {'status': 'running'}).data
         self.assertEqual([r['name'] for r in data['results']], ['Python Nov'])
         self.assertIn('error', self.client.get('/api/reports/batch-profit/', {'status': 'x'}).data)
+
+
+class CloseBatchTests(BatchTestBase):
+    """Closing keeps the figures of that day; later money shows as after close."""
+
+    def _post(self, action, reason='Course finished', batch=None):
+        return self.client.post(
+            f'/api/course-batches/{(batch or self.batch).id}/{action}/', {'reason': reason},
+            format='json',
+        )
+
+    def test_close_keeps_figures_and_later_money_shows_after_close(self):
+        from apps.course.services import add_cost
+        from apps.lead.models import Payment
+
+        student = self._enrollment(paid=10000, seat=self.batch)
+        add_cost(self.batch, kind='trainer', amount=4000, spent_on=timezone.localdate(), user=self.admin)
+
+        response = self._post('close')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['status'], 'closed')
+        at_close = response.data['at_close']
+        self.assertEqual((at_close['collected'], at_close['costs'], at_close['profit']),
+                         ('10000.00', '4000.00', '6000.00'))
+        self.assertEqual(response.data['closings'][0]['reason'], 'Course finished')
+
+        # Late money and a late bill still count on this batch.
+        Payment.objects.create(
+            enrollment=student, amount=5000, payment_date=timezone.now(),
+            payment_method='cash', status='successful',
+        )
+        add_cost(self.batch, kind='venue', amount=1000, spent_on=timezone.localdate(), user=self.admin)
+        data = self._money()
+        self.assertEqual(data['at_close']['collected'], '10000.00')
+        self.assertEqual(data['after_close']['collected'], '5000.00')
+        self.assertEqual(data['after_close']['costs'], '1000.00')
+        self.assertEqual(data['figures']['collected'], '15000.00')
+        self.assertEqual(data['figures']['profit'], '10000.00')
+        self.assertIsNotNone(data['closed_at'])
+
+        # Closing doesn't change the students' enrollments.
+        student.refresh_from_db()
+        self.assertEqual((student.status, student.current_batch_id), ('confirmed', self.batch.id))
+
+        report = self.client.get('/api/reports/batch-profit/').data
+        nov = next(r for r in report['results'] if r['batch'] == self.batch.id)
+        self.assertEqual(nov['at_close']['collected'], '10000.00')
+        self.assertEqual(nov['collected'], '15000.00')
+
+    def test_close_and_reopen_need_a_reason_and_the_right_status(self):
+        self.assertEqual(self._post('close', reason=' ').status_code, 400)
+        self.assertEqual(self._post('reopen').data['detail'], 'Only a closed batch can be reopened.')
+        self.assertEqual(self._post('close').status_code, 200)
+        self.assertEqual(self._post('close').data['detail'], 'This batch is already closed.')
+
+        response = self._post('reopen', reason='Two students still need classes')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['status'], 'running')
+        self.assertIsNone(response.data['at_close'])
+        self.assertEqual(
+            [c['kind'] for c in response.data['closings']], ['reopen', 'close'],
+        )
+        # A batch that hasn't started goes back to upcoming.
+        self._post('close', batch=self.other)
+        self.assertEqual(self._post('reopen', batch=self.other).data['status'], 'upcoming')
+
+    def test_closing_again_keeps_new_figures(self):
+        from apps.lead.models import Payment
+
+        student = self._enrollment(paid=1000, seat=self.batch)
+        self._post('close')
+        self._post('reopen')
+        Payment.objects.create(
+            enrollment=student, amount=2000, payment_date=timezone.now(),
+            payment_method='cash', status='successful',
+        )
+        data = self._post('close').data
+        self.assertEqual(data['at_close']['collected'], '3000.00')
+        self.assertEqual(data['after_close']['collected'], '0.00')
+
+    def test_status_cannot_be_set_to_closed_or_out_of_closed_by_edit(self):
+        url = f'/api/course-batches/{self.batch.id}/'
+        response = self.client.patch(url, {'status': 'closed'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Close batch', str(response.data['status']))
+        self._post('close')
+        response = self.client.patch(url, {'status': 'running'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Reopen batch', str(response.data['status']))
+        # Other fields of a closed batch can still be edited.
+        response = self.client.patch(url, {'trainer': 'Ram', 'status': 'closed'}, format='json')
+        self.assertEqual(response.status_code, 200)
+
+    def test_closing_needs_permission(self):
+        clerk = User.objects.create_user(email='clerk2@test.com', name='Clerk', password='pass')
+        self.client.force_authenticate(clerk)
+        self.assertEqual(self._post('close').status_code, 403)
+
+    def test_close_rows_cannot_be_changed_or_deleted(self):
+        from django.core.exceptions import ValidationError
+
+        self._post('close')
+        row = self.batch.closings.get()
+        row.reason = 'Other'
+        with self.assertRaises(ValidationError):
+            row.save()
+        with self.assertRaises(ValidationError):
+            row.delete()

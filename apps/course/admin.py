@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from apps.course.models import Batch, BatchCost, Course, CourseBatch, CourseCategory
+from apps.course.models import Batch, BatchClosing, BatchCost, Course, CourseBatch, CourseCategory
 from apps.lead.admin import ReadOnlyAdmin
 
 
@@ -37,8 +37,15 @@ class BatchCostAdmin(ReadOnlyAdmin):
     search_fields = ['course_batch__coursebatch_id', 'course_batch__name', 'note']
 
 
+class BatchClosingAdmin(ReadOnlyAdmin):
+    list_display = ['course_batch', 'kind', 'collected', 'costs', 'profit', 'created_by', 'created_at']
+    list_filter = ['kind']
+    search_fields = ['course_batch__coursebatch_id', 'course_batch__name', 'reason']
+
+
 admin.site.register(Course, CourseAdmin)
 admin.site.register(Batch, BatchAdmin)
 admin.site.register(CourseBatch, CourseBatchAdmin)
 admin.site.register(CourseCategory, CourseCategoryAdmin)
 admin.site.register(BatchCost, BatchCostAdmin)
+admin.site.register(BatchClosing, BatchClosingAdmin)

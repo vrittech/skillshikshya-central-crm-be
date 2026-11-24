@@ -13,8 +13,8 @@ from apps.course.models import Course, Batch, BatchCost, CourseBatch, CourseCate
 from apps.course.filters import CourseFilter, BatchFilter, CourseBatchFilter, CourseCategoryFilter
 from apps.course.money import batch_figures, figures_json
 from apps.course.serializers import (
-    AddCostSerializer, BatchCostSerializer, BatchSerializer, CourseBatchSerializer,
-    CourseCategorySerializer, CourseSerializer,
+    AddCostSerializer, BatchClosingSerializer, BatchCostSerializer, BatchSerializer,
+    CourseBatchSerializer, CourseCategorySerializer, CourseSerializer,
 )
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission
@@ -129,6 +129,8 @@ class CourseBatchViewSet(viewsets.ModelViewSet):
     ACTION_PERMS = {
         'add_cost': 'course.add_batchcost',
         'void_cost': 'course.change_batchcost',
+        'close': 'course.change_coursebatch',
+        'reopen': 'course.change_coursebatch',
     }
 
     def get_permissions(self):
@@ -141,12 +143,40 @@ class CourseBatchViewSet(viewsets.ModelViewSet):
         return [p() for p in permission_classes]
 
     def _money_reply(self, batch):
+        """Figures now and, for a closed batch, at close and after close."""
+        now = batch_figures([batch.pk])[batch.pk]
+        closing = services.last_close(batch)
+        at_close = services.close_figures(closing) if closing else None
         costs = batch.costs.select_related('created_by', 'voided_by')
+        closings = batch.closings.select_related('created_by')
         return Response({
             'batch': batch.pk,
-            'figures': figures_json(batch_figures([batch.pk])[batch.pk]),
+            'status': batch.status,
+            'figures': figures_json(now),
+            'at_close': figures_json(at_close) if at_close else None,
+            'after_close': figures_json(services.after_close(now, at_close)) if at_close else None,
+            'closed_at': closing.created_at if closing else None,
             'costs': BatchCostSerializer(costs, many=True).data,
+            'closings': BatchClosingSerializer(closings, many=True).data,
         })
+
+    def _reason(self, request):
+        from apps.lead.serializers import ReasonSerializer
+
+        body = ReasonSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        return body.validated_data['reason']
+
+    @action(detail=True, methods=['post'])
+    def close(self, request, *args, **kwargs):
+        """Close the batch with a reason. Its figures are kept as they are today."""
+        batch = services.close_batch(self.get_object(), reason=self._reason(request), user=request.user)
+        return self._money_reply(batch)
+
+    @action(detail=True, methods=['post'])
+    def reopen(self, request, *args, **kwargs):
+        batch = services.reopen_batch(self.get_object(), reason=self._reason(request), user=request.user)
+        return self._money_reply(batch)
 
     @action(detail=True, methods=['get'])
     def money(self, request, *args, **kwargs):
@@ -163,13 +193,9 @@ class CourseBatchViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path=r'costs/(?P<cost_pk>\d+)/void')
     def void_cost(self, request, cost_pk=None, *args, **kwargs):
-        from apps.lead.serializers import ReasonSerializer
-
         batch = self.get_object()
         cost = get_object_or_404(BatchCost, pk=cost_pk, course_batch=batch)
-        body = ReasonSerializer(data=request.data)
-        body.is_valid(raise_exception=True)
-        services.void_cost(cost, reason=body.validated_data['reason'], user=request.user)
+        services.void_cost(cost, reason=self._reason(request), user=request.user)
         return self._money_reply(batch)
 
     @action(detail=True, methods=['get'])

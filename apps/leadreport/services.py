@@ -769,7 +769,9 @@ def due_in_month_report(request):
 # ---------------------------------------------------------------- batch profit
 
 
-def _batch_row(batch, figures):
+def _batch_row(batch, figures, closing):
+    from apps.course.services import close_figures
+
     return {
         'batch': batch.pk,
         'coursebatch_id': batch.coursebatch_id,
@@ -780,14 +782,16 @@ def _batch_row(batch, figures):
         'start_date': batch.start_date.isoformat() if batch.start_date else None,
         'end_date': batch.end_date.isoformat() if batch.end_date else None,
         **figures_json(figures),
+        'closed_at': closing.created_at.isoformat() if closing else None,
+        'at_close': figures_json(close_figures(closing)) if closing else None,
     }
 
 
 def batch_profit_report(request):
     """Each batch's fees, collected, owed, costs and profit, newest batch first.
 
-    Money counts on the batch the student first joined. Optional filters:
-    course, status.
+    Money counts on the batch the student first joined. A closed batch also
+    has its figures at close. Optional filters: course, status.
     """
     branch_id = _branch_scope(request)
     batches = CourseBatch.objects.select_related('course')
@@ -809,7 +813,19 @@ def batch_profit_report(request):
         total['students'] += f['students']
         for name in MONEY_FIELDS:
             total[name] += f[name]
+    closings = _last_closings(batches)
     return {
         'summary': {'batches': len(batches), **figures_json(total)},
-        'results': [_batch_row(b, figures[b.pk]) for b in batches],
+        'results': [_batch_row(b, figures[b.pk], closings.get(b.pk)) for b in batches],
     }
+
+
+def _last_closings(batches):
+    """{batch id: its last close row}, for closed batches whose last row is a close."""
+    from apps.course.models import BatchClosing
+
+    closed = [b.pk for b in batches if b.status == CourseBatch.Status.CLOSED]
+    last = {}
+    for row in BatchClosing.objects.filter(course_batch_id__in=closed).order_by('created_at', 'id'):
+        last[row.course_batch_id] = row
+    return {pk: row for pk, row in last.items() if row.kind == BatchClosing.Kind.CLOSE}

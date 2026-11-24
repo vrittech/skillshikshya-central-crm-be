@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
 
-from apps.course.models import Course, Batch, BatchCost, CourseBatch, CourseCategory
+from apps.course.models import Batch, BatchClosing, BatchCost, Course, CourseBatch, CourseCategory
 
 
 class CourseSerializer(serializers.ModelSerializer):
@@ -79,6 +79,15 @@ class CourseBatchSerializer(serializers.ModelSerializer):
                 )
         return value
 
+    def validate_status(self, value):
+        closed = CourseBatch.Status.CLOSED
+        was_closed = self.instance is not None and self.instance.status == closed
+        if value == closed and not was_closed:
+            raise serializers.ValidationError('Use Close batch, with a reason.')
+        if was_closed and value != closed:
+            raise serializers.ValidationError('Use Reopen batch, with a reason.')
+        return value
+
     def validate_course(self, value):
         batch = self.instance
         if batch is not None and value != batch.course and (
@@ -114,3 +123,17 @@ class AddCostSerializer(serializers.Serializer):
     def validate(self, attrs):
         attrs.setdefault('spent_on', timezone.localdate())
         return attrs
+
+
+class BatchClosingSerializer(serializers.ModelSerializer):
+    kind_display = serializers.CharField(source='get_kind_display', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True)
+
+    class Meta:
+        model = BatchClosing
+        fields = [
+            'id', 'kind', 'kind_display', 'reason',
+            'students', 'fees', 'collected', 'owed', 'costs', 'profit',
+            'created_by', 'created_by_name', 'created_at',
+        ]
+        read_only_fields = fields

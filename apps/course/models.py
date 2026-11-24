@@ -237,3 +237,62 @@ class BatchCost(models.Model):
 
     def delete(self, *args, **kwargs):
         raise ValidationError('Costs cannot be deleted. Void it with a reason.')
+
+
+class BatchClosing(models.Model):
+    """One row each time a batch is closed or reopened, with the reason.
+
+    A close row keeps the batch's figures as they were that day (see
+    apps.course.money). The newest close row of a closed batch holds its
+    figures at close. Rows are only ever added.
+    """
+
+    class Kind(models.TextChoices):
+        CLOSE = 'close', 'Closed'
+        REOPEN = 'reopen', 'Reopened'
+
+    course_batch = models.ForeignKey(
+        CourseBatch, on_delete=models.PROTECT, related_name='closings',
+    )
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    reason = models.TextField()
+    # The figures at close. Empty on reopen rows.
+    students = models.PositiveIntegerField(null=True, blank=True)
+    fees = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    collected = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    owed = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    costs = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    profit = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='batch_closings',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'course_batch_closings'
+        ordering = ['-created_at', '-id']
+        constraints = [
+            models.CheckConstraint(
+                check=~models.Q(reason=''), name='batch_closing_reason_required',
+            ),
+            models.CheckConstraint(
+                check=models.Q(kind='reopen') | models.Q(
+                    students__isnull=False, fees__isnull=False, collected__isnull=False,
+                    owed__isnull=False, costs__isnull=False, profit__isnull=False,
+                ),
+                name='batch_close_keeps_figures',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.get_kind_display()} {self.course_batch_id}'
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValidationError('Close and reopen rows cannot be changed.')
+        self.reason = (self.reason or '').strip()
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Close and reopen rows cannot be deleted.')
