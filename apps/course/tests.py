@@ -65,7 +65,9 @@ class CourseBatchDetailsTests(APITestCase):
         pkr = Branch.objects.create(name='Pokhara', code='PKR')
         self.admin.branch = ktm
         self.admin.save()
-        response = self.client.post('/api/batches/', {'name': 'Evening'}, format='json')
+        response = self.client.post(
+            '/api/batches/', {'name': 'Evening', 'start_time': '17:00', 'end_time': '19:00'}, format='json',
+        )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         self.assertEqual(response.data['branch'], ktm.id)
         Batch.objects.create(name='Pokhara day', branch=pkr)
@@ -400,3 +402,70 @@ class CloseBatchTests(BatchTestBase):
             row.save()
         with self.assertRaises(ValidationError):
             row.delete()
+
+
+class TimeSlotTests(APITestCase):
+    """A time slot has a start and end time on the same day, and a duration."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email='slots@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+
+    def _create(self, expect=201, **body):
+        data = {'name': 'Morning', 'start_time': '06:00', 'end_time': '08:00', **body}
+        response = self.client.post('/api/batches/', data, format='json')
+        self.assertEqual(response.status_code, expect, response.data)
+        return response.data
+
+    def test_times_and_duration(self):
+        data = self._create(start_time='06:30', end_time='08:00')
+        self.assertEqual(
+            (data['start_time'], data['end_time'], data['duration_minutes']), ('06:30', '08:00', 90),
+        )
+
+    def test_end_must_be_after_start_and_at_least_15_minutes(self):
+        for start, end in [('08:00', '06:00'), ('08:00', '08:00')]:
+            refused = self._create(expect=400, start_time=start, end_time=end)
+            self.assertEqual(str(refused['end_time'][0]), 'The end time must be after the start time.')
+        refused = self._create(expect=400, start_time='08:00', end_time='08:10')
+        self.assertEqual(str(refused['end_time'][0]), 'A time slot must be at least 15 minutes.')
+        refused = self._create(expect=400, start_time=None, end_time=None)
+        self.assertIn('start_time', refused)
+        self.assertFalse(Batch.objects.exists())
+
+    def test_name_is_unique_in_a_branch(self):
+        from apps.branch.models import Branch
+
+        self._create()
+        refused = self._create(expect=400, name=' morning ')
+        self.assertEqual(str(refused['name'][0]), 'A time slot named morning already exists.')
+        self._create(name='Morning', branch=Branch.objects.create(name='Pokhara', code='PKR').id)
+
+    def test_editing_checks_the_times_it_keeps(self):
+        slot = self._create()
+        url = f'/api/batches/{slot["id"]}/'
+        refused = self.client.patch(url, {'end_time': '05:00'}, format='json')
+        self.assertEqual(refused.status_code, 400)
+        self.assertEqual(self.client.patch(url, {'end_time': '09:00'}, format='json').data['duration_minutes'], 180)
+        old = Batch.objects.create(name='Old evening')
+        response = self.client.patch(f'/api/batches/{old.id}/', {'is_active': False}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertIsNone(response.data['duration_minutes'])
+
+    def test_old_typed_times_are_read_into_start_and_end(self):
+        from importlib import import_module
+
+        from django.apps import apps as django_apps
+
+        fill = import_module('apps.course.migrations.0009_fill_time_slot_times').fill_times
+        a = Batch.objects.create(name='A', description='6:00 AM – 8:00 AM')
+        b = Batch.objects.create(name='B', description='5:30pm-7 PM')
+        c = Batch.objects.create(name='C', description='Weekends')
+        fill(django_apps, None)
+        for slot in (a, b, c):
+            slot.refresh_from_db()
+        self.assertEqual((str(a.start_time), str(a.end_time)), ('06:00:00', '08:00:00'))
+        self.assertEqual((str(b.start_time), str(b.end_time)), ('17:30:00', '19:00:00'))
+        self.assertIsNone(c.start_time)

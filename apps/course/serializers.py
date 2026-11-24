@@ -29,12 +29,51 @@ class CourseCategorySerializer(serializers.ModelSerializer):
 
 
 class BatchSerializer(serializers.ModelSerializer):
+    """A time slot. Start and end are times of day; the end is after the start."""
+
+    MIN_MINUTES = 15
+
     created_by_name = serializers.CharField(source='created_by.name', read_only=True)
+    start_time = serializers.TimeField(format='%H:%M')
+    end_time = serializers.TimeField(format='%H:%M')
+    duration_minutes = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Batch
         fields = '__all__'
         read_only_fields = ['created_at', 'updated_at', 'created_by']
+
+    def validate(self, attrs):
+        instance = self.instance
+        start = attrs.get('start_time', getattr(instance, 'start_time', None))
+        end = attrs.get('end_time', getattr(instance, 'end_time', None))
+        if start is not None and end is not None:
+            if end <= start:
+                raise serializers.ValidationError({'end_time': 'The end time must be after the start time.'})
+            minutes = (end.hour * 60 + end.minute) - (start.hour * 60 + start.minute)
+            if minutes < self.MIN_MINUTES:
+                raise serializers.ValidationError(
+                    {'end_time': f'A time slot must be at least {self.MIN_MINUTES} minutes.'}
+                )
+
+        name = (attrs.get('name') or getattr(instance, 'name', '') or '').strip()
+        if 'name' in attrs:
+            attrs['name'] = name
+            if not name:
+                raise serializers.ValidationError({'name': 'Enter a name.'})
+        request = self.context.get('request')
+        if 'branch' in attrs:
+            branch = attrs['branch']
+        elif instance is not None:
+            branch = instance.branch
+        else:
+            branch = getattr(getattr(request, 'user', None), 'branch', None)
+        same = Batch.objects.filter(name__iexact=name, branch=branch)
+        if instance is not None:
+            same = same.exclude(pk=instance.pk)
+        if name and same.exists():
+            raise serializers.ValidationError({'name': f'A time slot named {name} already exists.'})
+        return attrs
 
 
 class CourseBatchSerializer(serializers.ModelSerializer):

@@ -77,8 +77,16 @@ class CourseCategory(models.Model):
 
 
 class Batch(models.Model):
+    """A time slot (Morning, Day, Evening) that course batches run in.
+
+    start_time and end_time are a time of day, on the same day. Older slots
+    may have only the time written in description.
+    """
+
     name = models.CharField(max_length=100)
     description = models.TextField(null=True, blank=True)
+    start_time = models.TimeField(null=True, blank=True)
+    end_time = models.TimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -97,6 +105,14 @@ class Batch(models.Model):
 
     def __str__(self):
         return self.name
+
+    @property
+    def duration_minutes(self):
+        if self.start_time is None or self.end_time is None:
+            return None
+        return (self.end_time.hour * 60 + self.end_time.minute) - (
+            self.start_time.hour * 60 + self.start_time.minute
+        )
 
 
 class CourseBatch(models.Model):
