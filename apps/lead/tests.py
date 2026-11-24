@@ -7,7 +7,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.course.models import Course
-from apps.lead.models import Lead, Enrollment, Payment, EnrollmentHistory
+from apps.lead.models import Adjustment, Lead, Enrollment, Payment, EnrollmentHistory
 
 User = get_user_model()
 
@@ -510,3 +510,107 @@ class PaymentActionTests(APITestCase):
             f'{self.payments_url}{payment_id}/', {'amount': '1'}, format='json',
         )
         self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+class AdjustmentTests(APITestCase):
+    """Extra charge, discount, write-off and refund: added with a reason, never edited."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email='adjust@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+        course = Course.objects.create(name='Python', full_amount=30000)
+        self.lead = Lead.objects.create(full_name='Maya', phone='9800000500')
+        self.enrollment = Enrollment.objects.create(
+            lead=self.lead, course=course, enrollment_date=date.today(),
+            listed_fee=30000, agreed_amount=30000, status='active',
+        )
+        self.enrollment_url = f'/api/leads/{self.lead.id}/enrollments/{self.enrollment.id}/'
+        self.url = f'{self.enrollment_url}adjustments/'
+
+    def _add(self, kind, amount, reason='Agreed with the manager'):
+        return self.client.post(
+            self.url, {'kind': kind, 'amount': amount, 'reason': reason}, format='json',
+        )
+
+    def _pay(self, amount):
+        Payment.objects.create(
+            enrollment=self.enrollment, amount=amount, payment_date=timezone.now(),
+            payment_method='cash', status='successful',
+        )
+
+    def _owes(self):
+        return self.client.get(self.enrollment_url).data['remaining_amount']
+
+    def test_extra_charge_raises_what_is_owed(self):
+        response = self._add('extra_charge', '2000', 'Exam fee')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['kind_display'], 'Extra charge')
+        self.assertEqual(self._owes(), '32000.00')
+        row = self.enrollment.history.get()
+        self.assertEqual(row.action, 'extra_charge')
+        self.assertEqual(row.before['balance'], '30000.00')
+        self.assertEqual(row.after['balance'], '32000.00')
+
+    def test_switch_to_cheaper_course_discount_then_refund(self):
+        # Paid in full, then moved to a course that costs 10000 less.
+        self._pay(30000)
+        self.assertEqual(self._add('discount', '10000').status_code, 201)
+        self.assertEqual(self._owes(), '-10000.00')  # we owe the student
+        self.assertEqual(self._add('refund', '10000').status_code, 201)
+        self.assertEqual(self._owes(), '0.00')
+        data = self.client.get(self.enrollment_url).data
+        self.assertEqual(data['discounts_total'], '10000.00')
+        self.assertEqual(data['refunds_total'], '10000.00')
+        self.assertEqual(self.enrollment.history.count(), 2)
+
+    def test_refund_cannot_be_more_than_paid(self):
+        self._pay(5000)
+        response = self._add('refund', '6000')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('5000', response.data['detail'])
+        self.assertFalse(Adjustment.objects.exists())
+
+    def test_write_off_cannot_be_more_than_owed(self):
+        self._pay(25000)
+        self.assertEqual(self._add('write_off', '6000').status_code, 400)
+        self.assertEqual(self._add('write_off', '5000').status_code, 201)
+        self.assertEqual(self._owes(), '0.00')
+
+    def test_reason_amount_and_kind_are_checked(self):
+        self.assertIn('reason', self._add('discount', '100', reason='  ').data)
+        self.assertIn('amount', self._add('discount', '0').data)
+        self.assertIn('kind', self._add('bonus', '100').data)
+        self.assertFalse(Adjustment.objects.exists())
+        self.assertFalse(self.enrollment.history.exists())
+
+    def test_money_entries_cannot_be_changed_or_deleted(self):
+        entry_id = self._add('discount', '1000').data['id']
+        self.assertEqual(
+            self.client.patch(f'{self.url}{entry_id}/', {'amount': '1'}, format='json').status_code,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+        self.assertEqual(
+            self.client.delete(f'{self.url}{entry_id}/').status_code,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+        entry = Adjustment.objects.get(id=entry_id)
+        from django.core.exceptions import ValidationError as ModelValidationError
+        with self.assertRaises(ModelValidationError):
+            entry.delete()
+        self.assertEqual(self.client.get(self.url).data['count'], 1)
+
+    def test_price_cannot_be_edited_after_saving(self):
+        response = self.client.patch(
+            self.enrollment_url, {'agreed_amount': '25000'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('agreed_amount', response.data)
+        # Sending the same price back (as the edit form does) is fine.
+        same = self.client.patch(
+            self.enrollment_url,
+            {'agreed_amount': '30000.00', 'listed_fee': '30000', 'remarks': 'ok'},
+            format='json',
+        )
+        self.assertEqual(same.status_code, status.HTTP_200_OK)

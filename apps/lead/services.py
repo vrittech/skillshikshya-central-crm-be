@@ -8,7 +8,7 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import APIException
 
-from apps.lead.models import Enrollment, EnrollmentHistory, Payment
+from apps.lead.models import Adjustment, Enrollment, EnrollmentHistory, Payment
 
 
 class ActionRefused(APIException):
@@ -121,3 +121,43 @@ def void_payment(payment, *, reason, user):
         after={'payment': payment.id, 'amount': str(payment.amount), 'status': payment.status},
     )
     return payment
+
+
+@transaction.atomic
+def add_adjustment(enrollment, *, kind, amount, reason, user):
+    """Add an extra charge, discount, write-off or refund, with a history row.
+
+    A refund can't be more than what was paid and not yet refunded. A write-off
+    can't be more than what is owed. Discounts may go below 0 (a credit we owe
+    the student, e.g. after a switch to a cheaper course), to be refunded.
+    """
+    enrollment = _lock(enrollment)
+    balance_before = enrollment.remaining_amount
+    if kind == Adjustment.Kind.REFUND:
+        refundable = enrollment.total_paid - enrollment.refunds_total
+        if amount > refundable:
+            raise ActionRefused(
+                f'Only {refundable} can be refunded: that is what was paid '
+                f'and not refunded yet.'
+            )
+    if kind == Adjustment.Kind.WRITE_OFF and amount > balance_before:
+        raise ActionRefused(
+            f'Only {max(balance_before, 0)} is owed, so no more than that can be written off.'
+        )
+    adjustment = Adjustment.objects.create(
+        enrollment=enrollment,
+        kind=kind,
+        amount=amount,
+        reason=reason,
+        branch=enrollment.branch,
+        created_by=user,
+    )
+    EnrollmentHistory.record(
+        enrollment=enrollment,
+        action=kind,  # the four kinds share their names with history actions
+        reason=reason,
+        performed_by=user,
+        before={'amount': str(amount), 'balance': str(balance_before)},
+        after={'amount': str(amount), 'balance': str(enrollment.remaining_amount)},
+    )
+    return adjustment

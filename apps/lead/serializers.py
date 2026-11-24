@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -7,6 +9,7 @@ from apps.course.models import Course
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
+    Adjustment,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
 )
 
@@ -112,8 +115,16 @@ class EnrollmentSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source='created_by.name', read_only=True)
     batch_name = serializers.CharField(source='batch.name', read_only=True)
     total_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    extra_charges_total = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True,
+    )
+    discounts_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    write_offs_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    refunds_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     remaining_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     is_full_paid = serializers.BooleanField(read_only=True)
+
+    PRICE_FIELDS = ('listed_fee', 'standard_discount', 'additional_discount', 'agreed_amount')
 
     class Meta:
         model = Enrollment
@@ -122,6 +133,19 @@ class EnrollmentSerializer(serializers.ModelSerializer):
             'lead', 'created_by', 'updated_by', 'created_at', 'updated_at',
             'total_paid', 'remaining_amount', 'is_full_paid',
         ]
+
+    def validate(self, attrs):
+        # The price is fixed once saved. Later changes are money entries with a reason.
+        if self.instance is not None:
+            errors = {
+                field: 'The price is fixed once the enrollment is saved. '
+                       'Add an extra charge or a discount with a reason instead.'
+                for field in self.PRICE_FIELDS
+                if field in attrs and attrs[field] != getattr(self.instance, field)
+            }
+            if errors:
+                raise serializers.ValidationError(errors)
+        return attrs
 
     def validate_status(self, value):
         # Cancel and reinstate need a reason, so they have their own actions.
@@ -175,6 +199,23 @@ class EnrollmentHistorySerializer(serializers.ModelSerializer):
             'before', 'after', 'performed_by', 'performed_by_name', 'created_at',
         ]
         read_only_fields = fields
+
+
+class AdjustmentSerializer(serializers.ModelSerializer):
+    kind_display = serializers.CharField(source='get_kind_display', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True)
+    amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal('0.01'),
+    )
+    reason = serializers.CharField()
+
+    class Meta:
+        model = Adjustment
+        fields = [
+            'id', 'enrollment', 'kind', 'kind_display', 'amount', 'reason',
+            'branch', 'created_by', 'created_by_name', 'created_at',
+        ]
+        read_only_fields = ['id', 'enrollment', 'branch', 'created_by', 'created_at']
 
 
 class ReasonSerializer(serializers.Serializer):

@@ -375,11 +375,18 @@ def revenue_report(request):
             Sum('payments__amount', filter=Q(payments__status='successful')),
             Decimal('0'),
         ),
-    )
+    ).prefetch_related('adjustments')
 
-    outstanding = 0
+    # Same rule as Enrollment.remaining_amount. A credit (we owe them) is not
+    # money to collect, so only positive balances count.
+    outstanding = Decimal('0')
     for enrollment in enrollments:
-        outstanding += (enrollment.agreed_amount - enrollment.paid)
+        t = enrollment.adjustment_totals()
+        owed = (
+            enrollment.agreed_amount + t['extra_charge'] - t['discount']
+            - t['write_off'] - enrollment.paid + t['refund']
+        )
+        outstanding += max(owed, Decimal('0'))
 
     return {
         'date_range': {

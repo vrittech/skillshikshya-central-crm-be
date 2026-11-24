@@ -2,9 +2,10 @@ import csv
 from datetime import datetime
 
 from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
-from rest_framework import viewsets, status
+from rest_framework import mixins, viewsets, status
 from rest_framework.decorators import action
 from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.permissions import IsAuthenticated
@@ -16,6 +17,7 @@ from apps.lead import services
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
+    Adjustment,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
 )
 from apps.lead.serializers import (
@@ -24,7 +26,7 @@ from apps.lead.serializers import (
     LeadSourceSerializer, CampaignSerializer, LeadStatusSerializer,
     LeadPrioritySerializer, LeadTagSerializer, LeadTypeSerializer, LeadSerializer,
     LeadCourseInterestSerializer, EnrollmentSerializer, PaymentSerializer,
-    EnrollmentHistorySerializer, ReasonSerializer,
+    EnrollmentHistorySerializer, ReasonSerializer, AdjustmentSerializer,
     LeadCallSerializer, LeadActivitySerializer, FollowUpSerializer,
     LeadDocumentSerializer, NotificationSerializer,
     LeadListSerializer, LeadMinSerializer,
@@ -252,7 +254,7 @@ class GlobalEnrollmentViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         return Enrollment.objects.select_related(
             'lead', 'student', 'course', 'branch',
-        )
+        ).prefetch_related('adjustments')
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
@@ -443,7 +445,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return Enrollment.objects.filter(lead_id=self.kwargs['lead_pk']).select_related(
             'course', 'student', 'created_by', 'updated_by',
-        ).prefetch_related('payments')
+        ).prefetch_related('payments', 'adjustments')
 
     def perform_create(self, serializer):
         serializer.save(
@@ -527,6 +529,46 @@ class PaymentViewSet(viewsets.ModelViewSet):
             payment, reason=reason.validated_data['reason'], user=request.user,
         )
         return Response(self.get_serializer(payment).data)
+
+
+class AdjustmentViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Money entries of one enrollment: list and add only. Each needs a reason."""
+    serializer_class = AdjustmentSerializer
+    pagination_class = CustomPagination
+    filter_backends = [BranchFilterBackend]
+    branch_field = 'enrollment__branch'
+
+    def get_queryset(self):
+        return Adjustment.objects.filter(
+            enrollment_id=self.kwargs['enrollment_pk'],
+            enrollment__lead_id=self.kwargs['lead_pk'],
+        ).select_related('created_by').order_by('-created_at', '-id')
+
+    def get_permissions(self):
+        if self.action == 'create':
+            return [IsAuthenticated(), IsStaffOrHasPermission()]
+        return [IsAuthenticated()]
+
+    def _enrollment(self):
+        enrollments = Enrollment.objects.filter(lead_id=self.kwargs['lead_pk'])
+        user = self.request.user
+        if not (user.is_staff or user.is_superuser) and getattr(user, 'branch', None):
+            enrollments = enrollments.filter(branch=user.branch)
+        return get_object_or_404(enrollments, pk=self.kwargs['enrollment_pk'])
+
+    def create(self, request, *args, **kwargs):
+        enrollment = self._enrollment()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        adjustment = services.add_adjustment(
+            enrollment, user=request.user, **serializer.validated_data,
+        )
+        return Response(self.get_serializer(adjustment).data, status=status.HTTP_201_CREATED)
 
 
 class EnrollmentHistoryViewSet(viewsets.ReadOnlyModelViewSet):

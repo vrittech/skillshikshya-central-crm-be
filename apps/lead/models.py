@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -430,9 +431,44 @@ class Enrollment(models.Model):
         result = self.payments.filter(status='successful').aggregate(Sum('amount'))
         return result['amount__sum'] or 0
 
+    def adjustment_totals(self):
+        """Sum of each money-entry kind. Uses the prefetch cache when the view loaded it."""
+        totals = {kind: Decimal('0') for kind in Adjustment.Kind.values}
+        for adjustment in self.adjustments.all():
+            totals[adjustment.kind] += adjustment.amount
+        return totals
+
+    @property
+    def extra_charges_total(self):
+        return self.adjustment_totals()[Adjustment.Kind.EXTRA_CHARGE]
+
+    @property
+    def discounts_total(self):
+        return self.adjustment_totals()[Adjustment.Kind.DISCOUNT]
+
+    @property
+    def write_offs_total(self):
+        return self.adjustment_totals()[Adjustment.Kind.WRITE_OFF]
+
+    @property
+    def refunds_total(self):
+        return self.adjustment_totals()[Adjustment.Kind.REFUND]
+
     @property
     def remaining_amount(self):
-        return self.agreed_amount - self.total_paid
+        """What the student owes now. Below 0 means we owe them (credit).
+
+        agreed + extra charges - discounts - write-offs - paid + refunds
+        """
+        t = self.adjustment_totals()
+        return (
+            self.agreed_amount
+            + t[Adjustment.Kind.EXTRA_CHARGE]
+            - t[Adjustment.Kind.DISCOUNT]
+            - t[Adjustment.Kind.WRITE_OFF]
+            - self.total_paid
+            + t[Adjustment.Kind.REFUND]
+        )
 
     @property
     def is_full_paid(self):
@@ -491,6 +527,61 @@ class Payment(models.Model):
 
     def __str__(self):
         return f'{self.amount} ({self.get_status_display()}) — {self.enrollment}'
+
+
+class Adjustment(models.Model):
+    """A money entry on an enrollment besides payments. Rows are only ever added.
+
+    Changing the price, giving money back or forgiving debt each adds a row with
+    a reason, instead of editing the agreed amount. See Enrollment.remaining_amount.
+    """
+
+    class Kind(models.TextChoices):
+        EXTRA_CHARGE = 'extra_charge', 'Extra charge'
+        DISCOUNT = 'discount', 'Discount'
+        WRITE_OFF = 'write_off', 'Write-off'
+        REFUND = 'refund', 'Refund'
+
+    enrollment = models.ForeignKey(
+        Enrollment, on_delete=models.PROTECT, related_name='adjustments',
+    )
+    kind = models.CharField(max_length=15, choices=Kind.choices)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    reason = models.TextField()
+    branch = models.ForeignKey(
+        'branch.Branch', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='adjustments',
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        related_name='adjustments_created',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'enrollment_adjustments'
+        ordering = ['-created_at']
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(amount__gt=0), name='adjustment_amount_positive',
+            ),
+            models.CheckConstraint(
+                check=~models.Q(reason=''), name='adjustment_reason_required',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.get_kind_display()} {self.amount} on enrollment {self.enrollment_id}'
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValidationError('Money entries cannot be changed.')
+        self.reason = (self.reason or '').strip()
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Money entries cannot be deleted.')
 
 
 class EnrollmentHistory(models.Model):
