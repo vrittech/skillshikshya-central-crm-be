@@ -436,6 +436,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     filterset_class = EnrollmentFilter
     ordering_fields = ['enrollment_date', 'created_at']
     ordering = ['-enrollment_date']
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
 
     def get_queryset(self):
         return Enrollment.objects.filter(lead_id=self.kwargs['lead_pk']).select_related(
@@ -461,6 +462,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
 
 class PaymentViewSet(viewsets.ModelViewSet):
     serializer_class = PaymentSerializer
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
     filterset_class = PaymentFilter

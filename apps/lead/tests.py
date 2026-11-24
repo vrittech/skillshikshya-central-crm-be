@@ -1,9 +1,12 @@
+from datetime import date
+
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.course.models import Course
-from apps.lead.models import Lead
+from apps.lead.models import Lead, Enrollment, Payment
 
 User = get_user_model()
 
@@ -196,3 +199,33 @@ class GlobalCallListTests(APITestCase):
         self.client.force_authenticate(other_admin)
         response = self.client.get('/api/calls/')
         self.assertNotIn(self.recent_call.id, [r['id'] for r in response.data['results']])
+
+
+class MoneyCannotBeDeletedTests(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email='money@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+        course = Course.objects.create(name='Python', full_amount=30000)
+        self.lead = Lead.objects.create(full_name='Sita', phone='9800000100')
+        self.enrollment = Enrollment.objects.create(
+            lead=self.lead, course=course, enrollment_date=date.today(),
+            listed_fee=30000, agreed_amount=30000,
+        )
+        self.payment = Payment.objects.create(
+            enrollment=self.enrollment, amount=10000,
+            payment_date=timezone.now(), payment_method='cash',
+        )
+
+    def test_payment_delete_is_blocked(self):
+        url = f'/api/leads/{self.lead.id}/enrollments/{self.enrollment.id}/payments/{self.payment.id}/'
+        response = self.client.delete(url)
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertTrue(Payment.objects.filter(id=self.payment.id).exists())
+
+    def test_enrollment_delete_is_blocked(self):
+        url = f'/api/leads/{self.lead.id}/enrollments/{self.enrollment.id}/'
+        response = self.client.delete(url)
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertTrue(Enrollment.objects.filter(id=self.enrollment.id).exists())
