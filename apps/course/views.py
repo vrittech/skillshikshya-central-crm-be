@@ -98,7 +98,7 @@ class CourseBatchViewSet(viewsets.ModelViewSet):
         """Batches with their seat counts, counted in the same query."""
         from apps.lead.models import Enrollment
 
-        return CourseBatch.objects.select_related('course', 'batch', 'created_by').annotate(
+        return CourseBatch.objects.select_related('course', 'batch', 'branch', 'created_by').annotate(
             seats_taken=Count(
                 'seated_enrollments',
                 filter=Q(seated_enrollments__status__in=Enrollment.SEAT_STATUSES),
@@ -112,7 +112,10 @@ class CourseBatchViewSet(viewsets.ModelViewSet):
         )
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        # A batch without a branch is hidden from branch users, so it takes
+        # the creator's branch unless one is picked.
+        branch = serializer.validated_data.get('branch') or getattr(self.request.user, 'branch', None)
+        serializer.save(created_by=self.request.user, branch=branch)
 
     # Batch actions that aren't plain create/update need their own permission.
     ACTION_PERMS = {

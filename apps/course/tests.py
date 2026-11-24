@@ -46,6 +46,18 @@ class CourseBatchDetailsTests(APITestCase):
         )
         self.assertEqual(response.data['mode_display'], 'Online')
 
+    def test_new_batch_takes_the_creators_branch(self):
+        from apps.branch.models import Branch
+
+        ktm = Branch.objects.create(name='Kathmandu', code='KTM')
+        pkr = Branch.objects.create(name='Pokhara', code='PKR')
+        self.admin.branch = ktm
+        self.admin.save()
+        response = self._create()
+        self.assertEqual((response.data['branch'], response.data['branch_name']), (ktm.id, 'Kathmandu'))
+        response = self._create(name='Python Pokhara', branch=pkr.id)
+        self.assertEqual(response.data['branch_name'], 'Pokhara')
+
     def test_unknown_status_is_refused(self):
         response = self._create(status='finished')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
