@@ -419,3 +419,94 @@ class EnrollmentCancelTests(APITestCase):
             self.enrollment_url, {'status': 'cancelled', 'remarks': 'Note'}, format='json',
         )
         self.assertEqual(ok.status_code, status.HTTP_200_OK)
+
+
+class PaymentActionTests(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email='void@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+        course = Course.objects.create(name='Python', full_amount=30000)
+        self.lead = Lead.objects.create(full_name='Gita', phone='9800000400')
+        self.enrollment = Enrollment.objects.create(
+            lead=self.lead, course=course, enrollment_date=date.today(),
+            listed_fee=30000, agreed_amount=30000, status='active',
+        )
+        self.payments_url = (
+            f'/api/leads/{self.lead.id}/enrollments/{self.enrollment.id}/payments/'
+        )
+
+    def _pay(self, amount='10000', pay_status='successful'):
+        return self.client.post(self.payments_url, {
+            'amount': amount,
+            'payment_date': timezone.now().isoformat(),
+            'payment_method': 'cash',
+            'status': pay_status,
+        }, format='json')
+
+    def test_new_payment_must_be_pending_or_successful(self):
+        for bad in ('voided', 'refunded', 'failed'):
+            response = self._pay(pay_status=bad)
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertIn('status', response.data)
+        self.assertFalse(Payment.objects.exists())
+
+    def test_amount_must_be_more_than_zero(self):
+        for bad in ('0', '-500'):
+            response = self._pay(amount=bad)
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertIn('amount', response.data)
+
+    def test_void_with_reason(self):
+        payment_id = self._pay().data['id']
+        response = self.client.post(
+            f'{self.payments_url}{payment_id}/void/',
+            {'reason': 'Typed 10000 instead of 1000'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'voided')
+        payment = Payment.objects.get(id=payment_id)
+        self.assertEqual(payment.void_reason, 'Typed 10000 instead of 1000')
+        self.assertEqual(payment.voided_by, self.admin)
+        self.assertIsNotNone(payment.voided_at)
+        # A voided payment no longer counts as paid.
+        self.enrollment.refresh_from_db()
+        self.assertEqual(self.enrollment.total_paid, 0)
+        row = self.enrollment.history.get()
+        self.assertEqual(row.action, 'void_payment')
+        self.assertEqual(row.before['status'], 'successful')
+        self.assertEqual(row.after['status'], 'voided')
+
+    def test_void_needs_a_reason(self):
+        payment_id = self._pay().data['id']
+        response = self.client.post(
+            f'{self.payments_url}{payment_id}/void/', {'reason': ' '}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Payment.objects.get(id=payment_id).status, 'successful')
+        self.assertFalse(self.enrollment.history.exists())
+
+    def test_void_twice_is_refused(self):
+        payment_id = self._pay().data['id']
+        url = f'{self.payments_url}{payment_id}/void/'
+        self.client.post(url, {'reason': 'Duplicate entry'}, format='json')
+        again = self.client.post(url, {'reason': 'Again'}, format='json')
+        self.assertEqual(again.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self.enrollment.history.count(), 1)
+
+    def test_confirm_only_a_pending_payment(self):
+        payment_id = self._pay(pay_status='pending').data['id']
+        url = f'{self.payments_url}{payment_id}/confirm/'
+        ok = self.client.post(url, {}, format='json')
+        self.assertEqual(ok.status_code, status.HTTP_200_OK)
+        self.assertEqual(ok.data['status'], 'successful')
+        again = self.client.post(url, {}, format='json')
+        self.assertEqual(again.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_payment_cannot_be_patched(self):
+        payment_id = self._pay().data['id']
+        response = self.client.patch(
+            f'{self.payments_url}{payment_id}/', {'amount': '1'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)

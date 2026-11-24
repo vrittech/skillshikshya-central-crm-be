@@ -140,11 +140,28 @@ class EnrollmentSerializer(serializers.ModelSerializer):
 
 class PaymentSerializer(serializers.ModelSerializer):
     received_by_name = serializers.CharField(source='received_by.name', read_only=True)
+    voided_by_name = serializers.CharField(source='voided_by.name', read_only=True)
 
     class Meta:
         model = Payment
         fields = '__all__'
-        read_only_fields = ['enrollment', 'received_by', 'created_at']
+        read_only_fields = [
+            'enrollment', 'received_by', 'created_at',
+            'void_reason', 'voided_by', 'voided_at',
+        ]
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError('Amount must be more than 0.')
+        return value
+
+    def validate_status(self, value):
+        # A new payment is pending or successful. Confirm and Void change it later.
+        if value not in (Payment.Status.PENDING, Payment.Status.SUCCESSFUL):
+            raise serializers.ValidationError(
+                'A new payment must be pending or successful.'
+            )
+        return value
 
 
 class EnrollmentHistorySerializer(serializers.ModelSerializer):
@@ -393,7 +410,7 @@ class GlobalPaymentSerializer(serializers.ModelSerializer):
             'course_name',
             'amount', 'payment_date',
             'payment_method', 'transaction_reference',
-            'status',
+            'status', 'void_reason', 'voided_at',
             'received_by', 'received_by_name',
             'branch', 'branch_name',
         ]

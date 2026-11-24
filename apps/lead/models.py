@@ -472,6 +472,13 @@ class Payment(models.Model):
         null=True, blank=True, related_name='payments_received',
     )
     notes = models.TextField(null=True, blank=True)
+    # Set only by services.void_payment(); a voided payment never counts as paid.
+    void_reason = models.TextField(null=True, blank=True)
+    voided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        null=True, blank=True, related_name='payments_voided',
+    )
+    voided_at = models.DateTimeField(null=True, blank=True)
     branch = models.ForeignKey(
         'branch.Branch', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='payments',

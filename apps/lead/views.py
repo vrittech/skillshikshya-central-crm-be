@@ -484,8 +484,9 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
 
 
 class PaymentViewSet(viewsets.ModelViewSet):
+    """Payments are only added. Fix a wrong one with void (reason) and record a new one."""
     serializer_class = PaymentSerializer
-    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    http_method_names = ['get', 'post', 'head', 'options']
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
     filterset_class = PaymentFilter
@@ -496,41 +497,36 @@ class PaymentViewSet(viewsets.ModelViewSet):
         return Payment.objects.filter(
             enrollment_id=self.kwargs['enrollment_pk'],
             enrollment__lead_id=self.kwargs['lead_pk'],
-        ).select_related('received_by')
+        ).select_related('received_by', 'voided_by')
 
     def perform_create(self, serializer):
-        instance = serializer.save(
+        payment = serializer.save(
             enrollment_id=self.kwargs['enrollment_pk'],
             received_by=self.request.user,
         )
-        if instance.status == 'successful':
-            self._generate_receipt(instance)
-
-    def perform_update(self, serializer):
-        previous_status = serializer.instance.status
-        instance = serializer.save()
-        if instance.status == 'successful' and previous_status != 'successful':
-            self._generate_receipt(instance)
-
-    def _generate_receipt(self, payment):
-        from apps.invoices.models import Invoice
-        from apps.invoices.services import create_invoice
-
-        if not payment.invoices.exists():
-            create_invoice(
-                enrollment=payment.enrollment,
-                invoice_type='payment',
-                amount=payment.amount,
-                payment=payment,
-                created_by=self.request.user,
-            )
+        services.issue_receipt(payment, user=self.request.user)
 
     def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+        if self.action in ['create', 'confirm', 'void']:
             permission_classes = [IsAuthenticated, IsStaffOrHasPermission]
         else:
             permission_classes = [IsAuthenticated]
         return [p() for p in permission_classes]
+
+    @action(detail=True, methods=['post'])
+    def confirm(self, request, *args, **kwargs):
+        payment = services.confirm_payment(self.get_object(), user=request.user)
+        return Response(self.get_serializer(payment).data)
+
+    @action(detail=True, methods=['post'])
+    def void(self, request, *args, **kwargs):
+        payment = self.get_object()
+        reason = ReasonSerializer(data=request.data)
+        reason.is_valid(raise_exception=True)
+        payment = services.void_payment(
+            payment, reason=reason.validated_data['reason'], user=request.user,
+        )
+        return Response(self.get_serializer(payment).data)
 
 
 class EnrollmentHistoryViewSet(viewsets.ReadOnlyModelViewSet):

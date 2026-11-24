@@ -5,9 +5,10 @@ transaction, so a change can never be saved without its reason. Views only
 check the request and call these functions.
 """
 from django.db import transaction
+from django.utils import timezone
 from rest_framework.exceptions import APIException
 
-from apps.lead.models import Enrollment, EnrollmentHistory
+from apps.lead.models import Enrollment, EnrollmentHistory, Payment
 
 
 class ActionRefused(APIException):
@@ -67,3 +68,56 @@ def reinstate_enrollment(enrollment, *, reason, user):
         after={'status': restored},
     )
     return enrollment
+
+
+def issue_receipt(payment, *, user):
+    """Make the receipt for a successful payment, once."""
+    from apps.invoices.services import create_invoice
+
+    if payment.status != Payment.Status.SUCCESSFUL or payment.invoices.exists():
+        return None
+    invoice, _ = create_invoice(
+        enrollment=payment.enrollment,
+        invoice_type='payment',
+        amount=payment.amount,
+        payment=payment,
+        created_by=user,
+    )
+    return invoice
+
+
+@transaction.atomic
+def confirm_payment(payment, *, user):
+    """Pending -> successful (the money arrived). Issues the receipt."""
+    payment = _lock(payment)
+    if payment.status != Payment.Status.PENDING:
+        raise ActionRefused('Only a pending payment can be confirmed.')
+    payment.status = Payment.Status.SUCCESSFUL
+    payment.save(update_fields=['status'])
+    issue_receipt(payment, user=user)
+    return payment
+
+
+@transaction.atomic
+def void_payment(payment, *, reason, user):
+    """A wrong payment is voided, never edited or deleted. Record a new one if needed."""
+    payment = _lock(payment)
+    if payment.status not in (Payment.Status.PENDING, Payment.Status.SUCCESSFUL):
+        raise ActionRefused(
+            f'A {payment.get_status_display().lower()} payment can\'t be voided.'
+        )
+    old_status = payment.status
+    payment.status = Payment.Status.VOIDED
+    payment.void_reason = reason
+    payment.voided_by = user
+    payment.voided_at = timezone.now()
+    payment.save(update_fields=['status', 'void_reason', 'voided_by', 'voided_at'])
+    EnrollmentHistory.record(
+        enrollment=payment.enrollment,
+        action=EnrollmentHistory.Action.VOID_PAYMENT,
+        reason=reason,
+        performed_by=user,
+        before={'payment': payment.id, 'amount': str(payment.amount), 'status': old_status},
+        after={'payment': payment.id, 'amount': str(payment.amount), 'status': payment.status},
+    )
+    return payment
