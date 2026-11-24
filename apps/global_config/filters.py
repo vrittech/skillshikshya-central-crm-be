@@ -6,7 +6,7 @@ class BranchFilterBackend(BaseFilterBackend):
     """Branch users see their branch's rows; staff see all or pick one with ?branch_id.
 
     A view with `shared_when_no_branch = True` also shows branch users the
-    rows that have no branch (shared by every branch, e.g. time slots).
+    rows that have no branch (shared by every branch, e.g. shifts).
     """
 
     def filter_queryset(self, request, queryset, view):

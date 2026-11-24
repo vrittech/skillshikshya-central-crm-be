@@ -59,7 +59,7 @@ class CourseBatchDetailsTests(APITestCase):
         response = self.client.patch(url, {'capacity': None}, format='json')
         self.assertEqual(response.data['capacity'], ['Enter the number of seats.'])
 
-    def test_batch_shows_its_time_slot_times(self):
+    def test_batch_shows_its_shift_times(self):
         Batch.objects.filter(pk=self.slot.pk).update(start_time='06:00', end_time='08:00')
         response = self._create()
         self.assertEqual(
@@ -89,7 +89,7 @@ class CourseBatchDetailsTests(APITestCase):
         response = self._create(name='Python Pokhara', branch=pkr.id)
         self.assertEqual(response.data['branch_name'], 'Pokhara')
 
-    def test_time_slots_take_the_creators_branch_and_blank_ones_are_shared(self):
+    def test_shifts_take_the_creators_branch_and_blank_ones_are_shared(self):
         from apps.branch.models import Branch
 
         ktm = Branch.objects.create(name='Kathmandu', code='KTM')
@@ -435,8 +435,8 @@ class CloseBatchTests(BatchTestBase):
             row.delete()
 
 
-class TimeSlotTests(APITestCase):
-    """A time slot has a start and end time on the same day, and a duration."""
+class ShiftTests(APITestCase):
+    """A shift has a start and end time on the same day, and a duration."""
 
     def setUp(self):
         self.admin = User.objects.create_user(
@@ -461,7 +461,7 @@ class TimeSlotTests(APITestCase):
             refused = self._create(expect=400, start_time=start, end_time=end)
             self.assertEqual(str(refused['end_time'][0]), 'The end time must be after the start time.')
         refused = self._create(expect=400, start_time='08:00', end_time='08:10')
-        self.assertEqual(str(refused['end_time'][0]), 'A time slot must be at least 15 minutes.')
+        self.assertEqual(str(refused['end_time'][0]), 'A shift must be at least 15 minutes.')
         refused = self._create(expect=400, start_time=None, end_time=None)
         self.assertIn('start_time', refused)
         self.assertFalse(Batch.objects.exists())
@@ -471,7 +471,7 @@ class TimeSlotTests(APITestCase):
 
         self._create()
         refused = self._create(expect=400, name=' morning ')
-        self.assertEqual(str(refused['name'][0]), 'A time slot named morning already exists.')
+        self.assertEqual(str(refused['name'][0]), 'A shift named morning already exists.')
         self._create(name='Morning', branch=Branch.objects.create(name='Pokhara', code='PKR').id)
 
     def test_editing_checks_the_times_it_keeps(self):

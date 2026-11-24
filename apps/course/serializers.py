@@ -29,7 +29,7 @@ class CourseCategorySerializer(serializers.ModelSerializer):
 
 
 class BatchSerializer(serializers.ModelSerializer):
-    """A time slot. Start and end are times of day; the end is after the start."""
+    """A shift. Start and end are times of day; the end is after the start."""
 
     MIN_MINUTES = 15
 
@@ -53,7 +53,7 @@ class BatchSerializer(serializers.ModelSerializer):
             minutes = (end.hour * 60 + end.minute) - (start.hour * 60 + start.minute)
             if minutes < self.MIN_MINUTES:
                 raise serializers.ValidationError(
-                    {'end_time': f'A time slot must be at least {self.MIN_MINUTES} minutes.'}
+                    {'end_time': f'A shift must be at least {self.MIN_MINUTES} minutes.'}
                 )
 
         name = (attrs.get('name') or getattr(instance, 'name', '') or '').strip()
@@ -72,7 +72,7 @@ class BatchSerializer(serializers.ModelSerializer):
         if instance is not None:
             same = same.exclude(pk=instance.pk)
         if name and same.exists():
-            raise serializers.ValidationError({'name': f'A time slot named {name} already exists.'})
+            raise serializers.ValidationError({'name': f'A shift named {name} already exists.'})
         return attrs
 
 

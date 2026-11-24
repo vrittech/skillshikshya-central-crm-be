@@ -72,7 +72,7 @@ class BatchViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'description']
     ordering_fields = ['id', 'name']
     ordering = ['name']
-    # A time slot with no branch is shared by every branch.
+    # A shift with no branch is shared by every branch.
     shared_when_no_branch = True
 
     def perform_create(self, serializer):

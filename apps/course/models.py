@@ -78,9 +78,9 @@ class CourseCategory(models.Model):
 
 
 class Batch(models.Model):
-    """A time slot (Morning, Day, Evening) that course batches run in.
+    """A shift (Morning, Day, Evening) that course batches run in.
 
-    start_time and end_time are a time of day, on the same day. Older slots
+    start_time and end_time are a time of day, on the same day. Older shifts
     may have only the time written in description.
     """
 
@@ -103,6 +103,8 @@ class Batch(models.Model):
     class Meta:
         db_table = 'batches'
         ordering = ['name']
+        verbose_name = 'shift'
+        verbose_name_plural = 'shifts'
 
     def __str__(self):
         return self.name
