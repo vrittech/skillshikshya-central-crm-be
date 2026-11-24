@@ -2343,3 +2343,63 @@ class VoiceNoteTests(APITestCase):
             self.lead.delete()
         self.assertFalse(VoiceNote.objects.exists())
         self.assertFalse(default_storage.exists(key))
+
+
+class LeadTimelineTests(SeatTestBase):
+    """One list with everything about the person, newest first."""
+
+    def test_everything_shows_newest_first_and_can_be_narrowed(self):
+        from apps.branch.models import Branch
+        from apps.lead.enquiries import add_enquiry
+        from apps.lead.models import LeadCall
+
+        lead = self._lead()
+        enquiry = add_enquiry(lead, course=self.course, user=self.admin)
+        LeadCall.objects.create(
+            lead=lead, call_timestamp=timezone.now(), caller='Admin', phone_number=lead.phone,
+            duration_seconds=120, outcome='Interested', created_by=self.admin,
+        )
+        VoiceNote.objects.create(
+            lead=lead, enquiry=enquiry, file_key='voice-notes/x.webm', content_type='audio/webm',
+            size_bytes=1, duration_seconds=30, note='Wants weekends', created_by=self.admin,
+        )
+        enrollment = self._enroll(self.batch, lead=lead)
+        self.assertEqual(self._confirm(enrollment).status_code, 200)
+        pause = self.client.post(self._url(enrollment, 'pause/'), {'reason': 'Exams'}, format='json')
+        self.assertEqual(pause.status_code, 200, pause.data)
+        Payment.objects.create(
+            enrollment=enrollment, amount=Decimal('5000'), payment_date=timezone.now(),
+            payment_method='cash', received_by=self.admin,
+        )
+
+        response = self.client.get(f'/api/leads/{lead.id}/timeline/')
+        self.assertEqual(response.status_code, 200)
+        items = response.data['results']
+        self.assertEqual(response.data['count'], len(items))
+        times = [i['at'] for i in items]
+        self.assertEqual(times, sorted(times, reverse=True))
+        self.assertEqual(
+            {i['kind'] for i in items},
+            {'lead', 'enquiry', 'call', 'voice_note', 'enrollment', 'batch', 'money'},
+        )
+        titles = {i['title'] for i in items}
+        for title in ['Lead added', 'Enquiry added', 'Enquiry won', 'Outbound call', 'Voice note',
+                      'Enrollment added', 'Confirm', 'Pause', 'Payment received']:
+            self.assertIn(title, titles)
+        voice = next(i for i in items if i['kind'] == 'voice_note')
+        self.assertEqual(
+            (voice['voice_note'], voice['course'], voice['detail'], voice['duration_seconds']),
+            (VoiceNote.objects.get().id, 'Python', 'Wants weekends', 30),
+        )
+        paused = next(i for i in items if i['title'] == 'Pause')
+        self.assertEqual((paused['detail'], paused['enrollment']), ('Exams', enrollment.id))
+
+        only_batch = self.client.get(f'/api/leads/{lead.id}/timeline/', {'kind': 'batch'}).data
+        self.assertEqual({i['kind'] for i in only_batch['results']}, {'batch'})
+
+        outsider = User.objects.create_user(
+            email='far@test.com', name='Far', password='pass',
+            branch=Branch.objects.create(name='Pokhara', code='PKR'),
+        )
+        self.client.force_authenticate(outsider)
+        self.assertEqual(self.client.get(f'/api/leads/{lead.id}/timeline/').status_code, 404)

@@ -317,6 +317,17 @@ class LeadViewSet(viewsets.ModelViewSet):
         lead.save(update_fields=['is_archived', 'is_deleted', 'deleted_at', 'deleted_by'])
         return Response({'detail': 'Lead restored.'})
 
+    @action(detail=True, methods=['get'])
+    def timeline(self, request, pk=None):
+        """Everything about the person, newest first. ?kind= shows one kind."""
+        from apps.lead.timeline import lead_timeline
+
+        items = lead_timeline(self.get_object())
+        kind = request.query_params.get('kind')
+        if kind:
+            items = [i for i in items if i['kind'] == kind]
+        return Response({'count': len(items), 'results': items})
+
     @action(detail=True, methods=['post'])
     def purge(self, request, pk=None):
         if not request.user.is_staff:
