@@ -6,6 +6,7 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Sum, Count, Max
 from django.db.models.fields.json import KeyTextTransform
+from django.db.models.functions import Lower
 
 
 class LearningMode(models.Model):
@@ -622,6 +623,8 @@ class EnrollmentHistory(models.Model):
         VOID_PAYMENT = 'void_payment', 'Void payment'
         CANCEL_INVOICE = 'cancel_invoice', 'Cancel invoice'
         CHANGE_DUE_DATES = 'change_due_dates', 'Change due dates'
+        GIVE_LICENCE = 'give_licence', 'Teams licence given'
+        FREE_LICENCE = 'free_licence', 'Teams licence freed'
 
     enrollment = models.ForeignKey(
         Enrollment, on_delete=models.PROTECT, related_name='history',
@@ -819,6 +822,101 @@ class Installment(models.Model):
 
     def delete(self, *args, **kwargs):
         raise ValidationError('Due dates cannot be deleted.')
+
+
+class TeamsConfig(models.Model):
+    """Singleton row (pk=1): how many Microsoft Teams licences we have."""
+
+    total_licences = models.PositiveIntegerField(
+        null=True, blank=True, help_text='Blank means no limit.',
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'teams_licence_config'
+        verbose_name = 'Teams licence settings'
+        verbose_name_plural = 'Teams licence settings'
+
+    def __str__(self):
+        return f'Teams licences ({self.total_licences if self.total_licences is not None else "no limit"})'
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def load(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+
+class TeamsLicence(models.Model):
+    """A Microsoft Teams licence given to a student for an enrollment.
+
+    Given and freed only through apps.lead.teams. Freeing needs a reason and
+    keeps the row; giving one again adds a new row. One open licence per
+    enrollment, and one open licence per Teams account.
+    """
+
+    # The only fields freeing may set, once.
+    FREE_FIELDS = {'released_at', 'released_by', 'release_reason'}
+
+    enrollment = models.ForeignKey(
+        Enrollment, on_delete=models.PROTECT, related_name='teams_licences',
+    )
+    # The Teams sign-in given to the student.
+    account = models.EmailField()
+    branch = models.ForeignKey(
+        'branch.Branch', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='teams_licences',
+    )
+    assigned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='teams_licences_given',
+    )
+    assigned_at = models.DateTimeField(auto_now_add=True)
+    released_at = models.DateTimeField(null=True, blank=True)
+    released_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        null=True, blank=True, related_name='teams_licences_freed',
+    )
+    release_reason = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'teams_licences'
+        ordering = ['-assigned_at', '-id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['enrollment'], condition=models.Q(released_at__isnull=True),
+                name='one_open_teams_licence_per_enrollment',
+            ),
+            models.UniqueConstraint(
+                Lower('account'), condition=models.Q(released_at__isnull=True),
+                name='teams_account_open_once',
+            ),
+            models.CheckConstraint(
+                check=models.Q(released_at__isnull=True) | (
+                    models.Q(release_reason__isnull=False) & ~models.Q(release_reason='')
+                ),
+                name='teams_licence_free_reason_required',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.account} (enrollment {self.enrollment_id})'
+
+    @property
+    def is_open(self):
+        return self.released_at is None
+
+    def save(self, *args, **kwargs):
+        update_fields = kwargs.get('update_fields')
+        if self.pk is not None and not (update_fields and set(update_fields) <= self.FREE_FIELDS):
+            raise ValidationError('A Teams licence cannot be changed. Free it and give a new one.')
+        self.account = (self.account or '').strip().lower()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('A Teams licence cannot be deleted. Free it with a reason.')
 
 
 class LeadCall(models.Model):

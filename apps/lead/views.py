@@ -17,7 +17,7 @@ from apps.lead import services
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
-    Adjustment, ReminderLog,
+    Adjustment, ReminderLog, TeamsLicence,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
 )
 from apps.lead.serializers import (
@@ -27,7 +27,7 @@ from apps.lead.serializers import (
     LeadPrioritySerializer, LeadTagSerializer, LeadTypeSerializer, LeadSerializer,
     LeadCourseInterestSerializer, EnrollmentSerializer, PaymentSerializer,
     EnrollmentHistorySerializer, ReasonSerializer, AdjustmentSerializer, SeatActionSerializer,
-    DueDatesSerializer, ReminderLogSerializer,
+    DueDatesSerializer, ReminderLogSerializer, GiveLicenceSerializer, TeamsLicenceSerializer,
     LeadCallSerializer, LeadActivitySerializer, FollowUpSerializer,
     LeadDocumentSerializer, NotificationSerializer,
     LeadListSerializer, LeadMinSerializer,
@@ -42,10 +42,10 @@ from apps.lead.filters import (
     LeadCourseInterestFilter, EnrollmentFilter, PaymentFilter,
     LeadCallFilter, LeadActivityFilter, FollowUpFilter, LeadDocumentFilter,
     NotificationFilter,
-    GlobalEnrollmentFilter, GlobalPaymentFilter, GlobalCallFilter,
+    GlobalEnrollmentFilter, GlobalPaymentFilter, GlobalCallFilter, TeamsLicenceFilter,
 )
 from apps.global_config.pagination import CustomPagination
-from apps.global_config.permissions import IsStaffOrHasPermission
+from apps.global_config.permissions import IsStaffOrHasPermission, needs
 from apps.global_config.filters import BranchFilterBackend
 
 
@@ -462,6 +462,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         ).prefetch_related(
             'payments', 'adjustments', 'payment_plans__installments', 'invoices',
             'placements__course_batch', 'placements__from_batch', 'placements__created_by',
+            'teams_licences',
         )
 
     def perform_create(self, serializer):
@@ -858,3 +859,59 @@ class LeadDocumentViewSet(viewsets.ModelViewSet):
         else:
             permission_classes = [IsAuthenticated]
         return [p() for p in permission_classes]
+
+
+class TeamsLicenceViewSet(
+    mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet,
+):
+    """Teams licences. POST gives one; POST {id}/free/ frees it with a reason."""
+
+    serializer_class = TeamsLicenceSerializer
+    pagination_class = CustomPagination
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, BranchFilterBackend]
+    filterset_class = TeamsLicenceFilter
+    search_fields = ['account', 'enrollment__lead__full_name', 'enrollment__student__full_name']
+    ordering_fields = ['assigned_at', 'released_at']
+    ordering = ['-assigned_at']
+
+    def get_queryset(self):
+        return TeamsLicence.objects.select_related(
+            'enrollment__lead', 'enrollment__student', 'enrollment__course',
+            'enrollment__current_batch', 'assigned_by', 'released_by',
+        )
+
+    def get_permissions(self):
+        perms = {'create': 'lead.add_teamslicence', 'free': 'lead.change_teamslicence'}
+        if self.action in perms:
+            return [IsAuthenticated(), needs(perms[self.action])()]
+        return [IsAuthenticated()]
+
+    def _reply(self, licence, status_code=200):
+        licence = self.get_queryset().get(pk=licence.pk)
+        return Response(self.get_serializer(licence).data, status=status_code)
+
+    def create(self, request, *args, **kwargs):
+        from apps.lead.teams import give_licence
+
+        body = GiveLicenceSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        licence = give_licence(
+            body.validated_data['enrollment'], account=body.validated_data['account'],
+            user=request.user,
+        )
+        return self._reply(licence, status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
+    def free(self, request, *args, **kwargs):
+        from apps.lead.teams import free_licence
+
+        body = ReasonSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        licence = free_licence(self.get_object(), reason=body.validated_data['reason'], user=request.user)
+        return self._reply(licence)
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        from apps.lead.teams import summary
+
+        return Response(summary())

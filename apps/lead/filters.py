@@ -2,7 +2,7 @@ import django_filters
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment,
-    LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
+    LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, TeamsLicence,
 )
 
 
@@ -241,3 +241,13 @@ class NotificationFilter(django_filters.FilterSet):
     class Meta:
         model = Notification
         fields = ['recipient', 'is_read']
+
+
+class TeamsLicenceFilter(django_filters.FilterSet):
+    # open=true: licences in use now; false: freed ones.
+    open = django_filters.BooleanFilter(field_name='released_at', lookup_expr='isnull')
+    batch = django_filters.NumberFilter(field_name='enrollment__current_batch')
+
+    class Meta:
+        model = TeamsLicence
+        fields = ['enrollment']

@@ -14,8 +14,9 @@ from apps.course.models import Course, CourseBatch
 from apps.invoices.models import Invoice
 from apps.lead.models import (
     Adjustment, Lead, Enrollment, Payment, EnrollmentHistory, Placement, PaymentPlan,
-    Installment, FollowUp, ReminderConfig, ReminderLog,
+    Installment, FollowUp, ReminderConfig, ReminderLog, TeamsLicence,
 )
+from apps.lead import services
 from apps.lead.seat_backfill import backfill_seats
 from apps.student.models import Student
 
@@ -1781,3 +1782,133 @@ class PaymentFollowUpApiTests(ReminderTestBase):
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         self.assertIsNone(response.data['enrollment'])
+
+
+class TeamsLicenceTests(APITestCase):
+    """Teams licences are given to seated students and freed with a reason."""
+
+    URL = '/api/teams-licences/'
+
+    def setUp(self):
+        from apps.lead.models import TeamsConfig
+
+        self.admin = User.objects.create_user(
+            email='teams@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+        self.course = Course.objects.create(name='Python', full_amount=30000)
+        self.batch = CourseBatch.objects.create(name='Python Nov', course=self.course, status='running')
+        TeamsConfig.objects.create(total_licences=2)
+        self.people = 0
+
+    def _student(self, *, seated=True, status='confirmed'):
+        self.people += 1
+        lead = Lead.objects.create(full_name=f'Teams {self.people}', phone=f'98000040{self.people:02d}')
+        return Enrollment.objects.create(
+            lead=lead, course=self.course, enrollment_date=timezone.localdate(),
+            listed_fee=30000, agreed_amount=30000, status=status,
+            batch=self.batch, current_batch=self.batch if seated else None,
+        )
+
+    def _give(self, enrollment, account):
+        return self.client.post(
+            self.URL, {'enrollment': enrollment.id, 'account': account}, format='json',
+        )
+
+    def _free(self, licence_id, reason='Course over'):
+        return self.client.post(f'{self.URL}{licence_id}/free/', {'reason': reason}, format='json')
+
+    def test_give_and_free_a_licence(self):
+        student = self._student()
+        response = self._give(student, ' Teams1@SkillShikshya.com ')
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['account'], 'teams1@skillshikshya.com')
+        self.assertEqual(response.data['batch_name'], 'Python Nov')
+        self.assertEqual(self.client.get(f'{self.URL}summary/').data, {'total': 2, 'in_use': 1, 'free': 1})
+
+        lead_url = f'/api/leads/{student.lead_id}/enrollments/{student.id}/'
+        self.assertEqual(self.client.get(lead_url).data['teams_licence']['account'], 'teams1@skillshikshya.com')
+
+        licence_id = response.data['id']
+        self.assertEqual(self._free(licence_id, reason=' ').status_code, 400)
+        response = self._free(licence_id)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['release_reason'], 'Course over')
+        self.assertEqual(response.data['released_by_name'], 'Admin')
+        self.assertEqual(self._free(licence_id).data['detail'], 'This licence is already free.')
+        self.assertIsNone(self.client.get(lead_url).data['teams_licence'])
+
+        actions = list(student.history.order_by('created_at', 'id').values_list('action', flat=True))
+        self.assertEqual(actions, ['give_licence', 'free_licence'])
+
+        # The same account can be given again once it is free.
+        self.assertEqual(self._give(student, 'teams1@skillshikshya.com').status_code, 201)
+
+    def test_one_licence_per_student_and_per_account(self):
+        a, b = self._student(), self._student()
+        self.assertEqual(self._give(a, 't1@x.com').status_code, 201)
+        self.assertEqual(self._give(a, 't2@x.com').data['detail'], 'This student already has a Teams licence.')
+        response = self._give(b, 'T1@x.com')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['detail'], 't1@x.com is in use by Teams 1. Free it first.')
+
+    def test_no_more_than_the_total(self):
+        for n in range(2):
+            self.assertEqual(self._give(self._student(), f't{n}@x.com').status_code, 201)
+        response = self._give(self._student(), 't9@x.com')
+        self.assertEqual(response.data['detail'], 'All 2 Teams licences are in use. Free one first.')
+
+    def test_only_seated_students_get_one(self):
+        message = 'Only a student sitting in a batch can get a Teams licence.'
+        self.assertEqual(self._give(self._student(seated=False), 'a@x.com').data['detail'], message)
+        self.assertEqual(
+            self._give(self._student(seated=False, status='pending'), 'b@x.com').data['detail'], message,
+        )
+
+    def test_pause_cancel_and_batch_close_free_the_licence(self):
+        from apps.course.services import close_batch
+
+        paused, cancelled, closing = self._student(), self._student(), self._student()
+        for n, e in enumerate((paused, cancelled)):
+            self._give(e, f'p{n}@x.com')
+        services.pause_enrollment(paused, reason='Exams', user=self.admin)
+        services.cancel_enrollment(cancelled, reason='Moved abroad', user=self.admin)
+        self._give(closing, 'c@x.com')
+        close_batch(self.batch, reason='Finished', user=self.admin)
+
+        freed = {
+            t.enrollment_id: t.release_reason
+            for t in TeamsLicence.objects.filter(released_at__isnull=False)
+        }
+        self.assertEqual(freed, {
+            paused.id: 'Paused: Exams',
+            cancelled.id: 'Cancelled: Moved abroad',
+            closing.id: 'Batch closed: Finished',
+        })
+        self.assertEqual(self.client.get(f'{self.URL}summary/').data['in_use'], 0)
+
+    def test_list_open_licences(self):
+        a, b = self._student(), self._student()
+        first = self._give(a, 'a@x.com').data['id']
+        self._give(b, 'b@x.com')
+        self._free(first)
+        response = self.client.get(self.URL, {'open': 'true'})
+        self.assertEqual([r['account'] for r in response.data['results']], ['b@x.com'])
+        response = self.client.get(self.URL, {'open': 'false'})
+        self.assertEqual([r['account'] for r in response.data['results']], ['a@x.com'])
+
+    def test_licences_cannot_be_changed_or_deleted(self):
+        licence = TeamsLicence.objects.create(
+            enrollment=self._student(), account='z@x.com', assigned_by=self.admin,
+        )
+        licence.account = 'y@x.com'
+        with self.assertRaises(ValidationError):
+            licence.save()
+        with self.assertRaises(ValidationError):
+            licence.delete()
+
+    def test_giving_needs_permission(self):
+        clerk = User.objects.create_user(email='teams-clerk@test.com', name='Clerk', password='pass')
+        self.client.force_authenticate(clerk)
+        self.assertEqual(self._give(self._student(), 'q@x.com').status_code, 403)
+        self.assertEqual(self.client.get(self.URL).status_code, 200)

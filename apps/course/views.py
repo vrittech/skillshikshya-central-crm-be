@@ -4,7 +4,7 @@ from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.filters import SearchFilter, OrderingFilter
-from rest_framework.permissions import BasePermission, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 
 from django_filters.rest_framework import DjangoFilterBackend
 
@@ -17,19 +17,8 @@ from apps.course.serializers import (
     CourseBatchSerializer, CourseCategorySerializer, CourseSerializer,
 )
 from apps.global_config.pagination import CustomPagination
-from apps.global_config.permissions import IsStaffOrHasPermission
+from apps.global_config.permissions import IsStaffOrHasPermission, needs
 from apps.global_config.filters import BranchFilterBackend
-
-
-def needs(perm):
-    """Permission class: staff, or a user with this Django permission."""
-
-    class Needs(BasePermission):
-        def has_permission(self, request, view):
-            user = request.user
-            return bool(user and user.is_authenticated and (user.is_staff or user.has_perm(perm)))
-
-    return Needs
 
 
 class CourseCategoryViewSet(viewsets.ModelViewSet):

@@ -49,3 +49,14 @@ class IsStaffOrHasPermission(BasePermission):
             return True
         perms = self.get_required_permissions(request.method, model_cls)
         return request.user.has_perms(perms)
+
+
+def needs(perm):
+    """Permission class for one action: staff, or a user with this Django permission."""
+
+    class Needs(BasePermission):
+        def has_permission(self, request, view):
+            user = request.user
+            return bool(user and user.is_authenticated and (user.is_staff or user.has_perm(perm)))
+
+    return Needs

@@ -115,6 +115,12 @@ def _code(batch):
     return batch.coursebatch_id if batch is not None else None
 
 
+def _free_teams_licence(enrollment, *, reason, user):
+    from apps.lead.teams import free_for_enrollment
+
+    free_for_enrollment(enrollment, reason=reason, user=user)
+
+
 @transaction.atomic
 def join_batch(enrollment, batch, *, user, reason='', on=None):
     """Seat a confirmed enrollment that sits nowhere (confirmed without a batch, or reinstated)."""
@@ -187,6 +193,7 @@ def pause_enrollment(enrollment, *, reason, user, on=None):
         before={'batch': _code(left)},
         after={'batch': None},
     )
+    _free_teams_licence(enrollment, reason=f'Paused: {reason}', user=user)
     return enrollment
 
 
@@ -285,6 +292,7 @@ def cancel_enrollment(enrollment, *, reason, user):
         before={'status': old_status},
         after={'status': enrollment.status},
     )
+    _free_teams_licence(enrollment, reason=f'Cancelled: {reason}', user=user)
     return enrollment
 
 

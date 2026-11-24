@@ -46,8 +46,10 @@ def close_batch(batch, *, reason, user):
 
     Money and costs that come later still count on the batch; they show as
     "after close". Students stay where they are: closing does not change
-    their enrollments.
+    their enrollments. Their Teams licences are freed.
     """
+    from apps.lead.teams import free_for_batch
+
     batch = _lock(batch)
     if batch.status == CourseBatch.Status.CLOSED:
         raise ActionRefused('This batch is already closed.')
@@ -58,6 +60,7 @@ def close_batch(batch, *, reason, user):
     )
     batch.status = CourseBatch.Status.CLOSED
     batch.save(update_fields=['status', 'updated_at'])
+    free_for_batch(batch, reason=f'Batch closed: {reason}', user=user)
     return batch
 
 

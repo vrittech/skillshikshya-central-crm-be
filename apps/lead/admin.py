@@ -4,7 +4,7 @@ from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, Adjustment,
     EnrollmentHistory, LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, Placement,
-    PaymentPlan, Installment, ReminderConfig, ReminderLog,
+    PaymentPlan, Installment, ReminderConfig, ReminderLog, TeamsConfig, TeamsLicence,
 )
 
 
@@ -118,6 +118,24 @@ class ReminderLogAdmin(ReadOnlyAdmin):
     list_filter = ['step', 'channel', 'status']
     search_fields = ['enrollment__lead__full_name', 'sent_to']
     list_select_related = ['enrollment__lead']
+
+
+@admin.register(TeamsConfig)
+class TeamsConfigAdmin(admin.ModelAdmin):
+    list_display = ['__str__', 'total_licences', 'updated_at']
+
+    def has_add_permission(self, request):
+        return not TeamsConfig.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(TeamsLicence)
+class TeamsLicenceAdmin(ReadOnlyAdmin):
+    list_display = ['account', 'enrollment', 'assigned_by', 'assigned_at', 'released_at']
+    search_fields = ['account', 'enrollment__lead__full_name']
+    list_select_related = ['enrollment__lead', 'enrollment__course', 'assigned_by']
 
 
 admin.site.register(LearningMode)

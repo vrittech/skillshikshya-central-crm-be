@@ -9,7 +9,7 @@ from apps.course.models import Course, CourseBatch
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
-    Adjustment, Placement, ReminderLog,
+    Adjustment, Placement, ReminderLog, TeamsLicence,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
 )
 
@@ -188,6 +188,7 @@ class EnrollmentSerializer(serializers.ModelSerializer):
     placements = PlacementSerializer(many=True, read_only=True)
     due_dates = serializers.SerializerMethodField()
     has_fee_invoice = serializers.SerializerMethodField()
+    teams_licence = serializers.SerializerMethodField()
     total_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     extra_charges_total = serializers.DecimalField(
         max_digits=12, decimal_places=2, read_only=True,
@@ -226,6 +227,13 @@ class EnrollmentSerializer(serializers.ModelSerializer):
         if obj.status not in Enrollment.SEAT_STATUSES:
             return []
         return DueRowSerializer(due_rows(obj), many=True).data
+
+    def get_teams_licence(self, obj):
+        """The Teams licence the student holds now, or None. Uses the prefetch."""
+        licence = next((t for t in obj.teams_licences.all() if t.is_open), None)
+        if licence is None:
+            return None
+        return {'id': licence.id, 'account': licence.account, 'assigned_at': licence.assigned_at}
 
     def get_has_fee_invoice(self, obj):
         """True when the enrollment has an active course-fee invoice."""
@@ -642,3 +650,33 @@ class NotificationSerializer(serializers.ModelSerializer):
         model = Notification
         fields = '__all__'
         read_only_fields = ['recipient', 'created_at']
+
+
+class TeamsLicenceSerializer(serializers.ModelSerializer):
+    lead = serializers.IntegerField(source='enrollment.lead_id', read_only=True)
+    name = serializers.SerializerMethodField()
+    student_id = serializers.CharField(source='enrollment.student.student_id', read_only=True, default=None)
+    course_name = serializers.CharField(source='enrollment.course.name', read_only=True)
+    batch_name = serializers.CharField(
+        source='enrollment.current_batch.name', read_only=True, default=None,
+    )
+    assigned_by_name = serializers.CharField(source='assigned_by.name', read_only=True)
+    released_by_name = serializers.CharField(source='released_by.name', read_only=True, default=None)
+
+    class Meta:
+        model = TeamsLicence
+        fields = [
+            'id', 'enrollment', 'lead', 'name', 'student_id', 'course_name', 'batch_name',
+            'account', 'assigned_by', 'assigned_by_name', 'assigned_at',
+            'released_at', 'released_by', 'released_by_name', 'release_reason',
+        ]
+        read_only_fields = fields
+
+    def get_name(self, obj):
+        e = obj.enrollment
+        return e.student.full_name if e.student_id else e.lead.full_name
+
+
+class GiveLicenceSerializer(serializers.Serializer):
+    enrollment = serializers.PrimaryKeyRelatedField(queryset=Enrollment.objects.all())
+    account = serializers.EmailField()
