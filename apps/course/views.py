@@ -72,9 +72,12 @@ class BatchViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'description']
     ordering_fields = ['id', 'name']
     ordering = ['name']
+    # A time slot with no branch is shared by every branch.
+    shared_when_no_branch = True
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        branch = serializer.validated_data.get('branch') or getattr(self.request.user, 'branch', None)
+        serializer.save(created_by=self.request.user, branch=branch)
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:

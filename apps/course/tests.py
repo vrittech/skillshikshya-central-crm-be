@@ -58,6 +58,25 @@ class CourseBatchDetailsTests(APITestCase):
         response = self._create(name='Python Pokhara', branch=pkr.id)
         self.assertEqual(response.data['branch_name'], 'Pokhara')
 
+    def test_time_slots_take_the_creators_branch_and_blank_ones_are_shared(self):
+        from apps.branch.models import Branch
+
+        ktm = Branch.objects.create(name='Kathmandu', code='KTM')
+        pkr = Branch.objects.create(name='Pokhara', code='PKR')
+        self.admin.branch = ktm
+        self.admin.save()
+        response = self.client.post('/api/batches/', {'name': 'Evening'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data['branch'], ktm.id)
+        Batch.objects.create(name='Pokhara day', branch=pkr)
+
+        ktm_user = User.objects.create_user(
+            email='ktm@test.com', name='Ktm', password='pass', branch=ktm,
+        )
+        self.client.force_authenticate(ktm_user)
+        names = {b['name'] for b in self.client.get('/api/batches/').data['results']}
+        self.assertEqual(names, {'Morning', 'Evening'})
+
     def test_unknown_status_is_refused(self):
         response = self._create(status='finished')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

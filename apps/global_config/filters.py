@@ -3,6 +3,12 @@ from rest_framework.filters import BaseFilterBackend
 
 
 class BranchFilterBackend(BaseFilterBackend):
+    """Branch users see their branch's rows; staff see all or pick one with ?branch_id.
+
+    A view with `shared_when_no_branch = True` also shows branch users the
+    rows that have no branch (shared by every branch, e.g. time slots).
+    """
+
     def filter_queryset(self, request, queryset, view):
         branch_field = getattr(view, 'branch_field', 'branch')
         user_branch = getattr(request.user, 'branch', None)
@@ -15,8 +21,10 @@ class BranchFilterBackend(BaseFilterBackend):
             return queryset
 
         if user_branch:
-            filter_kwargs = {branch_field: user_branch}
-            return queryset.filter(**filter_kwargs)
+            mine = Q(**{branch_field: user_branch})
+            if getattr(view, 'shared_when_no_branch', False):
+                mine |= Q(**{f'{branch_field}__isnull': True})
+            return queryset.filter(mine)
 
         return queryset
 
