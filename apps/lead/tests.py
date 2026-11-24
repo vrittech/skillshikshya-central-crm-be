@@ -1825,7 +1825,10 @@ class TeamsLicenceTests(APITestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data['account'], 'teams1@skillshikshya.com')
         self.assertEqual(response.data['batch_name'], 'Python Nov')
-        self.assertEqual(self.client.get(f'{self.URL}summary/').data, {'total': 2, 'in_use': 1, 'free': 1})
+        self.assertEqual(
+            self.client.get(f'{self.URL}summary/').data,
+            {'total': 2, 'in_use': 1, 'paused': 0, 'free': 1},
+        )
 
         lead_url = f'/api/leads/{student.lead_id}/enrollments/{student.id}/'
         self.assertEqual(self.client.get(lead_url).data['teams_licence']['account'], 'teams1@skillshikshya.com')
@@ -1866,13 +1869,11 @@ class TeamsLicenceTests(APITestCase):
             self._give(self._student(seated=False, status='pending'), 'b@x.com').data['detail'], message,
         )
 
-    def test_pause_cancel_and_batch_close_free_the_licence(self):
+    def test_cancel_and_batch_close_free_the_licence(self):
         from apps.course.services import close_batch
 
-        paused, cancelled, closing = self._student(), self._student(), self._student()
-        for n, e in enumerate((paused, cancelled)):
-            self._give(e, f'p{n}@x.com')
-        services.pause_enrollment(paused, reason='Exams', user=self.admin)
+        cancelled, closing = self._student(), self._student()
+        self._give(cancelled, 'p1@x.com')
         services.cancel_enrollment(cancelled, reason='Moved abroad', user=self.admin)
         self._give(closing, 'c@x.com')
         close_batch(self.batch, reason='Finished', user=self.admin)
@@ -1882,11 +1883,43 @@ class TeamsLicenceTests(APITestCase):
             for t in TeamsLicence.objects.filter(released_at__isnull=False)
         }
         self.assertEqual(freed, {
-            paused.id: 'Paused: Exams',
             cancelled.id: 'Cancelled: Moved abroad',
             closing.id: 'Batch closed: Finished',
         })
         self.assertEqual(self.client.get(f'{self.URL}summary/').data['in_use'], 0)
+
+    def test_pause_keeps_the_licence_paused_and_resume_puts_it_back(self):
+        student, other = self._student(), self._student()
+        self._give(student, 'kept@x.com')
+        services.pause_enrollment(student, reason='Exams', user=self.admin)
+
+        licence = TeamsLicence.objects.get(enrollment=student)
+        self.assertTrue(licence.is_open)
+        self.assertIsNotNone(licence.paused_at)
+        self.assertEqual(
+            self.client.get(f'{self.URL}summary/').data,
+            {'total': 2, 'in_use': 0, 'paused': 1, 'free': 1},
+        )
+        lead_url = f'/api/leads/{student.lead_id}/enrollments/{student.id}/'
+        self.assertIsNotNone(self.client.get(lead_url).data['teams_licence']['paused_at'])
+        # The paused licence is still the student's: its account can't go to someone else.
+        self.assertEqual(self._give(other, 'kept@x.com').status_code, 400)
+
+        services.resume_enrollment(student, self.batch, reason='Back', user=self.admin)
+        licence.refresh_from_db()
+        self.assertIsNone(licence.paused_at)
+        self.assertEqual(self.client.get(f'{self.URL}summary/').data['in_use'], 1)
+        actions = list(student.history.order_by('created_at', 'id').values_list('action', 'reason'))
+        self.assertIn(('pause_licence', 'Paused: Exams'), actions)
+        self.assertIn(('resume_licence', 'Resumed: Back'), actions)
+
+    def test_a_paused_licence_can_still_be_freed(self):
+        student = self._student()
+        licence_id = self._give(student, 'gone@x.com').data['id']
+        services.pause_enrollment(student, reason='Long break', user=self.admin)
+        self.assertEqual(self._free(licence_id, reason='Not coming back soon').status_code, 200)
+        services.resume_enrollment(student, self.batch, reason='Back', user=self.admin)
+        self.assertFalse(TeamsLicence.objects.filter(released_at__isnull=True).exists())
 
     def test_list_open_licences(self):
         a, b = self._student(), self._student()

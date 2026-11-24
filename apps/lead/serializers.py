@@ -282,7 +282,10 @@ class EnrollmentSerializer(serializers.ModelSerializer):
         licence = next((t for t in obj.teams_licences.all() if t.is_open), None)
         if licence is None:
             return None
-        return {'id': licence.id, 'account': licence.account, 'assigned_at': licence.assigned_at}
+        return {
+            'id': licence.id, 'account': licence.account, 'assigned_at': licence.assigned_at,
+            'paused_at': licence.paused_at,
+        }
 
     def get_has_fee_invoice(self, obj):
         """True when the enrollment has an active course-fee invoice."""
@@ -717,7 +720,7 @@ class TeamsLicenceSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'enrollment', 'lead', 'name', 'student_id', 'course_name', 'batch_name',
             'account', 'assigned_by', 'assigned_by_name', 'assigned_at',
-            'released_at', 'released_by', 'released_by_name', 'release_reason',
+            'released_at', 'released_by', 'released_by_name', 'release_reason', 'paused_at',
         ]
         read_only_fields = fields
 

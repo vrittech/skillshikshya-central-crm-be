@@ -723,6 +723,8 @@ class EnrollmentHistory(models.Model):
         CHANGE_DUE_DATES = 'change_due_dates', 'Change due dates'
         GIVE_LICENCE = 'give_licence', 'Teams licence given'
         FREE_LICENCE = 'free_licence', 'Teams licence freed'
+        PAUSE_LICENCE = 'pause_licence', 'Teams licence paused'
+        RESUME_LICENCE = 'resume_licence', 'Teams licence back in use'
 
     enrollment = models.ForeignKey(
         Enrollment, on_delete=models.PROTECT, related_name='history',
@@ -953,11 +955,15 @@ class TeamsLicence(models.Model):
 
     Given and freed only through apps.lead.teams. Freeing needs a reason and
     keeps the row; giving one again adds a new row. One open licence per
-    enrollment, and one open licence per Teams account.
+    enrollment, and one open licence per Teams account. While the student is
+    paused the licence is paused too: still theirs, still counted, back in
+    use when they resume.
     """
 
     # The only fields freeing may set, once.
     FREE_FIELDS = {'released_at', 'released_by', 'release_reason'}
+    # Set on pause, cleared on resume. Each change also writes a history row.
+    PAUSE_FIELDS = {'paused_at'}
 
     enrollment = models.ForeignKey(
         Enrollment, on_delete=models.PROTECT, related_name='teams_licences',
@@ -978,6 +984,8 @@ class TeamsLicence(models.Model):
         null=True, blank=True, related_name='teams_licences_freed',
     )
     release_reason = models.TextField(null=True, blank=True)
+    # Set while the student is paused.
+    paused_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'teams_licences'
@@ -1008,7 +1016,8 @@ class TeamsLicence(models.Model):
 
     def save(self, *args, **kwargs):
         update_fields = kwargs.get('update_fields')
-        if self.pk is not None and not (update_fields and set(update_fields) <= self.FREE_FIELDS):
+        allowed = self.FREE_FIELDS | self.PAUSE_FIELDS
+        if self.pk is not None and not (update_fields and set(update_fields) <= allowed):
             raise ValidationError('A Teams licence cannot be changed. Free it and give a new one.')
         self.account = (self.account or '').strip().lower()
         super().save(*args, **kwargs)

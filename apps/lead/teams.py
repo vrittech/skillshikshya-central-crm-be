@@ -1,8 +1,9 @@
 """Microsoft Teams licences: who has one, and freeing them with a reason.
 
 A licence is given to a student sitting in a batch. It is freed by hand with a
-reason, or on its own when the student pauses or cancels, or when their batch
-closes. Each give and free also writes an EnrollmentHistory row.
+reason, or on its own when the student cancels or their batch closes. When the
+student pauses, the licence is paused: kept for them and still counted, and in
+use again when they resume. Each change also writes an EnrollmentHistory row.
 """
 from django.db import transaction
 from django.utils import timezone
@@ -21,13 +22,18 @@ def open_licences():
 
 
 def summary():
-    """{'total', 'in_use', 'free'}. Total and free are None when no total is set."""
+    """{'total', 'in_use', 'paused', 'free'}. Total and free are None when no total is set.
+
+    A paused licence is still the student's, so it is not free.
+    """
     total = TeamsConfig.load().total_licences
-    in_use = open_licences().count()
+    taken = open_licences().count()
+    paused = open_licences().filter(paused_at__isnull=False).count()
     return {
         'total': total,
-        'in_use': in_use,
-        'free': None if total is None else max(total - in_use, 0),
+        'in_use': taken - paused,
+        'paused': paused,
+        'free': None if total is None else max(total - taken, 0),
     }
 
 
@@ -102,3 +108,38 @@ def free_for_batch(batch, *, reason, user):
     """Free the licences of students sitting in the batch. Called inside close batch."""
     for licence in open_licences().select_for_update().filter(enrollment__current_batch=batch):
         _free(licence, reason=reason, user=user)
+
+
+def pause_for_enrollment(enrollment, *, reason, user):
+    """Keep the enrollment's licence for the student while paused. Called inside pause."""
+    for licence in open_licences().select_for_update().filter(
+        enrollment=enrollment, paused_at__isnull=True,
+    ):
+        licence.paused_at = timezone.now()
+        licence.save(update_fields=['paused_at'])
+        EnrollmentHistory.record(
+            enrollment=enrollment,
+            action=EnrollmentHistory.Action.PAUSE_LICENCE,
+            reason=reason,
+            performed_by=user,
+            before={'teams_account': licence.account, 'teams_licence': 'in use'},
+            after={'teams_account': licence.account, 'teams_licence': 'paused'},
+        )
+
+
+def resume_for_enrollment(enrollment, *, reason, user):
+    """Put the paused licence back in use. Called inside resume."""
+    for licence in open_licences().select_for_update().filter(
+        enrollment=enrollment, paused_at__isnull=False,
+    ):
+        licence.paused_at = None
+        licence.save(update_fields=['paused_at'])
+        EnrollmentHistory.record(
+            enrollment=enrollment,
+            action=EnrollmentHistory.Action.RESUME_LICENCE,
+            reason=reason,
+            performed_by=user,
+            before={'teams_account': licence.account, 'teams_licence': 'paused'},
+            after={'teams_account': licence.account, 'teams_licence': 'in use'},
+        )
+

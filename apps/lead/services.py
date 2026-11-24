@@ -121,6 +121,18 @@ def _free_teams_licence(enrollment, *, reason, user):
     free_for_enrollment(enrollment, reason=reason, user=user)
 
 
+def _pause_teams_licence(enrollment, *, reason, user):
+    from apps.lead.teams import pause_for_enrollment
+
+    pause_for_enrollment(enrollment, reason=reason, user=user)
+
+
+def _resume_teams_licence(enrollment, *, reason, user):
+    from apps.lead.teams import resume_for_enrollment
+
+    resume_for_enrollment(enrollment, reason=reason, user=user)
+
+
 @transaction.atomic
 def join_batch(enrollment, batch, *, user, reason='', on=None):
     """Seat a confirmed enrollment that sits nowhere (confirmed without a batch, or reinstated)."""
@@ -179,7 +191,8 @@ def move_batch(enrollment, batch, *, reason, user, on=None):
 
 @transaction.atomic
 def pause_enrollment(enrollment, *, reason, user, on=None):
-    """Take a seated student out of their batch for now. The seat is freed."""
+    """Take a seated student out of their batch for now. The seat is freed; a
+    Teams licence is paused, not freed."""
     enrollment = _lock(enrollment)
     _must_be_able_to_sit(enrollment)
     if enrollment.current_batch_id is None:
@@ -193,7 +206,7 @@ def pause_enrollment(enrollment, *, reason, user, on=None):
         before={'batch': _code(left)},
         after={'batch': None},
     )
-    _free_teams_licence(enrollment, reason=f'Paused: {reason}', user=user)
+    _pause_teams_licence(enrollment, reason=f'Paused: {reason}', user=user)
     return enrollment
 
 
@@ -218,6 +231,7 @@ def resume_enrollment(enrollment, batch, *, reason, user, on=None):
         before={'batch': None},
         after={'batch': _code(batch)},
     )
+    _resume_teams_licence(enrollment, reason=f'Resumed: {reason}', user=user)
     return enrollment
 
 
