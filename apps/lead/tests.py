@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from io import StringIO
 
@@ -13,7 +13,7 @@ from rest_framework.test import APITestCase
 from apps.course.models import Course, CourseBatch
 from apps.invoices.models import Invoice
 from apps.lead.models import (
-    Adjustment, Lead, Enrollment, Payment, EnrollmentHistory, Placement,
+    Adjustment, Lead, Enrollment, Payment, EnrollmentHistory, Placement, PaymentPlan,
 )
 from apps.lead.seat_backfill import backfill_seats
 from apps.student.models import Student
@@ -785,9 +785,10 @@ class ConfirmEnrollmentTests(APITestCase):
         self.assertIsNotNone(self.lead.converted_at)
         row = self.enrollment.history.get()
         self.assertEqual(row.action, 'confirm')
-        self.assertEqual(
-            row.after, {'status': 'confirmed', 'student': student.student_id, 'batch': None},
-        )
+        self.assertEqual(row.after, {
+            'status': 'confirmed', 'student': student.student_id, 'batch': None,
+            'due_dates': [{'due_on': str(date.today()), 'amount': str(self.enrollment.agreed_amount)}],
+        })
 
     def test_confirm_makes_the_fee_invoice_once(self):
         self._confirm(self.enrollment)
@@ -1357,3 +1358,180 @@ class MovePauseResumeTests(SeatTestBase):
         self.assertEqual([r['enrollment'] for r in first['seated']], [stayer.id])
         self.assertEqual((first['seated'][0]['how'], first['seated'][0]['moved_in']), ('join', False))
         self.assertEqual(first['paused'], [])
+
+
+class DueDateTests(SeatTestBase):
+    """Due dates: set at confirm, changed with a reason, filled oldest first."""
+
+    def _day(self, days):
+        return str(date.today() + timedelta(days=days))
+
+    def _confirmed(self, due_dates=None):
+        enrollment = self._enroll()
+        body = {'due_dates': due_dates} if due_dates is not None else {}
+        response = self.client.post(self._url(enrollment, 'confirm/'), body, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        return enrollment
+
+    def _rows(self, enrollment):
+        return self.client.get(self._url(enrollment)).data['due_dates']
+
+    def _change(self, enrollment, due_dates, reason='Asked to pay later'):
+        return self.client.post(
+            self._url(enrollment, 'due-dates/'),
+            {'due_dates': due_dates, 'reason': reason}, format='json',
+        )
+
+    def _pay(self, enrollment, amount, pay_status='successful'):
+        return Payment.objects.create(
+            enrollment=enrollment, amount=amount, payment_date=timezone.now(),
+            payment_method='cash', status=pay_status,
+        )
+
+    def _three_parts(self, first=0):
+        return [
+            {'due_on': self._day(first + 60), 'amount': '10000'},
+            {'due_on': self._day(first), 'amount': '10000'},
+            {'due_on': self._day(first + 30), 'amount': '10000'},
+        ]
+
+    def test_without_due_dates_the_whole_amount_is_due_on_the_confirm_day(self):
+        enrollment = self._confirmed()
+        rows = self._rows(enrollment)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['due_on'], str(date.today()))
+        self.assertEqual(rows[0]['amount'], '30000.00')
+        self.assertEqual(rows[0]['status'], 'due')
+        plan = PaymentPlan.objects.get(enrollment=enrollment)
+        self.assertEqual(plan.reason, 'Set when the enrollment was confirmed.')
+        confirm = enrollment.history.get(action='confirm')
+        self.assertEqual(
+            confirm.after['due_dates'], [{'due_on': str(date.today()), 'amount': '30000.00'}],
+        )
+
+    def test_confirm_with_parts_lists_them_oldest_first(self):
+        enrollment = self._confirmed(self._three_parts())
+        rows = self._rows(enrollment)
+        self.assertEqual(
+            [r['due_on'] for r in rows], [self._day(0), self._day(30), self._day(60)],
+        )
+        self.assertEqual({r['status'] for r in rows}, {'due'})
+
+    def test_parts_must_add_up_to_the_agreed_amount(self):
+        enrollment = self._enroll()
+        response = self.client.post(
+            self._url(enrollment, 'confirm/'),
+            {'due_dates': [{'due_on': self._day(0), 'amount': '20000'}]}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('add up to 20000', response.data['detail'])
+        enrollment.refresh_from_db()
+        self.assertEqual(enrollment.status, 'pending')
+        self.assertFalse(PaymentPlan.objects.exists())
+        self.assertFalse(Student.objects.exists())
+
+    def test_payments_fill_the_oldest_part_first(self):
+        enrollment = self._confirmed(self._three_parts())
+        self._pay(enrollment, 15000)
+        self._pay(enrollment, 5000, pay_status='pending')  # not money yet
+        rows = self._rows(enrollment)
+        self.assertEqual([r['status'] for r in rows], ['paid', 'part_paid', 'due'])
+        self.assertEqual([r['left'] for r in rows], ['0.00', '5000.00', '10000.00'])
+
+    def test_an_unpaid_part_past_its_due_date_is_late(self):
+        enrollment = self._confirmed()
+        response = self._change(enrollment, self._three_parts(first=-40))
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self._pay(enrollment, 10000)
+        rows = self._rows(enrollment)
+        self.assertEqual([r['status'] for r in rows], ['paid', 'late', 'due'])
+        self.assertEqual(rows[1]['days_late'], 10)
+        self.assertEqual(rows[0]['days_late'], 0)
+
+    def test_changing_due_dates_keeps_the_old_plan_and_writes_history(self):
+        enrollment = self._confirmed()
+        response = self._change(enrollment, self._three_parts())
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(len(response.data['due_dates']), 3)
+        self.assertEqual(PaymentPlan.objects.filter(enrollment=enrollment).count(), 2)
+        row = enrollment.history.get(action='change_due_dates')
+        self.assertEqual(row.reason, 'Asked to pay later')
+        self.assertEqual(row.before['due_dates'], [{'due_on': self._day(0), 'amount': '30000.00'}])
+        self.assertEqual(len(row.after['due_dates']), 3)
+
+    def test_changing_due_dates_needs_a_reason_and_the_right_total(self):
+        enrollment = self._confirmed()
+        self.assertEqual(
+            self._change(enrollment, self._three_parts(), reason='  ').status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        response = self._change(enrollment, [{'due_on': self._day(5), 'amount': '29000'}])
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['detail'], (
+            'The due dates add up to 29000.00, but the agreed amount is 30000.00.'
+        ))
+        self.assertEqual(PaymentPlan.objects.filter(enrollment=enrollment).count(), 1)
+
+    def test_a_pending_enrollment_has_no_due_dates(self):
+        enrollment = self._enroll()
+        self.assertEqual(self._rows(enrollment), [])
+        response = self._change(enrollment, self._three_parts())
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('confirmed enrollment', response.data['detail'])
+
+    def test_discounts_and_write_offs_fill_parts_and_refunds_take_back(self):
+        enrollment = self._confirmed(self._three_parts())
+        url = self._url(enrollment, 'adjustments/')
+        self._pay(enrollment, 10000)
+        self.client.post(url, {'kind': 'discount', 'amount': '4000', 'reason': 'Promo'}, format='json')
+        self.client.post(url, {'kind': 'write_off', 'amount': '1000', 'reason': 'Approved'}, format='json')
+        rows = self._rows(enrollment)
+        self.assertEqual([r['left'] for r in rows], ['0.00', '5000.00', '10000.00'])
+        self.client.post(url, {'kind': 'refund', 'amount': '5000', 'reason': 'Overpaid'}, format='json')
+        rows = self._rows(enrollment)
+        self.assertEqual([r['left'] for r in rows], ['0.00', '10000.00', '10000.00'])
+
+    def test_a_voided_payment_no_longer_fills_a_part(self):
+        enrollment = self._confirmed(self._three_parts())
+        payment = self._pay(enrollment, 10000)
+        self.assertEqual(self._rows(enrollment)[0]['status'], 'paid')
+        self.client.post(
+            f'/api/leads/{enrollment.lead_id}/enrollments/{enrollment.id}/payments/{payment.id}/void/',
+            {'reason': 'Wrong amount'}, format='json',
+        )
+        self.assertEqual(self._rows(enrollment)[0]['status'], 'due')
+
+    def test_an_extra_charge_is_due_on_the_day_it_is_added(self):
+        enrollment = self._confirmed([{'due_on': self._day(30), 'amount': '30000'}])
+        self.client.post(
+            self._url(enrollment, 'adjustments/'),
+            {'kind': 'extra_charge', 'amount': '2000', 'reason': 'Exam fee'}, format='json',
+        )
+        rows = self._rows(enrollment)
+        self.assertEqual([r['kind'] for r in rows], ['extra_charge', 'part'])
+        self.assertEqual(rows[0]['due_on'], str(date.today()))
+        self.assertEqual(rows[0]['amount'], '2000.00')
+
+    def test_an_old_enrollment_without_a_plan_has_one_part_with_no_due_date(self):
+        enrollment = Enrollment.objects.create(
+            lead=self._lead(), course=self.course, enrollment_date=date(2025, 1, 1),
+            listed_fee=30000, agreed_amount=30000, status='active',
+        )
+        rows = self._rows(enrollment)
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]['due_on'])
+        self.assertEqual(rows[0]['status'], 'due')
+
+    def test_plans_and_due_dates_cannot_be_changed_or_deleted(self):
+        enrollment = self._confirmed(self._three_parts())
+        plan = PaymentPlan.objects.get(enrollment=enrollment)
+        part = plan.installments.first()
+        part.amount = 1
+        with self.assertRaises(ValidationError):
+            part.save()
+        with self.assertRaises(ValidationError):
+            part.delete()
+        with self.assertRaises(ValidationError):
+            plan.save()
+        with self.assertRaises(ValidationError):
+            plan.delete()

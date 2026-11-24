@@ -27,6 +27,7 @@ from apps.lead.serializers import (
     LeadPrioritySerializer, LeadTagSerializer, LeadTypeSerializer, LeadSerializer,
     LeadCourseInterestSerializer, EnrollmentSerializer, PaymentSerializer,
     EnrollmentHistorySerializer, ReasonSerializer, AdjustmentSerializer, SeatActionSerializer,
+    DueDatesSerializer,
     LeadCallSerializer, LeadActivitySerializer, FollowUpSerializer,
     LeadDocumentSerializer, NotificationSerializer,
     LeadListSerializer, LeadMinSerializer,
@@ -459,7 +460,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         return Enrollment.objects.filter(lead_id=self.kwargs['lead_pk']).select_related(
             'course', 'student', 'batch', 'current_batch', 'created_by', 'updated_by',
         ).prefetch_related(
-            'payments', 'adjustments',
+            'payments', 'adjustments', 'payment_plans__installments',
             'placements__course_batch', 'placements__from_batch', 'placements__created_by',
         )
 
@@ -475,7 +476,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in [
             'create', 'update', 'partial_update', 'destroy', 'confirm', 'cancel', 'reinstate',
-            'join_batch', 'move', 'pause', 'resume',
+            'join_batch', 'move', 'pause', 'resume', 'due_dates',
         ]:
             permission_classes = [IsAuthenticated, IsStaffOrHasPermission]
         else:
@@ -489,9 +490,29 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def confirm(self, request, *args, **kwargs):
-        """Confirm a pending enrollment. This makes the lead a student."""
-        enrollment = services.confirm_enrollment(self.get_object(), user=request.user)
-        return Response(self.get_serializer(enrollment).data)
+        """Confirm a pending enrollment. This makes the lead a student.
+
+        Optional body: {"due_dates": [{"due_on", "amount"}, ...]}.
+        """
+        enrollment = self.get_object()
+        body = DueDatesSerializer(data=request.data, for_confirm=True)
+        body.is_valid(raise_exception=True)
+        enrollment = services.confirm_enrollment(
+            enrollment, user=request.user, due_dates=body.validated_data.get('due_dates'),
+        )
+        return self._fresh_reply(enrollment)
+
+    @action(detail=True, methods=['post'], url_path='due-dates')
+    def due_dates(self, request, *args, **kwargs):
+        """Change the due dates, with a reason. The old ones stay in the history."""
+        enrollment = self.get_object()
+        body = DueDatesSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        enrollment = services.set_due_dates(
+            enrollment, body.validated_data['due_dates'],
+            reason=body.validated_data['reason'], user=request.user,
+        )
+        return self._fresh_reply(enrollment)
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, *args, **kwargs):
@@ -516,7 +537,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         body.is_valid(raise_exception=True)
         return body.validated_data
 
-    def _seat_reply(self, enrollment):
+    def _fresh_reply(self, enrollment):
         return Response(self.get_serializer(self.get_queryset().get(pk=enrollment.pk)).data)
 
     @action(detail=True, methods=['post'], url_path='join-batch')
@@ -528,7 +549,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
             enrollment, body['batch'], reason=body.get('reason', ''), user=request.user,
             on=body.get('started_on'),
         )
-        return self._seat_reply(enrollment)
+        return self._fresh_reply(enrollment)
 
     @action(detail=True, methods=['post'])
     def move(self, request, *args, **kwargs):
@@ -539,7 +560,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
             enrollment, body['batch'], reason=body['reason'], user=request.user,
             on=body.get('started_on'),
         )
-        return self._seat_reply(enrollment)
+        return self._fresh_reply(enrollment)
 
     @action(detail=True, methods=['post'])
     def pause(self, request, *args, **kwargs):
@@ -549,7 +570,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         enrollment = services.pause_enrollment(
             enrollment, reason=body['reason'], user=request.user, on=body.get('started_on'),
         )
-        return self._seat_reply(enrollment)
+        return self._fresh_reply(enrollment)
 
     @action(detail=True, methods=['post'])
     def resume(self, request, *args, **kwargs):
@@ -560,7 +581,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
             enrollment, body['batch'], reason=body['reason'], user=request.user,
             on=body.get('started_on'),
         )
-        return self._seat_reply(enrollment)
+        return self._fresh_reply(enrollment)
 
 
 class PaymentViewSet(viewsets.ModelViewSet):

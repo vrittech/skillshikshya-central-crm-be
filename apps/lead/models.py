@@ -745,6 +745,82 @@ class Placement(models.Model):
         raise ValidationError('Seat history rows cannot be deleted.')
 
 
+class PaymentPlan(models.Model):
+    """One set of due dates for an enrollment. Rows are only ever added.
+
+    Changing the due dates adds a new plan with a reason; the newest plan
+    counts and the older ones stay as they were. Its parts (Installment rows)
+    split the agreed amount.
+    """
+
+    enrollment = models.ForeignKey(
+        Enrollment, on_delete=models.PROTECT, related_name='payment_plans',
+    )
+    reason = models.TextField()
+    branch = models.ForeignKey(
+        'branch.Branch', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='payment_plans',
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        related_name='payment_plans_created',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'enrollment_payment_plans'
+        ordering = ['-created_at', '-id']
+        constraints = [
+            models.CheckConstraint(
+                check=~models.Q(reason=''), name='payment_plan_reason_required',
+            ),
+        ]
+
+    def __str__(self):
+        return f'Payment plan {self.pk} of enrollment {self.enrollment_id}'
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValidationError('Payment plans cannot be changed. Add a new one.')
+        self.reason = (self.reason or '').strip()
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Payment plans cannot be deleted.')
+
+
+class Installment(models.Model):
+    """One part of a payment plan: an amount and the day it is due."""
+
+    plan = models.ForeignKey(
+        PaymentPlan, on_delete=models.PROTECT, related_name='installments',
+    )
+    due_on = models.DateField()
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+
+    class Meta:
+        db_table = 'enrollment_installments'
+        ordering = ['due_on', 'id']
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(amount__gt=0), name='installment_amount_positive',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.amount} due {self.due_on}'
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValidationError('Due dates cannot be changed. Add a new payment plan.')
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Due dates cannot be deleted.')
+
+
 class LeadCall(models.Model):
     class Direction(models.TextChoices):
         INBOUND = 'inbound', 'Inbound'

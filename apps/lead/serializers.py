@@ -145,6 +145,38 @@ class SeatActionSerializer(serializers.Serializer):
             self.fields['reason'] = serializers.CharField(required=False, allow_blank=True)
 
 
+class DuePartSerializer(serializers.Serializer):
+    due_on = serializers.DateField()
+    amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal('0.01'),
+    )
+
+
+class DueDatesSerializer(serializers.Serializer):
+    """Body of Change due dates (reason needed) and of Confirm (all optional)."""
+
+    due_dates = DuePartSerializer(many=True, allow_empty=False)
+    reason = serializers.CharField()
+
+    def __init__(self, *args, for_confirm=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        if for_confirm:
+            self.fields.pop('reason')
+            self.fields['due_dates'] = DuePartSerializer(many=True, required=False)
+
+
+class DueRowSerializer(serializers.Serializer):
+    """One row of services.due_rows()."""
+
+    kind = serializers.CharField()
+    due_on = serializers.DateField(allow_null=True)
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    paid = serializers.DecimalField(max_digits=12, decimal_places=2)
+    left = serializers.DecimalField(max_digits=12, decimal_places=2)
+    status = serializers.CharField()
+    days_late = serializers.IntegerField()
+
+
 class EnrollmentSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source='course.name', read_only=True)
     lead_name = serializers.CharField(source='lead.full_name', read_only=True)
@@ -154,6 +186,7 @@ class EnrollmentSerializer(serializers.ModelSerializer):
     current_batch_name = serializers.CharField(source='current_batch.name', read_only=True)
     seat_state = serializers.SerializerMethodField()
     placements = PlacementSerializer(many=True, read_only=True)
+    due_dates = serializers.SerializerMethodField()
     total_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     extra_charges_total = serializers.DecimalField(
         max_digits=12, decimal_places=2, read_only=True,
@@ -184,6 +217,14 @@ class EnrollmentSerializer(serializers.ModelSerializer):
             enrollment.status == Enrollment.Status.PENDING
             and not enrollment.payments.filter(status=Payment.Status.SUCCESSFUL).exists()
         )
+
+    def get_due_dates(self, obj):
+        """Due dates with what is paid on each. Empty while the enrollment is pending."""
+        from apps.lead.services import due_rows
+
+        if obj.status not in Enrollment.SEAT_STATUSES:
+            return []
+        return DueRowSerializer(due_rows(obj), many=True).data
 
     def get_seat_state(self, obj):
         """'seated', 'paused' or 'none'. Uses the prefetched seat history."""

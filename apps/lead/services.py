@@ -4,12 +4,16 @@ Each action changes the data and writes an EnrollmentHistory row inside one
 transaction, so a change can never be saved without its reason. Views only
 check the request and call these functions.
 """
+from decimal import Decimal
+
 from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import APIException
 
 from apps.course.models import CourseBatch
-from apps.lead.models import Adjustment, Enrollment, EnrollmentHistory, Lead, Payment, Placement
+from apps.lead.models import (
+    Adjustment, Enrollment, EnrollmentHistory, Installment, Lead, Payment, PaymentPlan, Placement,
+)
 
 
 class ActionRefused(APIException):
@@ -366,17 +370,24 @@ def issue_fee_invoice(enrollment, *, user):
 
 
 @transaction.atomic
-def confirm_enrollment(enrollment, *, user):
+def confirm_enrollment(enrollment, *, user, due_dates=None):
     """Confirm a pending enrollment: the moment a lead becomes a student.
 
     In one step: the enrollment is confirmed, the lead's student is found or
     made, the enrollment is linked to it, the lead is marked converted, a
     history row is written and the fee invoice is made. Payment does not
     decide this; a student can pay later or in parts.
+
+    due_dates is a list of {'due_on', 'amount'} that adds up to the agreed
+    amount. Without it, the whole amount is due on the confirm day.
     """
     enrollment = _lock(enrollment)
     if enrollment.status != Enrollment.Status.PENDING:
         raise ActionRefused('Only a pending enrollment can be confirmed.')
+    if due_dates:
+        due_dates = _clean_parts(enrollment, due_dates)
+    elif enrollment.agreed_amount > 0:
+        due_dates = [{'due_on': timezone.localdate(), 'amount': enrollment.agreed_amount}]
     lead = Lead._base_manager.select_for_update().get(pk=enrollment.lead_id)
 
     # Confirm takes a seat in the chosen batch. A full or closed batch stops
@@ -399,6 +410,10 @@ def confirm_enrollment(enrollment, *, user):
     enrollment.status = Enrollment.Status.CONFIRMED
     enrollment.updated_by = user
     enrollment.save(update_fields=['student', 'status', 'updated_by', 'updated_at'])
+    if due_dates:
+        _make_plan(
+            enrollment, due_dates, reason='Set when the enrollment was confirmed.', user=user,
+        )
     EnrollmentHistory.record(
         enrollment=enrollment,
         action=EnrollmentHistory.Action.CONFIRM,
@@ -412,6 +427,7 @@ def confirm_enrollment(enrollment, *, user):
             'status': enrollment.status,
             'student': student.student_id,
             'batch': enrollment.current_batch.coursebatch_id if enrollment.current_batch else None,
+            'due_dates': _parts_json(due_dates or []),
         },
     )
     issue_fee_invoice(enrollment, user=user)
@@ -514,3 +530,127 @@ def add_adjustment(enrollment, *, kind, amount, reason, user):
         after={'amount': str(amount), 'balance': str(enrollment.remaining_amount)},
     )
     return adjustment
+
+
+# ---------------------------------------------------------------- due dates
+
+
+def current_plan(enrollment):
+    """The newest payment plan, or None. Uses the prefetch cache when the view loaded it."""
+    plans = list(enrollment.payment_plans.all())  # newest first
+    return plans[0] if plans else None
+
+
+def _clean_parts(enrollment, parts):
+    """Due dates must add up to the agreed amount. Returns them oldest first."""
+    if not parts:
+        raise ActionRefused('Add at least one due date.')
+    total = sum((Decimal(p['amount']) for p in parts), Decimal('0'))
+    if total != enrollment.agreed_amount:
+        raise ActionRefused(
+            f'The due dates add up to {total}, but the agreed amount is '
+            f'{enrollment.agreed_amount}.'
+        )
+    return sorted(parts, key=lambda p: p['due_on'])
+
+
+def _parts_json(parts):
+    """Due dates as plain values for a history row."""
+    def get(part, key):
+        return part[key] if isinstance(part, dict) else getattr(part, key)
+
+    return [
+        {'due_on': get(p, 'due_on').isoformat(), 'amount': str(get(p, 'amount'))}
+        for p in parts
+    ]
+
+
+def _make_plan(enrollment, parts, *, reason, user):
+    plan = PaymentPlan.objects.create(
+        enrollment=enrollment, reason=reason, branch=enrollment.branch, created_by=user,
+    )
+    for part in parts:
+        Installment.objects.create(plan=plan, due_on=part['due_on'], amount=part['amount'])
+    return plan
+
+
+@transaction.atomic
+def set_due_dates(enrollment, parts, *, reason, user):
+    """Change the due dates, with a reason. The old plan is kept; the new one counts."""
+    enrollment = _lock(enrollment)
+    if enrollment.status not in Enrollment.SEAT_STATUSES:
+        raise ActionRefused('Due dates can be set only on a confirmed enrollment.')
+    parts = _clean_parts(enrollment, parts)
+    old = current_plan(enrollment)
+    _make_plan(enrollment, parts, reason=reason, user=user)
+    EnrollmentHistory.record(
+        enrollment=enrollment,
+        action=EnrollmentHistory.Action.CHANGE_DUE_DATES,
+        reason=reason,
+        performed_by=user,
+        before={'due_dates': _parts_json(old.installments.all()) if old else []},
+        after={'due_dates': _parts_json(parts)},
+    )
+    return enrollment
+
+
+def due_rows(enrollment, *, today=None, paid=None):
+    """What the student has to pay, oldest due date first, and how much of each is paid.
+
+    The rows are the parts of the newest payment plan, plus each extra charge,
+    due on the day it was added. With no plan, the agreed amount is one row
+    with no due date. Payments (less refunds), discounts and write-offs fill
+    the oldest row first.
+
+    Each row: kind ('part' or 'extra_charge'), due_on, amount, paid, left,
+    status ('paid', 'part_paid', 'due' or 'late') and days_late. Pass paid
+    when the caller has already summed the successful payments.
+    """
+    today = today or timezone.localdate()
+    totals = enrollment.adjustment_totals()
+    plan = current_plan(enrollment)
+
+    rows = []
+    if plan:
+        rows += [
+            {'kind': 'part', 'due_on': part.due_on, 'amount': part.amount}
+            for part in plan.installments.all()
+        ]
+    elif enrollment.agreed_amount > 0:
+        rows.append({'kind': 'part', 'due_on': None, 'amount': enrollment.agreed_amount})
+    rows += [
+        {'kind': 'extra_charge', 'due_on': timezone.localdate(a.created_at), 'amount': a.amount}
+        for a in enrollment.adjustments.all()
+        if a.kind == Adjustment.Kind.EXTRA_CHARGE
+    ]
+    # Oldest first; a row with no due date goes last.
+    rows.sort(key=lambda r: (r['due_on'] is None, r['due_on'] or today))
+
+    paid = enrollment.total_paid if paid is None else paid
+    credit = max(
+        Decimal(paid)
+        - totals[Adjustment.Kind.REFUND]
+        + totals[Adjustment.Kind.DISCOUNT]
+        + totals[Adjustment.Kind.WRITE_OFF],
+        Decimal('0'),
+    )
+    for row in rows:
+        filled = min(row['amount'], credit)
+        credit -= filled
+        left = row['amount'] - filled
+        late = left > 0 and row['due_on'] is not None and row['due_on'] < today
+        if left <= 0:
+            status = 'paid'
+        elif late:
+            status = 'late'
+        elif filled > 0:
+            status = 'part_paid'
+        else:
+            status = 'due'
+        row.update(
+            paid=filled,
+            left=left,
+            status=status,
+            days_late=(today - row['due_on']).days if late else 0,
+        )
+    return rows

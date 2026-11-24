@@ -4,6 +4,7 @@ from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, Adjustment,
     EnrollmentHistory, LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, Placement,
+    PaymentPlan, Installment,
 )
 
 
@@ -77,6 +78,25 @@ class PlacementAdmin(ReadOnlyAdmin):
     list_filter = ['kind']
     search_fields = ['enrollment__lead__full_name', 'reason']
     list_select_related = ['enrollment__lead', 'course_batch', 'from_batch', 'created_by']
+
+
+class InstallmentInline(admin.TabularInline):
+    model = Installment
+    fields = ['due_on', 'amount']
+    readonly_fields = fields
+    extra = 0
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(PaymentPlan)
+class PaymentPlanAdmin(ReadOnlyAdmin):
+    list_display = ['id', 'enrollment', 'reason', 'created_by', 'created_at']
+    search_fields = ['enrollment__lead__full_name', 'reason']
+    list_select_related = ['enrollment__lead', 'created_by']
+    inlines = [InstallmentInline]
 
 
 admin.site.register(LearningMode)
