@@ -3,7 +3,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
-from apps.lead.models import LeadSource, LeadType, Lead, LeadCourseInterest
+from apps.lead.enquiries import add_enquiry, open_enquiry_for
+from apps.lead.models import LeadSource, LeadType, Lead
 from apps.course.matching import match_or_create_course
 
 
@@ -67,13 +68,9 @@ def lead_intake(request):
 
     for i, name in enumerate(course_names):
         course, _ = match_or_create_course(name)
-        LeadCourseInterest.objects.create(
-            lead=lead,
-            course=course,
-            course_name=name if not course else None,
-            is_primary=(i == 0),
-            interest_level='high',
-        )
+        if course is not None and open_enquiry_for(lead, course):
+            continue
+        add_enquiry(lead, course=course, course_name=name, is_primary=(i == 0), interest_level='high')
         if i == 0 and course and lead.primary_course_id is None:
             lead.primary_course = course
             lead.save(update_fields=['primary_course', 'lead_score'])

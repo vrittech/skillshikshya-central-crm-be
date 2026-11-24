@@ -125,7 +125,7 @@ class LeadFilter(django_filters.FilterSet):
 class LeadCourseInterestFilter(django_filters.FilterSet):
     class Meta:
         model = LeadCourseInterest
-        fields = ['course', 'is_primary', 'interest_level']
+        fields = ['course', 'is_primary', 'interest_level', 'stage']
 
 
 class EnrollmentFilter(django_filters.FilterSet):

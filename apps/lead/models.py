@@ -7,6 +7,7 @@ from django.db import models
 from django.db.models import Sum, Count, Max
 from django.db.models.fields.json import KeyTextTransform
 from django.db.models.functions import Lower
+from django.utils import timezone
 
 
 class LearningMode(models.Model):
@@ -346,10 +347,36 @@ class Lead(models.Model):
 
 
 class LeadCourseInterest(models.Model):
+    """An enquiry: one person asking about one course.
+
+    Each enquiry has its own stage, counselor and source. The stage changes
+    only through apps.lead.enquiries, which saves an EnquiryStageChange row
+    each time. Won is set when an enrollment for the course is confirmed.
+    """
+
     class InterestLevel(models.TextChoices):
         HIGH = 'high', 'High'
         MEDIUM = 'medium', 'Medium'
         LOW = 'low', 'Low'
+
+    class Stage(models.TextChoices):
+        NEW = 'new', 'New'
+        CONTACTED = 'contacted', 'Contacted'
+        INTERESTED = 'interested', 'Interested'
+        WON = 'won', 'Won'
+        LOST = 'lost', 'Lost'
+
+    class LostReason(models.TextChoices):
+        TOO_EXPENSIVE = 'too_expensive', 'Too expensive'
+        OTHER_INSTITUTE = 'other_institute', 'Chose another institute'
+        TIMING = 'timing', "Timing doesn't suit"
+        NOT_REACHABLE = 'not_reachable', "Can't reach"
+        NOT_INTERESTED = 'not_interested', 'Not interested'
+        OTHER = 'other', 'Other'
+
+    OPEN_STAGES = (Stage.NEW, Stage.CONTACTED, Stage.INTERESTED)
+    # The order an enquiry goes through. Lost can happen at any open stage.
+    FUNNEL = (Stage.NEW, Stage.CONTACTED, Stage.INTERESTED, Stage.WON)
 
     lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name='course_interests')
     course = models.ForeignKey(
@@ -361,7 +388,37 @@ class LeadCourseInterest(models.Model):
     interest_level = models.CharField(
         max_length=10, choices=InterestLevel.choices, default=InterestLevel.MEDIUM,
     )
+    stage = models.CharField(
+        max_length=12, choices=Stage.choices, default=Stage.NEW, db_index=True,
+    )
+    stage_changed_at = models.DateTimeField(default=timezone.now)
+    counselor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='enquiries',
+    )
+    source = models.ForeignKey(
+        LeadSource, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='enquiries',
+    )
+    lost_reason = models.CharField(
+        max_length=20, choices=LostReason.choices, null=True, blank=True,
+    )
+    lost_note = models.TextField(blank=True, default='')
+    # The open stage the enquiry was in when it was lost: where it died.
+    lost_at_stage = models.CharField(
+        max_length=12, choices=Stage.choices, null=True, blank=True,
+    )
+    # The confirmed enrollment that won it.
+    enrollment = models.ForeignKey(
+        'Enrollment', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='enquiries',
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='enquiries_created',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
     branch = models.ForeignKey(
         'branch.Branch', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='course_interests',
@@ -370,10 +427,51 @@ class LeadCourseInterest(models.Model):
     class Meta:
         db_table = 'lead_course_interests'
         ordering = ['-is_primary', '-created_at']
+        constraints = [
+            models.CheckConstraint(
+                check=~models.Q(stage='lost') | models.Q(
+                    lost_reason__isnull=False, lost_at_stage__isnull=False,
+                ),
+                name='lost_enquiry_has_reason_and_stage',
+            ),
+        ]
 
     def __str__(self):
         name = self.course.name if self.course else self.course_name
         return f'{self.lead.full_name} → {name or "?"}'
+
+
+class EnquiryStageChange(models.Model):
+    """One row each time an enquiry's stage changes. Rows are only ever added."""
+
+    enquiry = models.ForeignKey(
+        LeadCourseInterest, on_delete=models.CASCADE, related_name='stage_changes',
+    )
+    from_stage = models.CharField(max_length=12, choices=LeadCourseInterest.Stage.choices)
+    to_stage = models.CharField(max_length=12, choices=LeadCourseInterest.Stage.choices)
+    note = models.TextField(blank=True, default='')
+    # Empty only when the website form or a job made the change.
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        null=True, blank=True, related_name='enquiry_stage_changes',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'enquiry_stage_changes'
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return f'{self.from_stage} → {self.to_stage} on enquiry {self.enquiry_id}'
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValidationError('Stage changes cannot be edited.')
+        self.note = (self.note or '').strip()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Stage changes cannot be deleted.')
 
 
 class Enrollment(models.Model):

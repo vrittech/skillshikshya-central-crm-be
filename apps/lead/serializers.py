@@ -9,7 +9,7 @@ from apps.course.models import Course, CourseBatch
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
-    Adjustment, Placement, ReminderLog, TeamsLicence,
+    Adjustment, Placement, ReminderLog, TeamsLicence, EnquiryStageChange,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
 )
 
@@ -97,15 +97,64 @@ class CitySerializer(serializers.ModelSerializer):
 
 
 class LeadCourseInterestSerializer(serializers.ModelSerializer):
+    """An enquiry. The stage changes only through the stage and lose actions."""
+
     course_name = serializers.SerializerMethodField()
+    stage_display = serializers.CharField(source='get_stage_display', read_only=True)
+    counselor_name = serializers.CharField(source='counselor.name', read_only=True, default=None)
+    source_name = serializers.CharField(source='source.name', read_only=True, default=None)
+    lost_reason_display = serializers.CharField(
+        source='get_lost_reason_display', read_only=True, default=None,
+    )
+    lost_at_stage_display = serializers.CharField(
+        source='get_lost_at_stage_display', read_only=True, default=None,
+    )
+    branch_name = serializers.CharField(source='branch.name', read_only=True, default=None)
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True, default=None)
 
     class Meta:
         model = LeadCourseInterest
         fields = '__all__'
-        read_only_fields = ['lead', 'created_at', 'course_name']
+        read_only_fields = [
+            'lead', 'created_at', 'updated_at', 'course_name', 'stage', 'stage_changed_at',
+            'lost_reason', 'lost_note', 'lost_at_stage', 'enrollment', 'created_by', 'branch',
+        ]
 
     def get_course_name(self, obj):
         return obj.course.name if obj.course else obj.course_name
+
+    def validate_course(self, value):
+        enquiry = self.instance
+        if enquiry is not None and value != enquiry.course and enquiry.stage != 'new':
+            raise serializers.ValidationError(
+                'The course of an enquiry that has moved past New cannot change. '
+                'Mark it lost and add a new enquiry.'
+            )
+        return value
+
+
+class EnquiryStageChangeSerializer(serializers.ModelSerializer):
+    from_stage_display = serializers.CharField(source='get_from_stage_display', read_only=True)
+    to_stage_display = serializers.CharField(source='get_to_stage_display', read_only=True)
+    changed_by_name = serializers.CharField(source='changed_by.name', read_only=True, default=None)
+
+    class Meta:
+        model = EnquiryStageChange
+        fields = [
+            'id', 'from_stage', 'from_stage_display', 'to_stage', 'to_stage_display',
+            'note', 'changed_by', 'changed_by_name', 'created_at',
+        ]
+        read_only_fields = fields
+
+
+class EnquiryStageSerializer(serializers.Serializer):
+    stage = serializers.ChoiceField(choices=LeadCourseInterest.Stage.choices)
+    note = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class EnquiryLostSerializer(serializers.Serializer):
+    reason = serializers.ChoiceField(choices=LeadCourseInterest.LostReason.choices)
+    note = serializers.CharField(required=False, allow_blank=True, default='')
 
 
 class PlacementSerializer(serializers.ModelSerializer):

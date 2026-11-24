@@ -14,7 +14,8 @@ from apps.course.models import Course, CourseBatch
 from apps.invoices.models import Invoice
 from apps.lead.models import (
     Adjustment, Lead, Enrollment, Payment, EnrollmentHistory, Placement, PaymentPlan,
-    Installment, FollowUp, ReminderConfig, ReminderLog, TeamsLicence,
+    Installment, FollowUp, ReminderConfig, ReminderLog, TeamsLicence, LeadCourseInterest,
+    EnquiryStageChange, LeadSource,
 )
 from apps.lead import services
 from apps.lead.seat_backfill import backfill_seats
@@ -1912,3 +1913,185 @@ class TeamsLicenceTests(APITestCase):
         self.client.force_authenticate(clerk)
         self.assertEqual(self._give(self._student(), 'q@x.com').status_code, 403)
         self.assertEqual(self.client.get(self.URL).status_code, 200)
+
+
+class EnquiryTests(SeatTestBase):
+    """One enquiry per course a person asks about, each with its own stage."""
+
+    def setUp(self):
+        super().setUp()
+        self.source = LeadSource.objects.create(name='Facebook')
+        self.counselor = User.objects.create_user(email='c@test.com', name='Counselor', password='pass')
+        self.lead = Lead.objects.create(
+            full_name='Ram Thapa', phone='9800000700', source=self.source,
+            assigned_counselor=self.counselor,
+        )
+
+    def _enquiries_url(self, lead=None):
+        return f'/api/leads/{(lead or self.lead).id}/course-interests/'
+
+    def _add(self, course=None, expect=201, **extra):
+        response = self.client.post(
+            self._enquiries_url(), {'course': (course or self.course).id, **extra}, format='json',
+        )
+        self.assertEqual(response.status_code, expect, response.data)
+        return response.data
+
+    def _act(self, enquiry_id, action, body, expect=200):
+        response = self.client.post(f'{self._enquiries_url()}{enquiry_id}/{action}/', body, format='json')
+        self.assertEqual(response.status_code, expect, response.data)
+        return response.data
+
+    def test_new_enquiry_takes_source_and_counselor_from_the_lead(self):
+        data = self._add()
+        self.assertEqual(data['stage'], 'new')
+        self.assertEqual(data['stage_display'], 'New')
+        self.assertEqual(data['source_name'], 'Facebook')
+        self.assertEqual(data['counselor_name'], 'Counselor')
+        self.assertEqual(data['created_by'], self.admin.id)
+
+    def test_one_open_enquiry_per_course(self):
+        self._add()
+        refused = self._add(expect=400)
+        self.assertEqual(str(refused['detail']), 'Ram Thapa already has an open enquiry for Python.')
+        self._add(course=self.other_course)
+        self.assertEqual(self.lead.course_interests.count(), 2)
+
+    def test_stage_moves_are_kept_in_history(self):
+        enquiry = self._add()
+        self._act(enquiry['id'], 'stage', {'stage': 'contacted'})
+        data = self._act(enquiry['id'], 'stage', {'stage': 'interested', 'note': 'Wants evening'})
+        self.assertEqual(data['stage'], 'interested')
+        history = self.client.get(f"{self._enquiries_url()}{enquiry['id']}/history/").data
+        self.assertEqual(
+            [(h['from_stage'], h['to_stage'], h['note']) for h in history],
+            [('contacted', 'interested', 'Wants evening'), ('new', 'contacted', '')],
+        )
+        self.assertEqual(history[0]['changed_by_name'], 'Admin')
+
+    def test_won_and_same_stage_are_refused(self):
+        enquiry = self._add()
+        refused = self._act(enquiry['id'], 'stage', {'stage': 'won'}, expect=400)
+        self.assertIn('Won is set by confirming', str(refused['detail']))
+        refused = self._act(enquiry['id'], 'stage', {'stage': 'new'}, expect=400)
+        self.assertEqual(str(refused['detail']), 'The enquiry is already new.')
+
+    def test_lost_keeps_reason_and_stage(self):
+        enquiry = self._add()
+        self._act(enquiry['id'], 'stage', {'stage': 'contacted'})
+        refused = self._act(enquiry['id'], 'lose', {'reason': 'other'}, expect=400)
+        self.assertEqual(str(refused['detail']), 'Write the reason in the note.')
+        data = self._act(enquiry['id'], 'lose', {'reason': 'too_expensive', 'note': 'Wants 20k'})
+        self.assertEqual(
+            (data['stage'], data['lost_reason'], data['lost_at_stage'], data['lost_note']),
+            ('lost', 'too_expensive', 'contacted', 'Wants 20k'),
+        )
+        self.assertEqual(data['lost_reason_display'], 'Too expensive')
+        last = EnquiryStageChange.objects.filter(enquiry_id=enquiry['id']).first()
+        self.assertEqual(last.note, 'Too expensive: Wants 20k')
+        self._act(enquiry['id'], 'lose', {'reason': 'timing'}, expect=400)
+
+    def test_reopen_a_lost_enquiry_needs_a_note(self):
+        enquiry = self._add()
+        self._act(enquiry['id'], 'lose', {'reason': 'not_reachable'})
+        refused = self._act(enquiry['id'], 'stage', {'stage': 'contacted'}, expect=400)
+        self.assertEqual(str(refused['detail']), 'Say why the lost enquiry is opened again.')
+        data = self._act(enquiry['id'], 'stage', {'stage': 'contacted', 'note': 'Called back'})
+        self.assertEqual((data['stage'], data['lost_reason'], data['lost_at_stage']), ('contacted', None, None))
+        # A lost enquiry does not block a new one for the same course.
+        self._act(enquiry['id'], 'lose', {'reason': 'timing'})
+        self._add()
+
+    def test_the_stage_cannot_be_set_by_edit(self):
+        enquiry = self._add()
+        url = f"{self._enquiries_url()}{enquiry['id']}/"
+        response = self.client.patch(url, {'stage': 'won', 'interest_level': 'high'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual((response.data['stage'], response.data['interest_level']), ('new', 'high'))
+
+    def test_course_is_fixed_once_past_new(self):
+        enquiry = self._add()
+        url = f"{self._enquiries_url()}{enquiry['id']}/"
+        self.assertEqual(self.client.patch(url, {'course': self.other_course.id}, format='json').status_code, 200)
+        self._act(enquiry['id'], 'stage', {'stage': 'contacted'})
+        response = self.client.patch(url, {'course': self.course.id}, format='json')
+        self.assertEqual(response.status_code, 400)
+
+    def test_only_an_untouched_enquiry_can_be_removed(self):
+        first = self._add()
+        url = f"{self._enquiries_url()}{first['id']}/"
+        self.assertEqual(self.client.delete(url).status_code, 204)
+        second = self._add()
+        self._act(second['id'], 'stage', {'stage': 'contacted'})
+        response = self.client.delete(f"{self._enquiries_url()}{second['id']}/")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Mark it lost instead', str(response.data['detail']))
+
+    def test_history_rows_cannot_change(self):
+        enquiry = self._add()
+        self._act(enquiry['id'], 'stage', {'stage': 'contacted'})
+        row = EnquiryStageChange.objects.get()
+        row.note = 'changed'
+        with self.assertRaises(ValidationError):
+            row.save()
+        with self.assertRaises(ValidationError):
+            row.delete()
+
+    def test_confirming_an_enrollment_wins_the_enquiry(self):
+        enquiry = self._add()
+        enrollment = self._enroll(batch=self.batch, lead=self.lead)
+        self.assertEqual(self._confirm(enrollment).status_code, 200)
+        won = LeadCourseInterest.objects.get(id=enquiry['id'])
+        self.assertEqual((won.stage, won.enrollment), ('won', enrollment))
+        self.assertEqual(won.stage_changes.first().note, 'Enrollment confirmed.')
+        refused = self._act(enquiry['id'], 'lose', {'reason': 'timing'}, expect=400)
+        self.assertIn('Only an open enquiry can be lost', str(refused['detail']))
+
+    def test_a_lost_enquiry_is_won_when_the_person_comes_back(self):
+        enquiry = self._add()
+        self._act(enquiry['id'], 'lose', {'reason': 'too_expensive'})
+        enrollment = self._enroll(lead=self.lead)
+        self._confirm(enrollment)
+        won = LeadCourseInterest.objects.get(id=enquiry['id'])
+        self.assertEqual((won.stage, won.lost_reason, won.enrollment), ('won', 'too_expensive', enrollment))
+
+    def test_a_walk_in_gets_a_won_enquiry(self):
+        enrollment = self._enroll(lead=self.lead)
+        self._confirm(enrollment)
+        won = self.lead.course_interests.get()
+        self.assertEqual((won.stage, won.course, won.source, won.is_primary), ('won', self.course, self.source, True))
+
+    def test_lead_with_a_main_course_gets_a_primary_enquiry(self):
+        response = self.client.patch(
+            f'/api/leads/{self.lead.id}/', {'primary_course': self.course.id}, format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        enquiry = self.lead.course_interests.get()
+        self.assertEqual((enquiry.course, enquiry.is_primary, enquiry.stage), (self.course, True, 'new'))
+        # Changing the main course keeps the old enquiry and marks the new one primary.
+        self.client.patch(f'/api/leads/{self.lead.id}/', {'primary_course': self.other_course.id}, format='json')
+        self.assertEqual(
+            list(self.lead.course_interests.order_by('id').values_list('course__name', 'is_primary')),
+            [('Python', False), ('Java', True)],
+        )
+
+    def test_intake_adds_one_enquiry_per_course(self):
+        response = self.client.post('/api/public/lead-intake/', {
+            'name': 'Web Lead', 'phone_number': '9800000777', 'source_name': 'facebook',
+            'course_interests': 'Python, Java, Python',
+        }, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        lead = Lead.objects.get(id=response.data['id'])
+        self.assertEqual(
+            sorted(lead.course_interests.values_list('course__name', 'source__name', 'stage')),
+            [('Java', 'Facebook', 'new'), ('Python', 'Facebook', 'new')],
+        )
+
+    def test_filter_by_stage(self):
+        first = self._add()
+        self._add(course=self.other_course)
+        self._act(first['id'], 'stage', {'stage': 'contacted'})
+        data = self.client.get(f'{self._enquiries_url()}?stage=contacted').data
+        rows = data['results'] if isinstance(data, dict) else data
+        self.assertEqual([r['id'] for r in rows], [first['id']])
+

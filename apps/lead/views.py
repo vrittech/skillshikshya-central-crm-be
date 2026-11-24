@@ -28,6 +28,7 @@ from apps.lead.serializers import (
     LeadCourseInterestSerializer, EnrollmentSerializer, PaymentSerializer,
     EnrollmentHistorySerializer, ReasonSerializer, AdjustmentSerializer, SeatActionSerializer,
     DueDatesSerializer, ReminderLogSerializer, GiveLicenceSerializer, TeamsLicenceSerializer,
+    EnquiryStageChangeSerializer, EnquiryStageSerializer, EnquiryLostSerializer,
     LeadCallSerializer, LeadActivitySerializer, FollowUpSerializer,
     LeadDocumentSerializer, NotificationSerializer,
     LeadListSerializer, LeadMinSerializer,
@@ -207,10 +208,16 @@ class LeadViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        from apps.lead.enquiries import ensure_primary_enquiry
+
+        lead = serializer.save(created_by=self.request.user)
+        ensure_primary_enquiry(lead, user=self.request.user)
 
     def perform_update(self, serializer):
-        serializer.save(updated_by=self.request.user)
+        from apps.lead.enquiries import ensure_primary_enquiry
+
+        lead = serializer.save(updated_by=self.request.user)
+        ensure_primary_enquiry(lead, user=self.request.user)
 
     def perform_destroy(self, instance):
         instance.is_deleted = True
@@ -434,17 +441,76 @@ class LeadCourseInterestViewSet(viewsets.ModelViewSet):
     ordering = ['-is_primary', '-created_at']
 
     def get_queryset(self):
-        return LeadCourseInterest.objects.filter(lead_id=self.kwargs['lead_pk']).select_related('course')
-
-    def perform_create(self, serializer):
-        serializer.save(lead_id=self.kwargs['lead_pk'])
+        return LeadCourseInterest.objects.filter(lead_id=self.kwargs['lead_pk']).select_related(
+            'course', 'counselor', 'source', 'branch', 'created_by',
+        )
 
     def get_permissions(self):
+        if self.action in ['stage', 'lose']:
+            return [IsAuthenticated(), needs('lead.change_leadcourseinterest')()]
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            permission_classes = [IsAuthenticated, IsStaffOrHasPermission]
-        else:
-            permission_classes = [IsAuthenticated]
-        return [p() for p in permission_classes]
+            return [IsAuthenticated(), IsStaffOrHasPermission()]
+        return [IsAuthenticated()]
+
+    def _reply(self, enquiry, status_code=200):
+        enquiry = self.get_queryset().get(pk=enquiry.pk)
+        return Response(LeadCourseInterestSerializer(enquiry).data, status=status_code)
+
+    def create(self, request, *args, **kwargs):
+        from apps.lead.enquiries import add_enquiry
+
+        lead = get_object_or_404(Lead, pk=self.kwargs['lead_pk'], is_deleted=False)
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        enquiry = add_enquiry(
+            lead,
+            course=data.get('course'),
+            course_name=data.get('course_name'),
+            user=request.user,
+            source=data.get('source'),
+            counselor=data.get('counselor'),
+            is_primary=data.get('is_primary', False),
+            interest_level=data.get('interest_level'),
+        )
+        return self._reply(enquiry, status.HTTP_201_CREATED)
+
+    def perform_destroy(self, instance):
+        from apps.lead.services import ActionRefused
+
+        if instance.stage != LeadCourseInterest.Stage.NEW or instance.stage_changes.exists():
+            raise ActionRefused('This enquiry has moved past New, so it is kept. Mark it lost instead.')
+        instance.delete()
+
+    @action(detail=True, methods=['post'])
+    def stage(self, request, *args, **kwargs):
+        """Move to New, Contacted or Interested. A lost enquiry needs a note to come back."""
+        from apps.lead.enquiries import move_stage
+
+        body = EnquiryStageSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        enquiry = move_stage(
+            self.get_object(), body.validated_data['stage'],
+            note=body.validated_data['note'], user=request.user,
+        )
+        return self._reply(enquiry)
+
+    @action(detail=True, methods=['post'])
+    def lose(self, request, *args, **kwargs):
+        from apps.lead.enquiries import mark_lost
+
+        body = EnquiryLostSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        enquiry = mark_lost(
+            self.get_object(), reason=body.validated_data['reason'],
+            note=body.validated_data['note'], user=request.user,
+        )
+        return self._reply(enquiry)
+
+    @action(detail=True, methods=['get'])
+    def history(self, request, *args, **kwargs):
+        changes = self.get_object().stage_changes.select_related('changed_by')
+        return Response(EnquiryStageChangeSerializer(changes, many=True).data)
 
 
 class EnrollmentViewSet(viewsets.ModelViewSet):

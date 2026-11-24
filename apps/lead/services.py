@@ -430,6 +430,9 @@ def confirm_enrollment(enrollment, *, user, due_dates=None):
     enrollment.status = Enrollment.Status.CONFIRMED
     enrollment.updated_by = user
     enrollment.save(update_fields=['student', 'status', 'updated_by', 'updated_at'])
+    from apps.lead.enquiries import win_for_enrollment
+
+    win_for_enrollment(enrollment, user=user)
     if due_dates:
         _make_plan(
             enrollment, due_dates, reason='Set when the enrollment was confirmed.', user=user,

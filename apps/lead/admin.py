@@ -5,6 +5,7 @@ from apps.lead.models import (
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, Adjustment,
     EnrollmentHistory, LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, Placement,
     PaymentPlan, Installment, ReminderConfig, ReminderLog, TeamsConfig, TeamsLicence,
+    EnquiryStageChange,
 )
 
 
@@ -149,9 +150,26 @@ admin.site.register(LeadPriority)
 admin.site.register(LeadTag)
 admin.site.register(LeadType)
 admin.site.register(Lead, LeadAdmin)
-admin.site.register(LeadCourseInterest)
 admin.site.register(LeadCall)
 admin.site.register(LeadActivity)
 admin.site.register(FollowUp)
 admin.site.register(LeadDocument)
 admin.site.register(Notification)
+
+
+@admin.register(LeadCourseInterest)
+class EnquiryAdmin(admin.ModelAdmin):
+    """The stage changes only in the app, so it is shown here but not edited."""
+
+    list_display = ['lead', 'course', 'stage', 'counselor', 'source', 'branch', 'created_at']
+    list_filter = ['stage', 'lost_reason', 'branch']
+    search_fields = ['lead__full_name', 'lead__phone', 'course__name', 'course_name']
+    readonly_fields = [
+        'stage', 'stage_changed_at', 'lost_reason', 'lost_note', 'lost_at_stage', 'enrollment',
+    ]
+
+
+@admin.register(EnquiryStageChange)
+class EnquiryStageChangeAdmin(ReadOnlyAdmin):
+    list_display = ['enquiry', 'from_stage', 'to_stage', 'changed_by', 'created_at']
+    list_filter = ['to_stage']
