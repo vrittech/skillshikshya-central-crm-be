@@ -296,6 +296,9 @@ class Lead(models.Model):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._original_assigned_counselor_id = self.assigned_counselor_id
+        self._original_status_id = self.status_id
+        # Who is saving; set by the view or the admin. Empty = a job or the shell.
+        self._changed_by = None
 
     def compute_lead_score(self):
         if not self.pk:
@@ -343,7 +346,78 @@ class Lead(models.Model):
                 seq = int(last.reference_number.split('-')[-1]) + 1
             self.reference_number = f'{prefix}-{seq:06d}'
         self.lead_score = self.compute_lead_score()
+        adding = self._state.adding
         super().save(*args, **kwargs)
+        if not adding:
+            self._record_changes(kwargs.get('update_fields'))
+        self._original_status_id = self.status_id
+        self._original_assigned_counselor_id = self.assigned_counselor_id
+
+    def refresh_from_db(self, *args, **kwargs):
+        super().refresh_from_db(*args, **kwargs)
+        if kwargs.get('fields') is None and not args[1:]:
+            self._original_status_id = self.status_id
+            self._original_assigned_counselor_id = self.assigned_counselor_id
+
+    def _record_changes(self, update_fields):
+        """A LeadChange row for a new status or counselor (see LeadChange)."""
+        saved = None if update_fields is None else set(update_fields)
+        tracked = [
+            (LeadChange.Field.STATUS, 'status', self._original_status_id, self.status_id, LeadStatus),
+            (
+                LeadChange.Field.COUNSELOR, 'assigned_counselor',
+                self._original_assigned_counselor_id, self.assigned_counselor_id,
+                type(self)._meta.get_field('assigned_counselor').related_model,
+            ),
+        ]
+        for field, name, old_id, new_id, model in tracked:
+            if old_id == new_id or (saved is not None and not saved & {name, f'{name}_id'}):
+                continue
+            names = dict(model.objects.filter(pk__in=[old_id, new_id]).values_list('pk', 'name'))
+            LeadChange.objects.create(
+                lead=self, field=field,
+                from_value=names.get(old_id, ''), to_value=names.get(new_id, ''),
+                changed_by=self._changed_by,
+            )
+
+
+class LeadChange(models.Model):
+    """One row each time a lead's status or counselor changes. Rows are only ever added.
+
+    Lead.save() writes them, so every way of editing a lead is covered. The
+    names are kept as they were then, so a renamed status or user doesn't
+    rewrite the past.
+    """
+
+    class Field(models.TextChoices):
+        STATUS = 'status', 'Status'
+        COUNSELOR = 'counselor', 'Counselor'
+
+    lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name='changes')
+    field = models.CharField(max_length=10, choices=Field.choices)
+    from_value = models.CharField(max_length=255, blank=True, default='')
+    to_value = models.CharField(max_length=255, blank=True, default='')
+    # Empty when a job or the shell made the change.
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        null=True, blank=True, related_name='lead_changes',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'lead_changes'
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return f'{self.get_field_display()}: {self.from_value} → {self.to_value} on lead {self.lead_id}'
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValidationError('Lead changes cannot be edited.')
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Lead changes cannot be deleted.')
 
 
 class LeadCourseInterest(models.Model):

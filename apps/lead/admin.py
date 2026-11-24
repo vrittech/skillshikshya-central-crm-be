@@ -5,7 +5,7 @@ from apps.lead.models import (
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, Adjustment,
     EnrollmentHistory, LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, Placement,
     PaymentPlan, Installment, ReminderConfig, ReminderLog, TeamsConfig, TeamsLicence,
-    EnquiryStageChange, VoiceNote,
+    EnquiryStageChange, VoiceNote, LeadChange,
 )
 
 
@@ -33,6 +33,10 @@ class LeadAdmin(admin.ModelAdmin):
     ]
     list_filter = ['lead_type', 'source', 'status', 'priority', 'is_converted', 'is_archived', 'is_deleted']
     search_fields = ['full_name', 'reference_number', 'phone', 'email']
+
+    def save_model(self, request, obj, form, change):
+        obj._changed_by = request.user
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(Enrollment)
@@ -181,3 +185,9 @@ class VoiceNoteAdmin(ReadOnlyAdmin):
 
     list_display = ['id', 'lead', 'enquiry', 'duration_seconds', 'created_by', 'created_at']
     list_select_related = ['lead', 'enquiry', 'created_by']
+
+
+@admin.register(LeadChange)
+class LeadChangeAdmin(ReadOnlyAdmin):
+    list_display = ['lead', 'field', 'from_value', 'to_value', 'changed_by', 'created_at']
+    list_filter = ['field']

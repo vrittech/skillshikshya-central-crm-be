@@ -11,8 +11,8 @@ so the screen can show one kind at a time.
 """
 from apps.invoices.models import Invoice
 from apps.lead.models import (
-    EnquiryStageChange, EnrollmentHistory, FollowUp, LeadActivity, LeadCall, LeadDocument,
-    Payment, ReminderLog, VoiceNote,
+    EnquiryStageChange, EnrollmentHistory, FollowUp, LeadActivity, LeadCall, LeadChange,
+    LeadDocument, Payment, ReminderLog, VoiceNote,
 )
 
 KINDS = [
@@ -77,6 +77,13 @@ def lead_timeline(lead):
             by=_name(lead.created_by),
         ),
     ]
+
+    for c in LeadChange.objects.filter(lead=lead).select_related('changed_by'):
+        label = c.get_field_display()
+        items.append(_item(
+            'lead', f'change-{c.pk}', c.created_at, f'{label} changed',
+            by=_name(c.changed_by), before={label: c.from_value}, after={label: c.to_value},
+        ))
 
     for e in lead.course_interests.select_related('course', 'created_by', 'source'):
         items.append(_item(

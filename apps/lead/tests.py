@@ -2403,3 +2403,73 @@ class LeadTimelineTests(SeatTestBase):
         )
         self.client.force_authenticate(outsider)
         self.assertEqual(self.client.get(f'/api/leads/{lead.id}/timeline/').status_code, 404)
+
+
+class LeadChangeTests(APITestCase):
+    """Each status or counselor change on a lead leaves a row, shown in the lead's history."""
+
+    def setUp(self):
+        from apps.lead.models import LeadStatus
+
+        self.admin = User.objects.create_user(
+            email='changes@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+        self.new = LeadStatus.objects.create(name='New', sort_order=1)
+        self.contacted = LeadStatus.objects.create(name='Contacted', sort_order=2)
+        self.sita = User.objects.create_user(email='sita@test.com', name='Sita', password='pass')
+        self.hari = User.objects.create_user(email='hari@test.com', name='Hari', password='pass')
+        self.lead = Lead.objects.create(
+            full_name='Ram Thapa', phone='9800000950', status=self.new, assigned_counselor=self.sita,
+        )
+
+    def _patch(self, **body):
+        response = self.client.patch(f'/api/leads/{self.lead.id}/', body, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def _rows(self):
+        from apps.lead.models import LeadChange
+
+        return list(
+            LeadChange.objects.filter(lead=self.lead).order_by('id')
+            .values_list('field', 'from_value', 'to_value', 'changed_by__name')
+        )
+
+    def test_status_and_counselor_changes_are_recorded_with_who(self):
+        self._patch(status=self.contacted.id)
+        self._patch(assigned_counselor=self.hari.id)
+        self.assertEqual(self._rows(), [
+            ('status', 'New', 'Contacted', 'Admin'),
+            ('counselor', 'Sita', 'Hari', 'Admin'),
+        ])
+
+    def test_no_row_when_nothing_tracked_changes(self):
+        self._patch(status=self.new.id, notes='Called back')
+        self.lead.refresh_from_db()
+        self.lead.save(update_fields=['lead_score'])
+        self.assertEqual(self._rows(), [])
+
+    def test_a_change_from_the_shell_has_no_user_and_a_reload_is_not_a_change(self):
+        Lead.objects.filter(pk=self.lead.pk).update(status=self.contacted)
+        self.lead.refresh_from_db()
+        self.lead.save()
+        self.assertEqual(self._rows(), [])
+        self.lead.assigned_counselor = None
+        self.lead.save()
+        self.assertEqual(self._rows(), [('counselor', 'Sita', '', None)])
+
+    def test_rows_cannot_be_changed_and_show_in_the_history(self):
+        from apps.lead.models import LeadChange
+
+        self._patch(status=self.contacted.id)
+        row = LeadChange.objects.get()
+        with self.assertRaises(ValidationError):
+            row.save()
+        with self.assertRaises(ValidationError):
+            row.delete()
+        items = self.client.get(f'/api/leads/{self.lead.id}/timeline/', {'kind': 'lead'}).data['results']
+        changed = next(i for i in items if i['title'] == 'Status changed')
+        self.assertEqual(
+            (changed['before'], changed['after'], changed['by']),
+            ({'Status': 'New'}, {'Status': 'Contacted'}, 'Admin'),
+        )

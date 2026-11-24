@@ -257,6 +257,7 @@ class LeadViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         from apps.lead.enquiries import ensure_primary_enquiry
 
+        serializer.instance._changed_by = self.request.user
         lead = serializer.save(updated_by=self.request.user)
         ensure_primary_enquiry(lead, user=self.request.user)
 
