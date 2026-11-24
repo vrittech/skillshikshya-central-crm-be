@@ -1,5 +1,6 @@
-from django.db import models
 from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.db import models
 from django.utils import timezone
 
 
@@ -169,3 +170,70 @@ class CourseBatch(models.Model):
         if exclude is not None:
             seated = seated.exclude(pk=exclude.pk)
         return seated.count()
+
+
+class BatchCost(models.Model):
+    """A cost of running a batch: trainer, venue, licences or other.
+
+    Rows are only ever added. A wrong cost is voided with a reason
+    (services.void_cost) and a new one added; it is never edited or deleted.
+    """
+
+    class Kind(models.TextChoices):
+        TRAINER = 'trainer', 'Trainer'
+        VENUE = 'venue', 'Venue'
+        LICENCES = 'licences', 'Licences'
+        OTHER = 'other', 'Other'
+
+    # The only fields a void may set, once.
+    VOID_FIELDS = {'voided_at', 'voided_by', 'void_reason'}
+
+    course_batch = models.ForeignKey(
+        CourseBatch, on_delete=models.PROTECT, related_name='costs',
+    )
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    spent_on = models.DateField()
+    note = models.TextField(blank=True, default='')
+    branch = models.ForeignKey(
+        'branch.Branch', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='batch_costs',
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='batch_costs_added',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    voided_at = models.DateTimeField(null=True, blank=True)
+    voided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        null=True, blank=True, related_name='batch_costs_voided',
+    )
+    void_reason = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'course_batch_costs'
+        ordering = ['-spent_on', '-id']
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(amount__gt=0), name='batch_cost_amount_positive',
+            ),
+            models.CheckConstraint(
+                check=models.Q(voided_at__isnull=True) | (
+                    models.Q(void_reason__isnull=False) & ~models.Q(void_reason='')
+                ),
+                name='batch_cost_void_reason_required',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.get_kind_display()} {self.amount} on {self.course_batch_id}'
+
+    def save(self, *args, **kwargs):
+        update_fields = kwargs.get('update_fields')
+        if self.pk is not None and not (update_fields and set(update_fields) <= self.VOID_FIELDS):
+            raise ValidationError('Costs cannot be changed. Void it with a reason and add a new one.')
+        self.note = (self.note or '').strip()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Costs cannot be deleted. Void it with a reason.')

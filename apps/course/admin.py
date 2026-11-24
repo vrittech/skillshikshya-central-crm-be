@@ -1,5 +1,7 @@
 from django.contrib import admin
-from apps.course.models import Course, Batch, CourseBatch, CourseCategory
+
+from apps.course.models import Batch, BatchCost, Course, CourseBatch, CourseCategory
+from apps.lead.admin import ReadOnlyAdmin
 
 
 class CourseAdmin(admin.ModelAdmin):
@@ -29,7 +31,14 @@ class CourseCategoryAdmin(admin.ModelAdmin):
     search_fields = ['name']
 
 
+class BatchCostAdmin(ReadOnlyAdmin):
+    list_display = ['course_batch', 'kind', 'amount', 'spent_on', 'created_by', 'voided_at']
+    list_filter = ['kind']
+    search_fields = ['course_batch__coursebatch_id', 'course_batch__name', 'note']
+
+
 admin.site.register(Course, CourseAdmin)
 admin.site.register(Batch, BatchAdmin)
 admin.site.register(CourseBatch, CourseBatchAdmin)
 admin.site.register(CourseCategory, CourseCategoryAdmin)
+admin.site.register(BatchCost, BatchCostAdmin)

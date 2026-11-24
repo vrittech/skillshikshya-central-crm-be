@@ -15,7 +15,7 @@ class ReportViewSet(viewsets.ViewSet):
             'overview', 'leads-by-status', 'leads-by-source', 'leads-by-type',
             'leads-by-branch', 'leads-by-campaign', 'leads-by-counselor',
             'lead-trend', 'revenue', 'enrollments', 'conversion',
-            'counselor-performance', 'who-owes', 'due-in-month',
+            'counselor-performance', 'who-owes', 'due-in-month', 'batch-profit',
         ]})
 
     @action(detail=False, methods=['get'])
@@ -73,3 +73,7 @@ class ReportViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='due-in-month')
     def due_in_month(self, request):
         return Response(services.due_in_month_report(request))
+
+    @action(detail=False, methods=['get'], url_path='batch-profit')
+    def batch_profit(self, request):
+        return Response(services.batch_profit_report(request))

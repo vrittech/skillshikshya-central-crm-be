@@ -1,5 +1,9 @@
+from decimal import Decimal
+
+from django.utils import timezone
 from rest_framework import serializers
-from apps.course.models import Course, Batch, CourseBatch, CourseCategory
+
+from apps.course.models import Course, Batch, BatchCost, CourseBatch, CourseCategory
 
 
 class CourseSerializer(serializers.ModelSerializer):
@@ -84,3 +88,29 @@ class CourseBatchSerializer(serializers.ModelSerializer):
                 'Students are enrolled in this batch, so its course cannot change.'
             )
         return value
+
+
+class BatchCostSerializer(serializers.ModelSerializer):
+    kind_display = serializers.CharField(source='get_kind_display', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True)
+    voided_by_name = serializers.CharField(source='voided_by.name', read_only=True, default=None)
+
+    class Meta:
+        model = BatchCost
+        fields = [
+            'id', 'course_batch', 'kind', 'kind_display', 'amount', 'spent_on', 'note',
+            'created_by', 'created_by_name', 'created_at',
+            'voided_at', 'voided_by', 'voided_by_name', 'void_reason',
+        ]
+        read_only_fields = fields
+
+
+class AddCostSerializer(serializers.Serializer):
+    kind = serializers.ChoiceField(choices=BatchCost.Kind.choices)
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0.01'))
+    spent_on = serializers.DateField(required=False)
+    note = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        attrs.setdefault('spent_on', timezone.localdate())
+        return attrs

@@ -2,7 +2,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
-from django.db.models import Count, Prefetch, Q, Sum
+from django.db.models import Count, F, Prefetch, Q, Sum
 from django.db.models.functions import Coalesce, TruncDate, TruncMonth, TruncWeek
 from django.utils import timezone
 
@@ -12,6 +12,8 @@ from apps.lead.models import (
 )
 from apps.lead.services import due_rows
 from apps.callminutes.models import CallMinutesTransaction
+from apps.course.models import CourseBatch
+from apps.course.money import MONEY_FIELDS, batch_figures, empty_figures, figures_json
 from apps.student.models import Student
 
 User = get_user_model()
@@ -761,4 +763,53 @@ def due_in_month_report(request):
             }
             for r in results
         ],
+    }
+
+
+# ---------------------------------------------------------------- batch profit
+
+
+def _batch_row(batch, figures):
+    return {
+        'batch': batch.pk,
+        'coursebatch_id': batch.coursebatch_id,
+        'name': batch.name,
+        'course_name': batch.course.name,
+        'status': batch.status,
+        'status_display': batch.get_status_display(),
+        'start_date': batch.start_date.isoformat() if batch.start_date else None,
+        'end_date': batch.end_date.isoformat() if batch.end_date else None,
+        **figures_json(figures),
+    }
+
+
+def batch_profit_report(request):
+    """Each batch's fees, collected, owed, costs and profit, newest batch first.
+
+    Money counts on the batch the student first joined. Optional filters:
+    course, status.
+    """
+    branch_id = _branch_scope(request)
+    batches = CourseBatch.objects.select_related('course')
+    if branch_id:
+        batches = batches.filter(branch_id=branch_id)
+    course = _query_param(request, 'course')
+    if course and str(course).isdigit():
+        batches = batches.filter(course_id=int(course))
+    status = _query_param(request, 'status')
+    if status:
+        if status not in CourseBatch.Status.values:
+            return {'error': f'Unknown status: {status}.'}
+        batches = batches.filter(status=status)
+    batches = list(batches.order_by(F('start_date').desc(nulls_last=True), '-id'))
+
+    figures = batch_figures([b.pk for b in batches])
+    total = empty_figures()
+    for f in figures.values():
+        total['students'] += f['students']
+        for name in MONEY_FIELDS:
+            total[name] += f[name]
+    return {
+        'summary': {'batches': len(batches), **figures_json(total)},
+        'results': [_batch_row(b, figures[b.pk]) for b in batches],
     }
