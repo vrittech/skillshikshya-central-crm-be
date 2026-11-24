@@ -460,7 +460,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         return Enrollment.objects.filter(lead_id=self.kwargs['lead_pk']).select_related(
             'course', 'student', 'batch', 'current_batch', 'created_by', 'updated_by',
         ).prefetch_related(
-            'payments', 'adjustments', 'payment_plans__installments',
+            'payments', 'adjustments', 'payment_plans__installments', 'invoices',
             'placements__course_batch', 'placements__from_batch', 'placements__created_by',
         )
 
@@ -476,7 +476,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in [
             'create', 'update', 'partial_update', 'destroy', 'confirm', 'cancel', 'reinstate',
-            'join_batch', 'move', 'pause', 'resume', 'due_dates',
+            'join_batch', 'move', 'pause', 'resume', 'due_dates', 'fee_invoice',
         ]:
             permission_classes = [IsAuthenticated, IsStaffOrHasPermission]
         else:
@@ -501,6 +501,14 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
             enrollment, user=request.user, due_dates=body.validated_data.get('due_dates'),
         )
         return self._fresh_reply(enrollment)
+
+    @action(detail=True, methods=['post'], url_path='fee-invoice')
+    def fee_invoice(self, request, *args, **kwargs):
+        """Make a new fee invoice when the old one was cancelled."""
+        from apps.invoices.serializers import InvoiceSerializer
+
+        invoice = services.reissue_fee_invoice(self.get_object(), user=request.user)
+        return Response(InvoiceSerializer(invoice).data, status=201)
 
     @action(detail=True, methods=['post'], url_path='due-dates')
     def due_dates(self, request, *args, **kwargs):

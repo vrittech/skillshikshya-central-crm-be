@@ -1535,3 +1535,33 @@ class DueDateTests(SeatTestBase):
             plan.save()
         with self.assertRaises(ValidationError):
             plan.delete()
+
+
+class ReissueFeeInvoiceTests(SeatTestBase):
+    """A new fee invoice can be made once the old one is cancelled."""
+
+    def test_a_new_fee_invoice_after_the_old_one_is_cancelled(self):
+        enrollment = self._enroll()
+        self._confirm(enrollment)
+        url = self._url(enrollment, 'fee-invoice/')
+        self.assertTrue(self.client.get(self._url(enrollment)).data['has_fee_invoice'])
+
+        response = self.client.post(url)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data['detail'], 'This enrollment already has an active fee invoice.')
+
+        old = Invoice.objects.get(enrollment=enrollment, type='enrollment')
+        self.client.post(f'/api/invoices/{old.id}/cancel/', {'reason': 'Wrong name'}, format='json')
+        self.assertFalse(self.client.get(self._url(enrollment)).data['has_fee_invoice'])
+
+        response = self.client.post(url)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertNotEqual(response.data['invoice_number'], old.invoice_number)
+        self.assertEqual(response.data['amount'], '30000.00')
+        self.assertTrue(self.client.get(self._url(enrollment)).data['has_fee_invoice'])
+
+    def test_a_pending_enrollment_gets_no_fee_invoice(self):
+        enrollment = self._enroll()
+        response = self.client.post(self._url(enrollment, 'fee-invoice/'))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Invoice.objects.exists())

@@ -370,6 +370,18 @@ def issue_fee_invoice(enrollment, *, user):
 
 
 @transaction.atomic
+def reissue_fee_invoice(enrollment, *, user):
+    """Make a new fee invoice after the old one was cancelled."""
+    enrollment = _lock(enrollment)
+    if enrollment.status not in Enrollment.SEAT_STATUSES:
+        raise ActionRefused('A fee invoice is made only for a confirmed enrollment.')
+    invoice = issue_fee_invoice(enrollment, user=user)
+    if invoice is None:
+        raise ActionRefused('This enrollment already has an active fee invoice.')
+    return invoice
+
+
+@transaction.atomic
 def confirm_enrollment(enrollment, *, user, due_dates=None):
     """Confirm a pending enrollment: the moment a lead becomes a student.
 

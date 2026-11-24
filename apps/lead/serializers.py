@@ -187,6 +187,7 @@ class EnrollmentSerializer(serializers.ModelSerializer):
     seat_state = serializers.SerializerMethodField()
     placements = PlacementSerializer(many=True, read_only=True)
     due_dates = serializers.SerializerMethodField()
+    has_fee_invoice = serializers.SerializerMethodField()
     total_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     extra_charges_total = serializers.DecimalField(
         max_digits=12, decimal_places=2, read_only=True,
@@ -225,6 +226,12 @@ class EnrollmentSerializer(serializers.ModelSerializer):
         if obj.status not in Enrollment.SEAT_STATUSES:
             return []
         return DueRowSerializer(due_rows(obj), many=True).data
+
+    def get_has_fee_invoice(self, obj):
+        """True when the enrollment has an active course-fee invoice."""
+        return any(
+            i.type == 'enrollment' and i.status == 'active' for i in obj.invoices.all()
+        )
 
     def get_seat_state(self, obj):
         """'seated', 'paused' or 'none'. Uses the prefetched seat history."""
