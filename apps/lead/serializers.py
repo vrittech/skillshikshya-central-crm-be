@@ -9,7 +9,7 @@ from apps.course.models import Course, CourseBatch
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
-    Adjustment,
+    Adjustment, Placement,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
 )
 
@@ -108,6 +108,43 @@ class LeadCourseInterestSerializer(serializers.ModelSerializer):
         return obj.course.name if obj.course else obj.course_name
 
 
+class PlacementSerializer(serializers.ModelSerializer):
+    """One row of an enrollment's seat history."""
+
+    kind_display = serializers.CharField(source='get_kind_display', read_only=True)
+    course_batch_name = serializers.CharField(source='course_batch.name', read_only=True)
+    from_batch_name = serializers.CharField(source='from_batch.name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True)
+
+    class Meta:
+        model = Placement
+        fields = [
+            'id', 'kind', 'kind_display', 'course_batch', 'course_batch_name',
+            'from_batch', 'from_batch_name', 'started_on', 'reason',
+            'created_by', 'created_by_name', 'created_at',
+        ]
+        read_only_fields = fields
+
+
+class SeatActionSerializer(serializers.Serializer):
+    """Body of Join batch, Move, Pause and Resume.
+
+    Join, Move and Resume need a batch. Move, Pause and Resume need a reason.
+    started_on is the day the change takes effect (today if left out).
+    """
+
+    batch = serializers.PrimaryKeyRelatedField(queryset=CourseBatch.objects.all())
+    reason = serializers.CharField()
+    started_on = serializers.DateField(required=False)
+
+    def __init__(self, *args, needs_batch=True, needs_reason=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not needs_batch:
+            self.fields.pop('batch')
+        if not needs_reason:
+            self.fields['reason'] = serializers.CharField(required=False, allow_blank=True)
+
+
 class EnrollmentSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source='course.name', read_only=True)
     lead_name = serializers.CharField(source='lead.full_name', read_only=True)
@@ -115,6 +152,8 @@ class EnrollmentSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source='created_by.name', read_only=True)
     batch_name = serializers.CharField(source='batch.name', read_only=True)
     current_batch_name = serializers.CharField(source='current_batch.name', read_only=True)
+    seat_state = serializers.SerializerMethodField()
+    placements = PlacementSerializer(many=True, read_only=True)
     total_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     extra_charges_total = serializers.DecimalField(
         max_digits=12, decimal_places=2, read_only=True,
@@ -145,6 +184,13 @@ class EnrollmentSerializer(serializers.ModelSerializer):
             enrollment.status == Enrollment.Status.PENDING
             and not enrollment.payments.filter(status=Payment.Status.SUCCESSFUL).exists()
         )
+
+    def get_seat_state(self, obj):
+        """'seated', 'paused' or 'none'. Uses the prefetched seat history."""
+        if obj.current_batch_id:
+            return 'seated'
+        rows = list(obj.placements.all())  # newest first
+        return 'paused' if rows and rows[0].kind == Placement.Kind.PAUSE else 'none'
 
     def _changed(self, attrs, field):
         return field in attrs and attrs[field] != getattr(self.instance, field)
@@ -475,6 +521,7 @@ class GlobalEnrollmentSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source='course.name', read_only=True)
     branch_name = serializers.CharField(source='branch.name', read_only=True)
     batch_name = serializers.CharField(source='batch.name', read_only=True)
+    current_batch_name = serializers.CharField(source='current_batch.name', read_only=True)
     total_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     remaining_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     is_full_paid = serializers.BooleanField(read_only=True)
@@ -485,7 +532,8 @@ class GlobalEnrollmentSerializer(serializers.ModelSerializer):
             'id', 'lead', 'lead_name',
             'student', 'student_name',
             'course', 'course_name',
-            'batch', 'batch_name', 'status', 'enrollment_date',
+            'batch', 'batch_name', 'current_batch', 'current_batch_name',
+            'status', 'enrollment_date',
             'listed_fee', 'agreed_amount',
             'total_paid', 'remaining_amount', 'is_full_paid',
             'branch', 'branch_name',

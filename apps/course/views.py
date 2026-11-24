@@ -1,5 +1,7 @@
 from django.db.models import Count, Q
 from rest_framework import viewsets
+from rest_framework.decorators import action
+from rest_framework.response import Response
 from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.permissions import IsAuthenticated
 
@@ -81,8 +83,15 @@ class BatchViewSet(viewsets.ModelViewSet):
 class CourseBatchViewSet(viewsets.ModelViewSet):
     queryset = CourseBatch.objects.all()
     serializer_class = CourseBatchSerializer
+    pagination_class = CustomPagination
+    filterset_class = CourseBatchFilter
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, BranchFilterBackend]
+    search_fields = ['name', 'coursebatch_id']
+    ordering_fields = ['id', 'name', 'coursebatch_id', 'start_date', 'end_date']
+    ordering = ['-created_at']
 
     def get_queryset(self):
+        """Batches with their seat counts, counted in the same query."""
         from apps.lead.models import Enrollment
 
         return CourseBatch.objects.select_related('course', 'batch', 'created_by').annotate(
@@ -97,12 +106,6 @@ class CourseBatchViewSet(viewsets.ModelViewSet):
                 distinct=True,
             ),
         )
-    pagination_class = CustomPagination
-    filterset_class = CourseBatchFilter
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, BranchFilterBackend]
-    search_fields = ['name', 'coursebatch_id']
-    ordering_fields = ['id', 'name', 'coursebatch_id', 'start_date', 'end_date']
-    ordering = ['-created_at']
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -113,3 +116,10 @@ class CourseBatchViewSet(viewsets.ModelViewSet):
         else:
             permission_classes = [IsAuthenticated]
         return [p() for p in permission_classes]
+
+    @action(detail=True, methods=['get'])
+    def students(self, request, *args, **kwargs):
+        """Who sits in this batch now, who moved in from another batch, and who is paused."""
+        from apps.lead.services import batch_students
+
+        return Response(batch_students(self.get_object()))

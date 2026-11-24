@@ -26,7 +26,7 @@ from apps.lead.serializers import (
     LeadSourceSerializer, CampaignSerializer, LeadStatusSerializer,
     LeadPrioritySerializer, LeadTagSerializer, LeadTypeSerializer, LeadSerializer,
     LeadCourseInterestSerializer, EnrollmentSerializer, PaymentSerializer,
-    EnrollmentHistorySerializer, ReasonSerializer, AdjustmentSerializer,
+    EnrollmentHistorySerializer, ReasonSerializer, AdjustmentSerializer, SeatActionSerializer,
     LeadCallSerializer, LeadActivitySerializer, FollowUpSerializer,
     LeadDocumentSerializer, NotificationSerializer,
     LeadListSerializer, LeadMinSerializer,
@@ -330,7 +330,7 @@ class GlobalEnrollmentViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         return Enrollment.objects.select_related(
-            'lead', 'student', 'course', 'branch',
+            'lead', 'student', 'course', 'branch', 'batch', 'current_batch',
         ).prefetch_related('adjustments')
 
     def get_permissions(self):
@@ -458,7 +458,10 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return Enrollment.objects.filter(lead_id=self.kwargs['lead_pk']).select_related(
             'course', 'student', 'batch', 'current_batch', 'created_by', 'updated_by',
-        ).prefetch_related('payments', 'adjustments')
+        ).prefetch_related(
+            'payments', 'adjustments',
+            'placements__course_batch', 'placements__from_batch', 'placements__created_by',
+        )
 
     def perform_create(self, serializer):
         serializer.save(
@@ -472,6 +475,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in [
             'create', 'update', 'partial_update', 'destroy', 'confirm', 'cancel', 'reinstate',
+            'join_batch', 'move', 'pause', 'resume',
         ]:
             permission_classes = [IsAuthenticated, IsStaffOrHasPermission]
         else:
@@ -502,6 +506,61 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         reason = self._reason(request)
         enrollment = services.reinstate_enrollment(enrollment, reason=reason, user=request.user)
         return Response(self.get_serializer(enrollment).data)
+
+    # ---- seat actions: each adds a seat history row and a history row.
+
+    def _seat_body(self, request, *, needs_batch=True, needs_reason=True):
+        body = SeatActionSerializer(
+            data=request.data, needs_batch=needs_batch, needs_reason=needs_reason,
+        )
+        body.is_valid(raise_exception=True)
+        return body.validated_data
+
+    def _seat_reply(self, enrollment):
+        return Response(self.get_serializer(self.get_queryset().get(pk=enrollment.pk)).data)
+
+    @action(detail=True, methods=['post'], url_path='join-batch')
+    def join_batch(self, request, *args, **kwargs):
+        """Seat a confirmed enrollment that sits in no batch. Reason optional."""
+        enrollment = self.get_object()
+        body = self._seat_body(request, needs_reason=False)
+        enrollment = services.join_batch(
+            enrollment, body['batch'], reason=body.get('reason', ''), user=request.user,
+            on=body.get('started_on'),
+        )
+        return self._seat_reply(enrollment)
+
+    @action(detail=True, methods=['post'])
+    def move(self, request, *args, **kwargs):
+        """Move the student to another batch of the course. The money stays put."""
+        enrollment = self.get_object()
+        body = self._seat_body(request)
+        enrollment = services.move_batch(
+            enrollment, body['batch'], reason=body['reason'], user=request.user,
+            on=body.get('started_on'),
+        )
+        return self._seat_reply(enrollment)
+
+    @action(detail=True, methods=['post'])
+    def pause(self, request, *args, **kwargs):
+        """Take the student out of their batch for now. Frees the seat."""
+        enrollment = self.get_object()
+        body = self._seat_body(request, needs_batch=False)
+        enrollment = services.pause_enrollment(
+            enrollment, reason=body['reason'], user=request.user, on=body.get('started_on'),
+        )
+        return self._seat_reply(enrollment)
+
+    @action(detail=True, methods=['post'])
+    def resume(self, request, *args, **kwargs):
+        """Bring a paused student back into a batch of the course."""
+        enrollment = self.get_object()
+        body = self._seat_body(request)
+        enrollment = services.resume_enrollment(
+            enrollment, body['batch'], reason=body['reason'], user=request.user,
+            on=body.get('started_on'),
+        )
+        return self._seat_reply(enrollment)
 
 
 class PaymentViewSet(viewsets.ModelViewSet):

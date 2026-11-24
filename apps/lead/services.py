@@ -85,6 +85,182 @@ def _free_seat(enrollment, *, kind, reason, user, on=None):
     return left
 
 
+def _last_placement(enrollment):
+    return enrollment.placements.order_by('-created_at', '-id').first()
+
+
+def seat_state(enrollment):
+    """'seated' (in a batch now), 'paused', or 'none' (never placed, or left)."""
+    if enrollment.current_batch_id:
+        return 'seated'
+    last = _last_placement(enrollment)
+    return 'paused' if last is not None and last.kind == Placement.Kind.PAUSE else 'none'
+
+
+def _must_be_able_to_sit(enrollment):
+    if enrollment.status == Enrollment.Status.PENDING:
+        raise ActionRefused('Confirm the enrollment first. A pending enrollment has no seat.')
+    if enrollment.status not in Enrollment.SEAT_STATUSES:
+        raise ActionRefused(
+            f'This enrollment is {enrollment.get_status_display().lower()}, '
+            'so it cannot sit in a batch.'
+        )
+
+
+def _code(batch):
+    return batch.coursebatch_id if batch is not None else None
+
+
+@transaction.atomic
+def join_batch(enrollment, batch, *, user, reason='', on=None):
+    """Seat a confirmed enrollment that sits nowhere (confirmed without a batch, or reinstated)."""
+    enrollment = _lock(enrollment)
+    _must_be_able_to_sit(enrollment)
+    state = seat_state(enrollment)
+    if state == 'seated':
+        raise ActionRefused(
+            f'This student already sits in {enrollment.current_batch.name}. '
+            'Use Move to change the batch.'
+        )
+    if state == 'paused':
+        raise ActionRefused('This student is paused. Use Resume to bring them back.')
+    reason = (reason or '').strip() or 'Joined the batch.'
+    batch = _take_seat(enrollment, batch, kind=Placement.Kind.JOIN, reason=reason, user=user, on=on)
+    EnrollmentHistory.record(
+        enrollment=enrollment,
+        action=EnrollmentHistory.Action.JOIN_BATCH,
+        reason=reason,
+        performed_by=user,
+        before={'batch': None},
+        after={'batch': _code(batch)},
+    )
+    return enrollment
+
+
+@transaction.atomic
+def move_batch(enrollment, batch, *, reason, user, on=None):
+    """Move a seated student to another batch of the same course.
+
+    The money stays on the money batch (enrollment.batch). Only the seat moves.
+    """
+    enrollment = _lock(enrollment)
+    _must_be_able_to_sit(enrollment)
+    old = enrollment.current_batch
+    if old is None:
+        raise ActionRefused(
+            'This student is not in a batch now. Use Join batch, or Resume if they are paused.'
+        )
+    if old.pk == batch.pk:
+        raise ActionRefused(f'This student already sits in {old.name}.')
+    batch = _take_seat(
+        enrollment, batch, kind=Placement.Kind.MOVE, reason=reason, user=user, on=on,
+        from_batch=old,
+    )
+    EnrollmentHistory.record(
+        enrollment=enrollment,
+        action=EnrollmentHistory.Action.SWITCH_BATCH,
+        reason=reason,
+        performed_by=user,
+        before={'batch': _code(old)},
+        after={'batch': _code(batch)},
+    )
+    return enrollment
+
+
+@transaction.atomic
+def pause_enrollment(enrollment, *, reason, user, on=None):
+    """Take a seated student out of their batch for now. The seat is freed."""
+    enrollment = _lock(enrollment)
+    _must_be_able_to_sit(enrollment)
+    if enrollment.current_batch_id is None:
+        raise ActionRefused('This student is not in a batch now, so there is nothing to pause.')
+    left = _free_seat(enrollment, kind=Placement.Kind.PAUSE, reason=reason, user=user, on=on)
+    EnrollmentHistory.record(
+        enrollment=enrollment,
+        action=EnrollmentHistory.Action.PAUSE,
+        reason=reason,
+        performed_by=user,
+        before={'batch': _code(left)},
+        after={'batch': None},
+    )
+    return enrollment
+
+
+@transaction.atomic
+def resume_enrollment(enrollment, batch, *, reason, user, on=None):
+    """Bring a paused student back, into the batch they left or another of the same course."""
+    enrollment = _lock(enrollment)
+    _must_be_able_to_sit(enrollment)
+    last = _last_placement(enrollment)
+    if enrollment.current_batch_id or last is None or last.kind != Placement.Kind.PAUSE:
+        raise ActionRefused('Only a paused student can resume.')
+    batch = _take_seat(
+        enrollment, batch, kind=Placement.Kind.RESUME, reason=reason, user=user, on=on,
+        from_batch=last.from_batch,
+    )
+    EnrollmentHistory.record(
+        enrollment=enrollment,
+        action=EnrollmentHistory.Action.RESUME,
+        reason=reason,
+        performed_by=user,
+        before={'batch': None, 'paused_from': _code(last.from_batch)},
+        after={'batch': _code(batch)},
+    )
+    return enrollment
+
+
+def batch_students(batch):
+    """Who sits in a batch now, and who is paused out of it.
+
+    Each row says how the student got there. A student whose money batch is
+    another batch moved in, so this batch's revenue leaves them out.
+    """
+    from django.db.models import OuterRef, Subquery
+
+    latest = Placement.objects.filter(enrollment=OuterRef('pk')).order_by('-created_at', '-id')
+    enrollments = Enrollment.objects.filter(status__in=Enrollment.SEAT_STATUSES).annotate(
+        last_kind=Subquery(latest.values('kind')[:1]),
+        last_from=Subquery(latest.values('from_batch')[:1]),
+        last_on=Subquery(latest.values('started_on')[:1]),
+    ).select_related('lead', 'student', 'batch').order_by('lead__full_name', 'id')
+
+    seated = list(enrollments.filter(current_batch=batch))
+    paused = list(enrollments.filter(
+        current_batch__isnull=True, last_kind=Placement.Kind.PAUSE, last_from=batch.pk,
+    ))
+    names = dict(
+        CourseBatch.objects.filter(
+            pk__in={e.last_from for e in seated if e.last_from}
+        ).values_list('pk', 'name')
+    )
+    kinds = dict(Placement.Kind.choices)
+
+    def row(e, *, paused_row=False):
+        how = e.last_kind
+        from_id = None if paused_row else e.last_from
+        return {
+            'enrollment': e.id,
+            'lead': e.lead_id,
+            'name': e.student.full_name if e.student_id else e.lead.full_name,
+            'phone': e.lead.phone,
+            'student_id': e.student.student_id if e.student_id else None,
+            'status': e.status,
+            'since': e.last_on,
+            'how': how,
+            'how_display': kinds.get(how, ''),
+            'from_batch': from_id,
+            'from_batch_name': names.get(from_id),
+            'money_batch': e.batch_id,
+            'money_batch_name': e.batch.name if e.batch_id else None,
+            'moved_in': e.batch_id is not None and e.batch_id != batch.pk,
+        }
+
+    return {
+        'seated': [row(e) for e in seated],
+        'paused': [row(e, paused_row=True) for e in paused],
+    }
+
+
 @transaction.atomic
 def cancel_enrollment(enrollment, *, reason, user):
     enrollment = _lock(enrollment)

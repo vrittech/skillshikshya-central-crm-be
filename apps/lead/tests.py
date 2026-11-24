@@ -908,8 +908,8 @@ class MakeStudentsForOldDataTests(APITestCase):
         self.assertIn('Made 0 students and linked 0 enrollments', self._run())
 
 
-class SeatTests(APITestCase):
-    """Confirm takes a seat in the batch, cancel frees it, and full or closed batches refuse."""
+class SeatTestBase(APITestCase):
+    """Two Python batches with 2 seats each, and a Java batch."""
 
     def setUp(self):
         self.admin = User.objects.create_user(
@@ -953,6 +953,10 @@ class SeatTests(APITestCase):
 
     def _seats(self, batch):
         return self.client.get(f'/api/course-batches/{batch.id}/').data
+
+
+class SeatTests(SeatTestBase):
+    """Confirm takes a seat in the batch, cancel frees it, and full or closed batches refuse."""
 
     def test_confirm_takes_a_seat_in_the_chosen_batch(self):
         enrollment = self._enroll(self.batch)
@@ -1157,3 +1161,197 @@ class BackfillSeatsTests(APITestCase):
             other.refresh_from_db()
             self.assertIsNone(other.current_batch)
             self.assertFalse(other.placements.exists())
+
+
+class MovePauseResumeTests(SeatTestBase):
+    """Move, pause, resume and join change only the seat. The money batch stays."""
+
+    def setUp(self):
+        super().setUp()
+        self.enrollment = self._enroll(self.batch)
+        self._confirm(self.enrollment)
+
+    def _act(self, action, enrollment=None, **body):
+        enrollment = enrollment or self.enrollment
+        return self.client.post(self._url(enrollment, f'{action}/'), body, format='json')
+
+    def _reload(self, enrollment=None):
+        enrollment = enrollment or self.enrollment
+        enrollment.refresh_from_db()
+        return enrollment
+
+    def test_move_changes_the_seat_and_keeps_the_money_batch(self):
+        response = self._act('move', batch=self.next_batch.id, reason='Evening suits her job')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data['current_batch'], self.next_batch.id)
+        self.assertEqual(response.data['batch'], self.batch.id)
+        self.assertEqual(response.data['seat_state'], 'seated')
+        newest = response.data['placements'][0]
+        self.assertEqual(
+            (newest['kind'], newest['course_batch_name'], newest['from_batch_name'], newest['reason']),
+            ('move', 'Python Dec', 'Python Nov', 'Evening suits her job'),
+        )
+        row = self.enrollment.history.get(action='switch_batch')
+        self.assertEqual(
+            (row.before, row.after),
+            ({'batch': self.batch.coursebatch_id}, {'batch': self.next_batch.coursebatch_id}),
+        )
+        self.assertEqual(self._seats(self.batch)['seats_taken'], 0)
+        self.assertEqual(self._seats(self.next_batch)['seats_taken'], 1)
+
+    def test_move_needs_a_reason(self):
+        response = self._act('move', batch=self.next_batch.id)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('reason', response.data)
+        response = self._act('move', batch=self.next_batch.id, reason='   ')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self._reload().current_batch, self.batch)
+
+    def test_move_to_the_same_batch_is_refused(self):
+        response = self._act('move', batch=self.batch.id, reason='Same')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('already sits in Python Nov', response.data['detail'])
+
+    def test_move_to_another_course_is_refused(self):
+        response = self._act('move', batch=self.java_batch.id, reason='Wants Java')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('cancel this enrollment', response.data['detail'])
+
+    def test_move_into_a_full_batch_is_refused_and_nothing_changes(self):
+        for _ in range(2):
+            self._confirm(self._enroll(self.next_batch))
+        response = self._act('move', batch=self.next_batch.id, reason='Evening')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Python Dec is full', response.data['detail'])
+        self.assertEqual(self._reload().current_batch, self.batch)
+        self.assertEqual(self.enrollment.placements.count(), 1)
+        self.assertFalse(self.enrollment.history.filter(action='switch_batch').exists())
+
+    def test_no_one_moves_into_a_closed_batch_but_can_move_out(self):
+        CourseBatch.objects.filter(pk=self.next_batch.pk).update(status='closed')
+        response = self._act('move', batch=self.next_batch.id, reason='Evening')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('closed', response.data['detail'])
+
+        CourseBatch.objects.filter(pk=self.next_batch.pk).update(status='running')
+        CourseBatch.objects.filter(pk=self.batch.pk).update(status='closed')
+        response = self._act('move', batch=self.next_batch.id, reason='Needs more practice')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+    def test_move_on_a_given_day(self):
+        response = self._act('move', batch=self.next_batch.id, reason='Evening', started_on='2026-12-01')
+        self.assertEqual(response.data['placements'][0]['started_on'], '2026-12-01')
+
+    def test_pause_frees_the_seat(self):
+        response = self._act('pause', reason='Exams')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertIsNone(response.data['current_batch'])
+        self.assertEqual(response.data['seat_state'], 'paused')
+        self.assertEqual(response.data['batch'], self.batch.id)
+        pause = self.enrollment.placements.first()
+        self.assertEqual((pause.kind, pause.course_batch, pause.from_batch), ('pause', None, self.batch))
+        self.assertEqual(self.enrollment.history.get(action='pause').before, {'batch': self.batch.coursebatch_id})
+        self.assertEqual(self._seats(self.batch)['seats_taken'], 0)
+
+    def test_pause_needs_a_reason_and_a_seat(self):
+        self.assertEqual(self._act('pause').status_code, status.HTTP_400_BAD_REQUEST)
+        self._act('pause', reason='Exams')
+        again = self._act('pause', reason='Again')
+        self.assertEqual(again.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('nothing to pause', again.data['detail'])
+
+    def test_resume_into_the_same_batch(self):
+        self._act('pause', reason='Exams')
+        response = self._act('resume', batch=self.batch.id, reason='Exams over')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data['seat_state'], 'seated')
+        self.assertEqual(response.data['current_batch'], self.batch.id)
+        resume = self.enrollment.placements.first()
+        self.assertEqual((resume.kind, resume.from_batch), ('resume', self.batch))
+
+    def test_resume_into_a_later_batch(self):
+        self._act('pause', reason='Exams')
+        response = self._act('resume', batch=self.next_batch.id, reason='Joins the December batch')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(self._reload().current_batch, self.next_batch)
+        self.assertEqual(self.enrollment.batch, self.batch)
+
+    def test_resume_into_a_full_batch_is_refused_and_stays_paused(self):
+        self._act('pause', reason='Exams')
+        for _ in range(2):
+            self._confirm(self._enroll(self.batch))
+        response = self._act('resume', batch=self.batch.id, reason='Back')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('full', response.data['detail'])
+        detail = self.client.get(self._url(self.enrollment)).data
+        self.assertEqual(detail['seat_state'], 'paused')
+
+    def test_only_a_paused_student_can_resume(self):
+        response = self._act('resume', batch=self.next_batch.id, reason='Back')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Only a paused student', response.data['detail'])
+
+    def test_join_seats_a_student_confirmed_without_a_batch(self):
+        enrollment = self._enroll()
+        self._confirm(enrollment)
+        response = self._act('join-batch', enrollment, batch=self.next_batch.id)
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data['current_batch'], self.next_batch.id)
+        self.assertEqual(response.data['batch'], self.next_batch.id)  # first batch = money batch
+        row = enrollment.history.get(action='join_batch')
+        self.assertEqual(row.reason, 'Joined the batch.')
+
+    def test_join_is_refused_when_seated_paused_or_pending(self):
+        response = self._act('join-batch', batch=self.next_batch.id)
+        self.assertIn('Use Move', response.data['detail'])
+        self._act('pause', reason='Exams')
+        response = self._act('join-batch', batch=self.next_batch.id)
+        self.assertIn('Use Resume', response.data['detail'])
+        pending = self._enroll()
+        response = self._act('join-batch', pending, batch=self.next_batch.id)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Confirm the enrollment first', response.data['detail'])
+
+    def test_after_reinstate_join_takes_a_seat_and_the_money_batch_stays(self):
+        self._act('cancel', reason='Moved abroad')
+        self._act('reinstate', reason='Came back')
+        response = self._act('join-batch', batch=self.next_batch.id, reason='Back for December')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data['current_batch'], self.next_batch.id)
+        self.assertEqual(response.data['batch'], self.batch.id)
+
+    def test_a_cancelled_enrollment_has_no_seat_actions(self):
+        self._act('cancel', reason='Moved abroad')
+        response = self._act('pause', reason='x')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('cancelled', response.data['detail'])
+
+    def test_seat_history_is_listed_newest_first(self):
+        self._act('pause', reason='Exams')
+        self._act('resume', batch=self.next_batch.id, reason='Back')
+        detail = self.client.get(self._url(self.enrollment)).data
+        self.assertEqual([p['kind'] for p in detail['placements']], ['resume', 'pause', 'join'])
+
+    def test_batch_students_show_who_moved_in_and_who_is_paused(self):
+        mover = self.enrollment
+        stayer = self._enroll(self.batch)
+        self._confirm(stayer)
+        paused = self._enroll(self.next_batch)
+        self._confirm(paused)
+        self._act('move', mover, batch=self.next_batch.id, reason='Evening')
+        self._act('pause', paused, reason='Exams')
+
+        roster = self.client.get(f'/api/course-batches/{self.next_batch.id}/students/').data
+        self.assertEqual([r['enrollment'] for r in roster['seated']], [mover.id])
+        row = roster['seated'][0]
+        self.assertEqual(
+            (row['how'], row['from_batch_name'], row['money_batch_name'], row['moved_in']),
+            ('move', 'Python Nov', 'Python Nov', True),
+        )
+        self.assertEqual([r['enrollment'] for r in roster['paused']], [paused.id])
+        self.assertFalse(roster['paused'][0]['moved_in'])
+
+        first = self.client.get(f'/api/course-batches/{self.batch.id}/students/').data
+        self.assertEqual([r['enrollment'] for r in first['seated']], [stayer.id])
+        self.assertEqual((first['seated'][0]['how'], first['seated'][0]['moved_in']), ('join', False))
+        self.assertEqual(first['paused'], [])

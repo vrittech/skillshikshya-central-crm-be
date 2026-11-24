@@ -138,6 +138,7 @@ class EnrollmentFilter(django_filters.FilterSet):
             'course': ['exact'],
             'status': ['exact', 'in'],
             'batch': ['exact'],
+            'current_batch': ['exact'],
         }
 
 
@@ -211,6 +212,7 @@ class GlobalEnrollmentFilter(django_filters.FilterSet):
             'course': ['exact'],
             'status': ['exact', 'in'],
             'batch': ['exact'],
+            'current_batch': ['exact'],
         }
 
 
