@@ -829,3 +829,124 @@ def _last_closings(batches):
     for row in BatchClosing.objects.filter(course_batch_id__in=closed).order_by('created_at', 'id'):
         last[row.course_batch_id] = row
     return {pk: row for pk, row in last.items() if row.kind == BatchClosing.Kind.CLOSE}
+
+
+# An open enquiry with no stage change for this many days is stale.
+STALE_DAYS = 14
+
+
+def _rate(part, whole):
+    return round(part * 100 / whole, 1) if whole else 0.0
+
+
+def _enquiry_depth(row):
+    """How far down the funnel the enquiry got: 0 New … 3 Won. Lost counts where it died."""
+    funnel = list(LeadCourseInterest.FUNNEL)
+    stage = row['lost_at_stage'] if row['stage'] == LeadCourseInterest.Stage.LOST else row['stage']
+    return funnel.index(stage) if stage in funnel else 0
+
+
+def _enquiry_breakdown(rows, key, name, empty_name):
+    groups = {}
+    for row in rows:
+        group = groups.setdefault(row[key], {
+            'id': row[key], 'name': name(row) or empty_name,
+            'enquiries': 0, 'won': 0, 'lost': 0, 'open': 0,
+        })
+        group['enquiries'] += 1
+        if row['stage'] == LeadCourseInterest.Stage.WON:
+            group['won'] += 1
+        elif row['stage'] == LeadCourseInterest.Stage.LOST:
+            group['lost'] += 1
+        else:
+            group['open'] += 1
+    result = sorted(groups.values(), key=lambda g: (-g['enquiries'], g['name']))
+    for group in result:
+        group['win_rate'] = _rate(group['won'], group['enquiries'])
+    return result
+
+
+def enquiry_funnel_report(request):
+    """Where enquiries die: how many reach each stage, where the lost ones stopped and why.
+
+    Counts enquiries taken in the date range (start_date, end_date on the
+    day the enquiry was made), in the branch where it was taken. Optional
+    filters: course, source, counselor.
+    """
+    start_date, end_date, error = _resolve_date_range(request)
+    if error:
+        return {'error': error}
+    enquiries = LeadCourseInterest.objects.filter(lead__is_deleted=False)
+    branch_id = _branch_scope(request)
+    if branch_id:
+        enquiries = enquiries.filter(branch_id=branch_id)
+    if start_date:
+        enquiries = enquiries.filter(created_at__date__gte=start_date)
+    if end_date:
+        enquiries = enquiries.filter(created_at__date__lte=end_date)
+    for param, field in (('course', 'course_id'), ('source', 'source_id'), ('counselor', 'counselor_id')):
+        value = _query_param(request, param)
+        if value and str(value).isdigit():
+            enquiries = enquiries.filter(**{field: int(value)})
+
+    rows = list(enquiries.values(
+        'stage', 'lost_at_stage', 'lost_reason', 'stage_changed_at',
+        'course_id', 'course__name', 'course_name', 'source_id', 'source__name',
+        'counselor_id', 'counselor__name',
+    ))
+    Stage = LeadCourseInterest.Stage
+    stale_before = timezone.now() - timedelta(days=STALE_DAYS)
+    total = len(rows)
+    won = sum(1 for r in rows if r['stage'] == Stage.WON)
+    lost = sum(1 for r in rows if r['stage'] == Stage.LOST)
+    open_rows = [r for r in rows if r['stage'] in LeadCourseInterest.OPEN_STAGES]
+    depths = [_enquiry_depth(r) for r in rows]
+
+    funnel = []
+    for index, stage in enumerate(LeadCourseInterest.FUNNEL):
+        reached = sum(1 for d in depths if d >= index)
+        lost_here = sum(1 for r in rows if r['stage'] == Stage.LOST and r['lost_at_stage'] == stage)
+        funnel.append({
+            'stage': stage,
+            'label': Stage(stage).label,
+            'reached': reached,
+            'reached_rate': _rate(reached, total),
+            'open': sum(1 for r in open_rows if r['stage'] == stage),
+            'lost': lost_here,
+            'lost_rate': _rate(lost_here, reached),
+        })
+
+    reasons = {}
+    for r in rows:
+        if r['stage'] == Stage.LOST:
+            reasons[r['lost_reason']] = reasons.get(r['lost_reason'], 0) + 1
+    lost_by_reason = sorted(
+        (
+            {'reason': reason, 'label': LeadCourseInterest.LostReason(reason).label,
+             'count': count, 'rate': _rate(count, lost)}
+            for reason, count in reasons.items()
+        ),
+        key=lambda x: (-x['count'], x['label']),
+    )
+
+    return {
+        'summary': {
+            'enquiries': total,
+            'won': won,
+            'lost': lost,
+            'open': len(open_rows),
+            'stale': sum(1 for r in open_rows if r['stage_changed_at'] < stale_before),
+            'stale_days': STALE_DAYS,
+            'win_rate': _rate(won, total),
+        },
+        'funnel': funnel,
+        'lost_by_reason': lost_by_reason,
+        'by_course': _enquiry_breakdown(
+            rows, 'course_id', lambda r: r['course__name'] or r['course_name'], 'No course',
+        ),
+        'by_source': _enquiry_breakdown(rows, 'source_id', lambda r: r['source__name'], 'No source'),
+        'by_counselor': _enquiry_breakdown(
+            rows, 'counselor_id', lambda r: r['counselor__name'], 'Not assigned',
+        ),
+    }
+

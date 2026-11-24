@@ -16,6 +16,7 @@ class ReportViewSet(viewsets.ViewSet):
             'leads-by-branch', 'leads-by-campaign', 'leads-by-counselor',
             'lead-trend', 'revenue', 'enrollments', 'conversion',
             'counselor-performance', 'who-owes', 'due-in-month', 'batch-profit',
+            'enquiry-funnel',
         ]})
 
     @action(detail=False, methods=['get'])
@@ -77,3 +78,8 @@ class ReportViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='batch-profit')
     def batch_profit(self, request):
         return Response(services.batch_profit_report(request))
+
+    @action(detail=False, methods=['get'], url_path='enquiry-funnel')
+    def enquiry_funnel(self, request):
+        return Response(services.enquiry_funnel_report(request))
+

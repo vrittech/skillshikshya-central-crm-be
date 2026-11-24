@@ -257,3 +257,102 @@ class OwedReportTests(APITestCase):
         self.assertEqual(data['summary']['parts'], 1)
         data = self._get('/api/reports/due-in-month/', month='2026-13')
         self.assertEqual(data['error'], 'Invalid month. Use YYYY-MM format.')
+
+
+User = get_user_model()
+
+
+class EnquiryFunnelTests(APITestCase):
+    """Where enquiries die: reached per stage, lost per stage and reason."""
+
+    URL = '/api/reports/enquiry-funnel/'
+
+    def setUp(self):
+        self.ktm = Branch.objects.create(name='Kathmandu', code='KTM')
+        self.pkr = Branch.objects.create(name='Pokhara', code='PKR')
+        self.admin = User.objects.create_user(
+            email='funnel@test.com', name='Admin', password='pass', is_staff=True, branch=self.ktm,
+        )
+        self.client.force_authenticate(self.admin)
+        self.python = Course.objects.create(name='Python', full_amount=30000)
+        self.java = Course.objects.create(name='Java', full_amount=20000)
+        self.facebook = LeadSource.objects.create(name='Facebook')
+        self.people = 0
+
+    def _enquiry(self, course, *, moves=(), lost=None, won=False, source=None, branch=None):
+        from apps.lead import enquiries
+
+        self.people += 1
+        lead = Lead.objects.create(full_name=f'Person {self.people}', phone=f'98000060{self.people:02d}')
+        enquiry = enquiries.add_enquiry(
+            lead, course=course, user=self.admin, source=source, branch=branch or self.ktm,
+        )
+        for stage in moves:
+            enquiries.move_stage(enquiry, stage, user=self.admin)
+        if lost:
+            enquiries.mark_lost(enquiry, reason=lost, user=self.admin)
+        if won:
+            enquiry.refresh_from_db()
+            enquiries._change(enquiry, 'won', user=self.admin)
+        enquiry.refresh_from_db()
+        return enquiry
+
+    def test_funnel(self):
+        self._enquiry(self.python)                                         # open at New
+        self._enquiry(self.python, lost='not_reachable')                   # died at New
+        self._enquiry(self.python, moves=['contacted'], lost='too_expensive')   # died at Contacted
+        self._enquiry(self.python, moves=['contacted', 'interested'], lost='too_expensive')
+        self._enquiry(self.java, moves=['contacted', 'interested'], won=True, source=self.facebook)
+
+        data = self.client.get(self.URL).data
+        self.assertEqual(data['summary'], {
+            'enquiries': 5, 'won': 1, 'lost': 3, 'open': 1, 'stale': 0,
+            'stale_days': 14, 'win_rate': 20.0,
+        })
+        self.assertEqual(
+            [(f['stage'], f['reached'], f['open'], f['lost']) for f in data['funnel']],
+            [('new', 5, 1, 1), ('contacted', 3, 0, 1), ('interested', 2, 0, 1), ('won', 1, 0, 0)],
+        )
+        self.assertEqual(data['funnel'][1]['lost_rate'], 33.3)
+        self.assertEqual(
+            [(r['reason'], r['count']) for r in data['lost_by_reason']],
+            [('too_expensive', 2), ('not_reachable', 1)],
+        )
+        self.assertEqual(
+            [(r['name'], r['enquiries'], r['won'], r['lost'], r['open']) for r in data['by_course']],
+            [('Python', 4, 0, 3, 1), ('Java', 1, 1, 0, 0)],
+        )
+        self.assertEqual(
+            [(r['name'], r['enquiries']) for r in data['by_source']],
+            [('No source', 4), ('Facebook', 1)],
+        )
+
+    def test_filters_and_stale(self):
+        from apps.lead.models import LeadCourseInterest
+
+        old = self._enquiry(self.python, moves=['contacted'])
+        LeadCourseInterest.objects.filter(pk=old.pk).update(
+            stage_changed_at=timezone.now() - timezone.timedelta(days=20),
+        )
+        self._enquiry(self.java)
+        self._enquiry(self.java, branch=self.pkr)
+
+        data = self.client.get(self.URL, {'course': self.python.id}).data
+        self.assertEqual((data['summary']['enquiries'], data['summary']['stale']), (1, 1))
+        data = self.client.get(self.URL, {'branch_id': self.pkr.id}).data
+        self.assertEqual(data['summary']['enquiries'], 1)
+        today = str(timezone.localdate())
+        data = self.client.get(self.URL, {'start_date': today, 'end_date': today}).data
+        self.assertEqual(data['summary']['enquiries'], 3)
+        self.assertEqual(self.client.get(self.URL, {'start_date': 'x'}).data, {'error': services.DATE_PARSE_ERROR})
+
+    def test_branch_user_sees_their_branch_only(self):
+        self._enquiry(self.python)
+        self._enquiry(self.python, branch=self.pkr)
+        counselor = User.objects.create_user(
+            email='pkr-funnel@test.com', name='Pokhara', password='pass', branch=self.pkr,
+        )
+        self.client.force_authenticate(counselor)
+        data = self.client.get(self.URL, {'branch_id': self.ktm.id}).data
+        self.assertEqual(data['summary']['enquiries'], 1)
+
