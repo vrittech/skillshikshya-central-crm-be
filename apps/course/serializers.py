@@ -37,6 +37,8 @@ class CourseBatchSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source='course.name', read_only=True)
     batch_name = serializers.CharField(source='batch.name', read_only=True)
     created_by_name = serializers.CharField(source='created_by.name', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    mode_display = serializers.CharField(source='get_mode_display', read_only=True)
 
     class Meta:
         model = CourseBatch

@@ -15,8 +15,11 @@ class BatchAdmin(admin.ModelAdmin):
 
 
 class CourseBatchAdmin(admin.ModelAdmin):
-    list_display = ['coursebatch_id', 'name', 'course', 'batch', 'start_date', 'end_date', 'is_active']
-    list_filter = ['is_active', 'course', 'batch']
+    list_display = [
+        'coursebatch_id', 'name', 'course', 'batch', 'status', 'mode', 'capacity',
+        'start_date', 'end_date', 'is_active',
+    ]
+    list_filter = ['status', 'mode', 'is_active', 'course', 'batch']
     search_fields = ['coursebatch_id', 'name']
 
 

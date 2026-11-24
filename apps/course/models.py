@@ -99,6 +99,17 @@ class Batch(models.Model):
 
 
 class CourseBatch(models.Model):
+    class Mode(models.TextChoices):
+        PHYSICAL = 'physical', 'Physical'
+        ONLINE = 'online', 'Online'
+
+    class Status(models.TextChoices):
+        # Upcoming and running batches take students. A closed batch takes no
+        # one new; its figures freeze at close (step 5).
+        UPCOMING = 'upcoming', 'Upcoming'
+        RUNNING = 'running', 'Running'
+        CLOSED = 'closed', 'Closed'
+
     name = models.CharField(max_length=255)
     coursebatch_id = models.CharField(max_length=50, unique=True, editable=False)
     course = models.ForeignKey(
@@ -110,6 +121,12 @@ class CourseBatch(models.Model):
     )
     start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)
+    capacity = models.PositiveIntegerField(
+        null=True, blank=True, help_text='Number of seats. Blank means no limit.',
+    )
+    mode = models.CharField(max_length=10, choices=Mode.choices, default=Mode.PHYSICAL)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.UPCOMING)
+    trainer = models.CharField(max_length=255, null=True, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
