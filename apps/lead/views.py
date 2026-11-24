@@ -49,7 +49,7 @@ from apps.lead.filters import (
 )
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission, needs
-from apps.global_config.filters import BranchFilterBackend, LeadBranchFilterBackend
+from apps.global_config.filters import BranchFilterBackend, LeadBranchFilterBackend, walled_branch_id
 
 
 class ConfigViewSet(viewsets.ModelViewSet):
@@ -323,7 +323,7 @@ class LeadViewSet(viewsets.ModelViewSet):
         """Everything about the person, newest first. ?kind= shows one kind."""
         from apps.lead.timeline import lead_timeline
 
-        items = lead_timeline(self.get_object())
+        items = lead_timeline(self.get_object(), branch_id=walled_branch_id(request.user))
         kind = request.query_params.get('kind')
         if kind:
             items = [i for i in items if i['kind'] == kind]
@@ -995,6 +995,10 @@ class VoiceNoteViewSet(
     def get_queryset(self):
         lead = visible_lead(self.request, self.kwargs['lead_pk'])
         qs = lead.voice_notes.select_related('created_by', 'enquiry__course')
+        # A branch hears only its own recordings, as in every list.
+        branch_id = walled_branch_id(self.request.user)
+        if branch_id:
+            qs = qs.filter(branch_id=branch_id)
         enquiry = self.request.query_params.get('enquiry')
         if enquiry:
             qs = qs.filter(enquiry_id=enquiry)

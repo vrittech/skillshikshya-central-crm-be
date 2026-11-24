@@ -6,6 +6,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 
 from apps.callminutes.utils import format_duration, parse_duration_to_seconds
 from apps.course.models import Course, CourseBatch
+from apps.global_config.filters import walled_branch_id
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
@@ -523,7 +524,13 @@ class LeadSerializer(serializers.ModelSerializer):
         return None
 
     def get_enrollment_summary(self, obj):
-        enrollment = obj.enrollments.order_by('-enrollment_date').first()
+        # A branch user sees only their branch's enrollments, as in every list.
+        enrollments = obj.enrollments.all()
+        request = self.context.get('request')
+        branch_id = walled_branch_id(request.user) if request else None
+        if branch_id:
+            enrollments = enrollments.filter(branch_id=branch_id)
+        enrollment = enrollments.order_by('-enrollment_date').first()
         if enrollment:
             return {
                 'is_enrolled': True,

@@ -2603,3 +2603,99 @@ class FollowUpLeadDatesTests(APITestCase):
         import_module('apps.lead.migrations.0031_sync_followup_dates').sync(apps, None)
         self.lead.refresh_from_db()
         self.assertEqual((self.lead.next_followup_at, self.lead.last_contact_at), (None, done_at))
+
+
+class BranchHistoryTests(APITestCase):
+    """A person who enquired at two branches: each branch sees only its own records in History."""
+
+    def setUp(self):
+        from apps.branch.models import Branch
+        from apps.lead.enquiries import add_enquiry
+        from apps.lead.models import LeadCall
+
+        self.ktm = Branch.objects.create(name='Kathmandu', code='KTM')
+        self.pkr = Branch.objects.create(name='Pokhara', code='PKR')
+        self.admin = User.objects.create_user(
+            email='bh-admin@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.ktm_user = User.objects.create_user(
+            email='bh-ktm@test.com', name='Ktm Counselor', password='pass', branch=self.ktm,
+        )
+        self.pkr_user = User.objects.create_user(
+            email='bh-pkr@test.com', name='Pkr Counselor', password='pass', branch=self.pkr,
+        )
+        python = Course.objects.create(name='Python', full_amount=30000)
+        react = Course.objects.create(name='React', full_amount=20000)
+        self.lead = Lead.objects.create(full_name='Two Branches', phone='9800009101', branch=self.ktm)
+
+        # Kathmandu: an enquiry, a call, a voice note, a student with money.
+        ktm_enquiry = add_enquiry(self.lead, course=python, user=self.ktm_user)
+        LeadCall.objects.create(
+            lead=self.lead, call_timestamp=timezone.now(), caller='Ktm', phone_number='9800009101',
+            branch=self.ktm, created_by=self.ktm_user,
+        )
+        self.ktm_note = VoiceNote.objects.create(
+            lead=self.lead, enquiry=ktm_enquiry, file_key='voice-notes/ktm.webm',
+            content_type='audio/webm', size_bytes=1, branch=self.ktm, created_by=self.ktm_user,
+        )
+        enrollment = Enrollment.objects.create(
+            lead=self.lead, course=python, enrollment_date=date.today(), listed_fee=30000,
+            agreed_amount=30000, status='confirmed', branch=self.ktm,
+        )
+        Payment.objects.create(
+            enrollment=enrollment, amount=Decimal('5000'), payment_date=timezone.now(),
+            payment_method='cash', received_by=self.ktm_user, branch=self.ktm,
+        )
+
+        # Pokhara: the same person asks about React there.
+        pkr_enquiry = add_enquiry(self.lead, course=react, user=self.pkr_user)
+        LeadCall.objects.create(
+            lead=self.lead, call_timestamp=timezone.now(), caller='Pkr', phone_number='9800009101',
+            branch=self.pkr, created_by=self.pkr_user,
+        )
+        self.pkr_note = VoiceNote.objects.create(
+            lead=self.lead, enquiry=pkr_enquiry, file_key='voice-notes/pkr.webm',
+            content_type='audio/webm', size_bytes=1, branch=self.pkr, created_by=self.pkr_user,
+        )
+
+    def _history(self, user):
+        self.client.force_authenticate(user)
+        response = self.client.get(f'/api/leads/{self.lead.id}/timeline/')
+        self.assertEqual(response.status_code, 200)
+        return response.data['results']
+
+    def test_the_other_branch_sees_none_of_the_students_or_money(self):
+        items = self._history(self.pkr_user)
+        kinds = {i['kind'] for i in items}
+        self.assertFalse(kinds & {'enrollment', 'batch', 'money', 'teams', 'reminder'})
+        self.assertEqual(
+            sorted((i['title'], i['course'] or i['by']) for i in items if i['kind'] != 'lead'),
+            sorted([('Enquiry added', 'React'), ('Outbound call', 'Pkr Counselor'),
+                    ('Voice note', 'React')]),
+        )
+        self.assertIn('Lead added', {i['title'] for i in items})
+        summary = self.client.get(f'/api/leads/{self.lead.id}/').data['enrollment_summary']
+        self.assertFalse(summary['is_enrolled'])
+        self.client.force_authenticate(self.ktm_user)
+        summary = self.client.get(f'/api/leads/{self.lead.id}/').data['enrollment_summary']
+        self.assertEqual((summary['is_enrolled'], summary['course']), (True, 'Python'))
+
+    def test_each_branch_sees_its_own_and_staff_see_both(self):
+        ktm = self._history(self.ktm_user)
+        self.assertIn('Payment received', {i['title'] for i in ktm})
+        self.assertNotIn('React', {i['course'] for i in ktm})
+        self.assertEqual({i['voice_note'] for i in ktm if i['voice_note']}, {self.ktm_note.id})
+
+        everything = self._history(self.admin)
+        self.assertEqual(
+            {i['voice_note'] for i in everything if i['voice_note']},
+            {self.ktm_note.id, self.pkr_note.id},
+        )
+        self.assertEqual({i['course'] for i in everything if i['kind'] == 'enquiry'}, {'Python', 'React'})
+
+    def test_the_other_branch_cannot_list_or_play_its_voice_notes(self):
+        self.client.force_authenticate(self.pkr_user)
+        url = f'/api/leads/{self.lead.id}/voice-notes/'
+        listed = self.client.get(url).data['results']
+        self.assertEqual([n['id'] for n in listed], [self.pkr_note.id])
+        self.assertEqual(self.client.get(f'{url}{self.ktm_note.id}/audio/').status_code, 404)

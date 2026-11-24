@@ -2,6 +2,17 @@ from django.db.models import Q
 from rest_framework.filters import BaseFilterBackend
 
 
+def walled_branch_id(user):
+    """The branch a user is kept inside, or None when they may see every branch.
+
+    Staff see every branch. A user with no branch isn't walled either, as in
+    BranchFilterBackend.
+    """
+    if user.is_staff or user.is_superuser:
+        return None
+    return getattr(user, 'branch_id', None)
+
+
 class BranchFilterBackend(BaseFilterBackend):
     """Branch users see their branch's rows; staff see all or pick one with ?branch_id.
 

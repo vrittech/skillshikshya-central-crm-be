@@ -8,6 +8,9 @@ is stored for it.
 Each item: id, kind, at, title, detail, by, course, enrollment, enquiry,
 voice_note, amount, duration_seconds, before, after. `kind` is one of KINDS,
 so the screen can show one kind at a time.
+
+A person may enquire at several branches. A branch user sees only their
+branch's records here, as in every list: no other branch's students or money.
 """
 from apps.invoices.models import Invoice
 from apps.lead.models import (
@@ -69,7 +72,12 @@ def _join(*parts):
     return ' · '.join(str(p) for p in parts if p)
 
 
-def lead_timeline(lead):
+def lead_timeline(lead, *, branch_id=None):
+    """branch_id: show only that branch's records (a branch user's view). None = every branch."""
+
+    def mine(qs, field='branch_id'):
+        return qs if branch_id is None else qs.filter(**{field: branch_id})
+
     items = [
         _item(
             'lead', lead.pk, lead.created_at, 'Lead added',
@@ -85,15 +93,15 @@ def lead_timeline(lead):
             by=_name(c.changed_by), before={label: c.from_value}, after={label: c.to_value},
         ))
 
-    for e in lead.course_interests.select_related('course', 'created_by', 'source'):
+    for e in mine(lead.course_interests.select_related('course', 'created_by', 'source')):
         items.append(_item(
             'enquiry', e.pk, e.created_at, 'Enquiry added',
             detail=e.source.name if e.source else '', by=_name(e.created_by),
             course=_course(e.course, e.course_name), enquiry=e.pk,
         ))
-    changes = EnquiryStageChange.objects.filter(enquiry__lead=lead).select_related(
+    changes = mine(EnquiryStageChange.objects.filter(enquiry__lead=lead).select_related(
         'enquiry__course', 'changed_by',
-    )
+    ), 'enquiry__branch_id')
     for c in changes:
         items.append(_item(
             'enquiry', f'stage-{c.pk}', c.created_at,
@@ -102,22 +110,22 @@ def lead_timeline(lead):
             course=_course(c.enquiry.course, c.enquiry.course_name), enquiry=c.enquiry_id,
         ))
 
-    for c in LeadCall.objects.filter(lead=lead).select_related('created_by'):
+    for c in mine(LeadCall.objects.filter(lead=lead).select_related('created_by')):
         items.append(_item(
             'call', c.pk, c.call_timestamp, f'{c.get_direction_display()} call',
             detail=_join(c.outcome, c.notes), by=_name(c.created_by) or c.caller,
             duration_seconds=c.duration_seconds,
         ))
 
-    for a in LeadActivity.objects.filter(lead=lead).select_related('performed_by'):
+    for a in mine(LeadActivity.objects.filter(lead=lead).select_related('performed_by')):
         items.append(_item(
             'note', a.pk, a.activity_at, a.title,
             detail=a.description, by=_name(a.performed_by),
         ))
 
-    follow_ups = FollowUp.objects.filter(lead=lead).select_related(
+    follow_ups = mine(FollowUp.objects.filter(lead=lead).select_related(
         'created_by', 'updated_by', 'assigned_to', 'enrollment__course',
-    )
+    ))
     for f in follow_ups:
         course = _course(f.enrollment.course) if f.enrollment_id else None
         items.append(_item(
@@ -132,7 +140,7 @@ def lead_timeline(lead):
                 course=course, enrollment=f.enrollment_id,
             ))
 
-    notes = VoiceNote.objects.filter(lead=lead).select_related('created_by', 'enquiry__course')
+    notes = mine(VoiceNote.objects.filter(lead=lead).select_related('created_by', 'enquiry__course'))
     for v in notes:
         items.append(_item(
             'voice_note', v.pk, v.created_at, 'Voice note',
@@ -141,15 +149,15 @@ def lead_timeline(lead):
             enquiry=v.enquiry_id, voice_note=v.pk, duration_seconds=v.duration_seconds,
         ))
 
-    for en in lead.enrollments.select_related('course', 'created_by'):
+    for en in mine(lead.enrollments.select_related('course', 'created_by')):
         items.append(_item(
             'enrollment', en.pk, en.created_at, 'Enrollment added',
             by=_name(en.created_by), course=_course(en.course), enrollment=en.pk,
             amount=str(en.agreed_amount),
         ))
-    history = EnrollmentHistory.objects.filter(enrollment__lead=lead).select_related(
+    history = mine(EnrollmentHistory.objects.filter(enrollment__lead=lead).select_related(
         'enrollment__course', 'performed_by',
-    )
+    ), 'enrollment__branch_id')
     for h in history:
         items.append(_item(
             HISTORY_KIND.get(h.action, 'money'), h.pk, h.created_at, h.get_action_display(),
@@ -157,9 +165,9 @@ def lead_timeline(lead):
             enrollment=h.enrollment_id, before=h.before, after=h.after,
         ))
 
-    payments = Payment.objects.filter(enrollment__lead=lead).select_related(
+    payments = mine(Payment.objects.filter(enrollment__lead=lead).select_related(
         'enrollment__course', 'received_by',
-    )
+    ))
     for p in payments:
         items.append(_item(
             'money', f'payment-{p.pk}', p.payment_date, 'Payment received',
@@ -168,7 +176,7 @@ def lead_timeline(lead):
             enrollment=p.enrollment_id, amount=str(p.amount),
         ))
 
-    invoices = Invoice.objects.filter(enrollment__lead=lead).select_related('created_by')
+    invoices = mine(Invoice.objects.filter(enrollment__lead=lead).select_related('created_by'))
     for i in invoices:
         items.append(_item(
             'money', f'invoice-{i.pk}', i.created_at,
@@ -178,7 +186,9 @@ def lead_timeline(lead):
             amount=str(i.amount),
         ))
 
-    reminders = ReminderLog.objects.filter(enrollment__lead=lead).select_related('enrollment__course')
+    reminders = mine(
+        ReminderLog.objects.filter(enrollment__lead=lead).select_related('enrollment__course'),
+    )
     for r in reminders:
         items.append(_item(
             'reminder', r.pk, r.created_at, f'Reminder: {r.get_step_display().lower()}',
@@ -186,7 +196,7 @@ def lead_timeline(lead):
             course=_course(r.enrollment.course), enrollment=r.enrollment_id, amount=str(r.amount),
         ))
 
-    for d in LeadDocument.objects.filter(lead=lead).select_related('uploaded_by'):
+    for d in mine(LeadDocument.objects.filter(lead=lead).select_related('uploaded_by')):
         items.append(_item(
             'document', d.pk, d.uploaded_at, d.document_type, by=_name(d.uploaded_by),
         ))
