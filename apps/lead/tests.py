@@ -1568,8 +1568,8 @@ class ReissueFeeInvoiceTests(SeatTestBase):
         self.assertFalse(Invoice.objects.exists())
 
 
-class PaymentReminderTests(APITestCase):
-    """The daily job: each step once per due date, paused and paid get none."""
+class ReminderTestBase(APITestCase):
+    """Reminders on, a counselor, and a helper to make enrollments with due dates."""
 
     TODAY = date(2026, 12, 1)
 
@@ -1618,6 +1618,11 @@ class PaymentReminderTests(APITestCase):
         return send_payment_reminders(
             today=self.TODAY + timedelta(days=days), config=self.config, **kwargs,
         )
+
+
+
+class PaymentReminderTests(ReminderTestBase):
+    """The daily job: each step once per due date, paused and paid get none."""
 
     def test_step_for_each_window(self):
         from apps.lead.reminders import step_for
@@ -1730,3 +1735,49 @@ class PaymentReminderTests(APITestCase):
         self.config.save()
         self.assertEqual(send_payment_reminders_task(), 0)
         self.assertFalse(ReminderLog.objects.exists())
+
+
+class PaymentFollowUpApiTests(ReminderTestBase):
+    """Reminder list on an enrollment, and the Payment filter on follow-ups."""
+
+    def setUp(self):
+        super().setUp()
+        self.admin = User.objects.create_user(
+            email='followups@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+
+    def test_an_enrollment_lists_its_reminders(self):
+        enrollment = self._enrollment([(-20, 10000), (0, 20000)])
+        self._run()
+        response = self.client.get(
+            f'/api/leads/{enrollment.lead_id}/enrollments/{enrollment.id}/reminders/',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        rows = response.data['results']
+        self.assertEqual(
+            sorted((r['step'], r['channel'], r['status']) for r in rows),
+            [('call', 'follow_up', 'sent'), ('due_today', 'email', 'sent')],
+        )
+        self.assertEqual({r['step_display'] for r in rows}, {'Call follow-up', 'Due today'})
+
+    def test_follow_ups_filter_by_payment(self):
+        enrollment = self._enrollment([(-20, 30000)])
+        self._run()
+        FollowUp.objects.create(lead=enrollment.lead, scheduled_at=timezone.now(), purpose='Chat')
+        payment = self.client.get('/api/followups/', {'payment': 'true'}).data['results']
+        self.assertEqual(len(payment), 1)
+        self.assertEqual(payment[0]['enrollment'], enrollment.id)
+        self.assertEqual(payment[0]['enrollment_course_name'], 'Python')
+        others = self.client.get('/api/followups/', {'payment': 'false'}).data['results']
+        self.assertEqual([f['purpose'] for f in others], ['Chat'])
+
+    def test_a_follow_up_cannot_be_linked_to_an_enrollment_by_hand(self):
+        enrollment = self._enrollment([(5, 30000)])
+        response = self.client.post(
+            f'/api/leads/{enrollment.lead_id}/followups/',
+            {'scheduled_at': timezone.now().isoformat(), 'enrollment': enrollment.id},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertIsNone(response.data['enrollment'])

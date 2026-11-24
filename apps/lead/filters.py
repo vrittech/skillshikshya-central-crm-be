@@ -189,6 +189,13 @@ class LeadActivityFilter(django_filters.FilterSet):
 class FollowUpFilter(django_filters.FilterSet):
     scheduled_at__gte = django_filters.DateTimeFilter(field_name='scheduled_at', lookup_expr='gte')
     scheduled_at__lte = django_filters.DateTimeFilter(field_name='scheduled_at', lookup_expr='lte')
+    # payment=true: only payment follow-ups (made by the reminder job); false: only the others.
+    payment = django_filters.BooleanFilter(method='filter_payment')
+
+    def filter_payment(self, queryset, name, value):
+        if value is None:
+            return queryset
+        return queryset.filter(enrollment__isnull=not value)
 
     class Meta:
         model = FollowUp

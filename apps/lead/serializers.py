@@ -9,7 +9,7 @@ from apps.course.models import Course, CourseBatch
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
-    Adjustment, Placement,
+    Adjustment, Placement, ReminderLog,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
 )
 
@@ -370,6 +370,20 @@ class AdjustmentSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'enrollment', 'branch', 'created_by', 'created_at']
 
 
+class ReminderLogSerializer(serializers.ModelSerializer):
+    step_display = serializers.CharField(source='get_step_display', read_only=True)
+    channel_display = serializers.CharField(source='get_channel_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = ReminderLog
+        fields = [
+            'id', 'due_on', 'amount', 'step', 'step_display', 'channel', 'channel_display',
+            'sent_to', 'status', 'status_display', 'error', 'followup', 'created_at',
+        ]
+        read_only_fields = fields
+
+
 class ReasonSerializer(serializers.Serializer):
     """Body of every action that needs a reason. Blank or spaces-only is refused."""
 
@@ -530,11 +544,18 @@ class FollowUpSerializer(serializers.ModelSerializer):
     assigned_to_name = serializers.CharField(source='assigned_to.name', read_only=True)
     created_by_name = serializers.CharField(source='created_by.name', read_only=True)
     updated_by_name = serializers.CharField(source='updated_by.name', read_only=True)
+    enrollment_course_name = serializers.CharField(
+        source='enrollment.course.name', read_only=True, default=None,
+    )
 
     class Meta:
         model = FollowUp
         fields = '__all__'
-        read_only_fields = ['lead', 'created_by', 'updated_by', 'created_at', 'updated_at', 'reminder_sent']
+        # enrollment is set only by the payment reminder job.
+        read_only_fields = [
+            'lead', 'enrollment', 'created_by', 'updated_by', 'created_at', 'updated_at',
+            'reminder_sent',
+        ]
 
 
 class LeadDocumentSerializer(serializers.ModelSerializer):
@@ -551,6 +572,9 @@ class GlobalFollowUpSerializer(serializers.ModelSerializer):
     lead_phone = serializers.CharField(source='lead.phone', read_only=True)
     assigned_to_name = serializers.CharField(source='assigned_to.name', read_only=True)
     branch_name = serializers.CharField(source='branch.name', read_only=True)
+    enrollment_course_name = serializers.CharField(
+        source='enrollment.course.name', read_only=True, default=None,
+    )
 
     class Meta:
         model = FollowUp
@@ -558,6 +582,7 @@ class GlobalFollowUpSerializer(serializers.ModelSerializer):
             'id', 'lead', 'lead_name', 'lead_phone',
             'assigned_to', 'assigned_to_name',
             'scheduled_at', 'purpose', 'status',
+            'enrollment', 'enrollment_course_name',
             'branch', 'branch_name',
         ]
         read_only_fields = fields

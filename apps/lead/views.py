@@ -17,7 +17,7 @@ from apps.lead import services
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
-    Adjustment,
+    Adjustment, ReminderLog,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
 )
 from apps.lead.serializers import (
@@ -27,7 +27,7 @@ from apps.lead.serializers import (
     LeadPrioritySerializer, LeadTagSerializer, LeadTypeSerializer, LeadSerializer,
     LeadCourseInterestSerializer, EnrollmentSerializer, PaymentSerializer,
     EnrollmentHistorySerializer, ReasonSerializer, AdjustmentSerializer, SeatActionSerializer,
-    DueDatesSerializer,
+    DueDatesSerializer, ReminderLogSerializer,
     LeadCallSerializer, LeadActivitySerializer, FollowUpSerializer,
     LeadDocumentSerializer, NotificationSerializer,
     LeadListSerializer, LeadMinSerializer,
@@ -311,7 +311,7 @@ class GlobalFollowUpViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         return FollowUp.objects.select_related(
-            'lead', 'assigned_to', 'branch',
+            'lead', 'assigned_to', 'branch', 'enrollment__course',
         )
 
     def get_permissions(self):
@@ -695,6 +695,20 @@ class EnrollmentHistoryViewSet(viewsets.ReadOnlyModelViewSet):
         ).select_related('performed_by').order_by('-created_at', '-id')
 
 
+class EnrollmentReminderViewSet(viewsets.ReadOnlyModelViewSet):
+    """Payment reminders sent for one enrollment, newest first."""
+    serializer_class = ReminderLogSerializer
+    pagination_class = CustomPagination
+    filter_backends = [BranchFilterBackend]
+    branch_field = 'enrollment__branch'
+
+    def get_queryset(self):
+        return ReminderLog.objects.filter(
+            enrollment_id=self.kwargs['enrollment_pk'],
+            enrollment__lead_id=self.kwargs['lead_pk'],
+        )
+
+
 class LeadCallViewSet(viewsets.ModelViewSet):
     serializer_class = LeadCallSerializer
     pagination_class = CustomPagination
@@ -792,7 +806,7 @@ class FollowUpViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return FollowUp.objects.filter(lead_id=self.kwargs['lead_pk']).select_related(
-            'assigned_to', 'created_by', 'updated_by',
+            'assigned_to', 'created_by', 'updated_by', 'enrollment__course',
         )
 
     def perform_create(self, serializer):
