@@ -929,23 +929,13 @@ class FollowUpViewSet(viewsets.ModelViewSet):
             'assigned_to', 'created_by', 'updated_by', 'enrollment__course',
         )
 
+    # Saving a follow-up updates the lead's next follow-up and last contacted
+    # dates (FollowUp.save).
     def perform_create(self, serializer):
-        instance = serializer.save(
-            lead_id=self.kwargs['lead_pk'],
-            created_by=self.request.user,
-        )
-        lead = instance.lead
-        if instance.status == 'pending':
-            if lead.next_followup_at is None or instance.scheduled_at < lead.next_followup_at:
-                lead.next_followup_at = instance.scheduled_at
-            else:
-                lead.save(update_fields=['lead_score'])
-                return
-            lead.save(update_fields=['lead_score', 'next_followup_at'])
+        serializer.save(lead_id=self.kwargs['lead_pk'], created_by=self.request.user)
 
     def perform_update(self, serializer):
-        instance = serializer.save(updated_by=self.request.user)
-        instance.lead.save(update_fields=['lead_score'])
+        serializer.save(updated_by=self.request.user)
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:

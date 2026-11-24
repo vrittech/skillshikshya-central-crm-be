@@ -330,7 +330,7 @@ class Lead(models.Model):
         activity_count = self.activities.count()
         score += min(15, call_count * 3 + activity_count * 1)
         pending_future = self.followups.filter(
-            status='pending', scheduled_at__gt=datetime.now(),
+            status='pending', scheduled_at__gt=timezone.now(),
         ).exists()
         if pending_future:
             score += 5
@@ -352,6 +352,22 @@ class Lead(models.Model):
             self._record_changes(kwargs.get('update_fields'))
         self._original_status_id = self.status_id
         self._original_assigned_counselor_id = self.assigned_counselor_id
+
+    def sync_followup_dates(self):
+        """Keep the next follow-up and last contacted dates in step with the follow-ups.
+
+        The next follow-up is the earliest pending one (empty when none is
+        pending). A completed follow-up counts as contact, so last contacted
+        moves up to it; it never moves back.
+        """
+        dates = self.followups.aggregate(
+            next=models.Min('scheduled_at', filter=models.Q(status=FollowUp.Status.PENDING)),
+            done=Max('completed_at', filter=models.Q(status=FollowUp.Status.COMPLETED)),
+        )
+        self.next_followup_at = dates['next']
+        if dates['done'] and (self.last_contact_at is None or dates['done'] > self.last_contact_at):
+            self.last_contact_at = dates['done']
+        self.save(update_fields=['next_followup_at', 'last_contact_at', 'lead_score'])
 
     def refresh_from_db(self, *args, **kwargs):
         super().refresh_from_db(*args, **kwargs)
@@ -1227,6 +1243,23 @@ class FollowUp(models.Model):
 
     def __str__(self):
         return f'FollowUp for {self.lead.full_name} at {self.scheduled_at}'
+
+    # Every save or delete updates the lead's next follow-up and last
+    # contacted dates, whichever page, job or admin screen made the change.
+    def save(self, *args, **kwargs):
+        if self.status == self.Status.COMPLETED and self.completed_at is None:
+            self.completed_at = timezone.now()
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None and 'status' in update_fields:
+            kwargs['update_fields'] = {*update_fields, 'completed_at'}
+        super().save(*args, **kwargs)
+        self.lead.sync_followup_dates()
+
+    def delete(self, *args, **kwargs):
+        lead = self.lead
+        result = super().delete(*args, **kwargs)
+        lead.sync_followup_dates()
+        return result
 
 
 class ReminderConfig(models.Model):

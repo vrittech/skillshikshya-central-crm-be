@@ -2499,3 +2499,107 @@ class LeadChangeTests(APITestCase):
             (changed['before'], changed['after'], changed['by']),
             ({'Status': 'New'}, {'Status': 'Contacted'}, 'Admin'),
         )
+
+
+class FollowUpLeadDatesTests(APITestCase):
+    """Follow-ups keep the lead's next follow-up and last contacted dates current."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email='fu-dates@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.counselor = User.objects.create_user(
+            email='fu-counselor@test.com', name='Counselor A', password='pass',
+        )
+        self.client.force_authenticate(self.admin)
+        self.lead = Lead.objects.create(full_name='Follow Up', phone='9800009001')
+        self.url = f'/api/leads/{self.lead.id}/followups/'
+        self.tomorrow = (timezone.now() + timedelta(days=1)).replace(microsecond=0)
+
+    def _schedule(self, when, **extra):
+        body = {'scheduled_at': when.isoformat(), 'assigned_to': self.counselor.id, **extra}
+        response = self.client.post(self.url, body, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        return response.data['id']
+
+    def _patch(self, followup_id, body):
+        response = self.client.patch(f'{self.url}{followup_id}/', body, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        return response.data
+
+    def _lead(self):
+        return self.client.get(f'/api/leads/{self.lead.id}/').data
+
+    def test_completing_the_follow_up_clears_next_and_sets_last_contacted(self):
+        followup = self._schedule(self.tomorrow)
+        lead = self._lead()
+        self.assertEqual(lead['next_followup']['id'], followup)
+        self.assertIsNotNone(lead['next_followup_at'])
+
+        # What the Follow-ups page sends.
+        done_at = timezone.now().replace(microsecond=0)
+        self._patch(followup, {'status': 'completed', 'completed_at': done_at.isoformat()})
+
+        lead = self._lead()
+        self.assertIsNone(lead['next_followup'])
+        self.assertIsNone(lead['next_followup_at'])
+        self.lead.refresh_from_db()
+        self.assertEqual(self.lead.last_contact_at, done_at)
+
+    def test_next_moves_to_the_next_open_follow_up(self):
+        later = self.tomorrow + timedelta(days=6)
+        first = self._schedule(self.tomorrow)
+        self._schedule(later)
+        self.lead.refresh_from_db()
+        self.assertEqual(self.lead.next_followup_at, self.tomorrow)
+
+        self._patch(first, {'status': 'completed'})
+        self.lead.refresh_from_db()
+        self.assertEqual(self.lead.next_followup_at, later)
+        self.assertIsNotNone(self.lead.last_contact_at)
+
+    def test_completing_without_a_time_uses_now(self):
+        followup = self._schedule(self.tomorrow)
+        before = timezone.now()
+        data = self._patch(followup, {'status': 'completed'})
+        self.assertIsNotNone(data['completed_at'])
+        self.lead.refresh_from_db()
+        self.assertGreaterEqual(self.lead.last_contact_at, before)
+
+    def test_cancelling_or_deleting_clears_next_without_counting_as_contact(self):
+        cancelled = self._schedule(self.tomorrow)
+        deleted = self._schedule(self.tomorrow + timedelta(days=2))
+        self._patch(cancelled, {'status': 'cancelled'})
+        self.lead.refresh_from_db()
+        self.assertEqual(self.lead.next_followup_at, self.tomorrow + timedelta(days=2))
+
+        response = self.client.delete(f'{self.url}{deleted}/')
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.lead.refresh_from_db()
+        self.assertIsNone(self.lead.next_followup_at)
+        self.assertIsNone(self.lead.last_contact_at)
+
+    def test_last_contacted_never_moves_back(self):
+        call_time = timezone.now().replace(microsecond=0)
+        Lead.objects.filter(pk=self.lead.pk).update(last_contact_at=call_time)
+        followup = self._schedule(self.tomorrow)
+        self._patch(followup, {
+            'status': 'completed',
+            'completed_at': (call_time - timedelta(days=3)).isoformat(),
+        })
+        self.lead.refresh_from_db()
+        self.assertEqual(self.lead.last_contact_at, call_time)
+
+    def test_old_stale_dates_are_fixed_once(self):
+        from importlib import import_module
+
+        from django.apps import apps
+
+        followup = self._schedule(self.tomorrow)
+        done_at = timezone.now().replace(microsecond=0)
+        FollowUp.objects.filter(pk=followup).update(status='completed', completed_at=done_at)
+        Lead.objects.filter(pk=self.lead.pk).update(next_followup_at=self.tomorrow, last_contact_at=None)
+
+        import_module('apps.lead.migrations.0031_sync_followup_dates').sync(apps, None)
+        self.lead.refresh_from_db()
+        self.assertEqual((self.lead.next_followup_at, self.lead.last_contact_at), (None, done_at))
