@@ -29,6 +29,7 @@ from apps.lead.serializers import (
     EnrollmentHistorySerializer, ReasonSerializer, AdjustmentSerializer, SeatActionSerializer,
     DueDatesSerializer, ReminderLogSerializer, GiveLicenceSerializer, TeamsLicenceSerializer,
     EnquiryStageChangeSerializer, EnquiryStageSerializer, EnquiryLostSerializer,
+    PhoneMatchSerializer,
     LeadCallSerializer, LeadActivitySerializer, FollowUpSerializer,
     LeadDocumentSerializer, NotificationSerializer,
     LeadListSerializer, LeadMinSerializer,
@@ -47,7 +48,7 @@ from apps.lead.filters import (
 )
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission, needs
-from apps.global_config.filters import BranchFilterBackend
+from apps.global_config.filters import BranchFilterBackend, LeadBranchFilterBackend
 
 
 class ConfigViewSet(viewsets.ModelViewSet):
@@ -174,7 +175,7 @@ class LeadViewSet(viewsets.ModelViewSet):
     ).prefetch_related('tags')
     pagination_class = CustomPagination
     filterset_class = LeadFilter
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, BranchFilterBackend]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, LeadBranchFilterBackend]
     search_fields = ['full_name', 'phone', 'email', 'notes', 'reference_number']
     ordering_fields = [
         'id', 'reference_number', 'full_name', 'lead_score', 'expected_revenue',
@@ -206,6 +207,45 @@ class LeadViewSet(viewsets.ModelViewSet):
         if not include_archived:
             qs = qs.filter(is_archived=False)
         return qs
+
+    def create(self, request, *args, **kwargs):
+        """A new lead whose phone matches an existing lead is refused with the
+        matches, unless allow_duplicate_phone is sent."""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        allow = str(request.data.get('allow_duplicate_phone', '')).lower() in ('true', '1')
+        if not allow:
+            matches = self._phone_matches(
+                serializer.validated_data.get('phone'),
+                serializer.validated_data.get('secondary_phone'),
+            )
+            if matches:
+                return Response({
+                    'phone': ['A lead with this phone number already exists.'],
+                    'phone_match': PhoneMatchSerializer(matches, many=True).data,
+                }, status=status.HTTP_400_BAD_REQUEST)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    @staticmethod
+    def _phone_matches(*phones, exclude=None):
+        from apps.lead.phones import phone_matches
+
+        leads = phone_matches(*phones, exclude=exclude).select_related(
+            'branch', 'assigned_counselor', 'status',
+        ).prefetch_related('course_interests__course', 'course_interests__branch')
+        return list(leads[:5])
+
+    @action(detail=False, methods=['get'], url_path='phone-match')
+    def phone_match(self, request):
+        """Leads in any branch with this phone number. ?exclude= leaves out the lead being edited."""
+        exclude = request.query_params.get('exclude')
+        matches = self._phone_matches(
+            request.query_params.get('phone', ''),
+            exclude=int(exclude) if exclude and exclude.isdigit() else None,
+        )
+        return Response(PhoneMatchSerializer(matches, many=True).data)
 
     def perform_create(self, serializer):
         from apps.lead.enquiries import ensure_primary_enquiry

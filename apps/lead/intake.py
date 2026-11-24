@@ -5,7 +5,17 @@ from rest_framework.response import Response
 
 from apps.lead.enquiries import add_enquiry, open_enquiry_for
 from apps.lead.models import LeadSource, LeadType, Lead
+from apps.lead.phones import phone_matches
 from apps.course.matching import match_or_create_course
+
+
+def _course_names(data):
+    courses_raw = data.get('course_interests') or data.get('course') or data.get('courses', '')
+    if isinstance(courses_raw, str):
+        return [c.strip() for c in courses_raw.split(',') if c.strip()]
+    if isinstance(courses_raw, list):
+        return [str(c).strip() for c in courses_raw if str(c).strip()]
+    return []
 
 
 @api_view(['POST'])
@@ -46,6 +56,19 @@ def lead_intake(request):
             'notes': 'Auto-created from external intake',
         }
 
+    existing = phone_matches(phone).first()
+    if existing is not None:
+        # The same person asking again: add the new courses to their lead.
+        for name in _course_names(data):
+            course, _ = match_or_create_course(name)
+            if course is not None and open_enquiry_for(existing, course):
+                continue
+            add_enquiry(existing, course=course, course_name=name, source=source, interest_level='high')
+        return Response(
+            {'reference_number': existing.reference_number, 'id': existing.id, 'existing': True},
+            status=status.HTTP_200_OK,
+        )
+
     lead = Lead.objects.create(
         full_name=full_name,
         phone=phone,
@@ -58,15 +81,7 @@ def lead_intake(request):
         notes=data.get('notes', ''),
     )
 
-    courses_raw = data.get('course_interests') or data.get('course') or data.get('courses', '')
-    if isinstance(courses_raw, str):
-        course_names = [c.strip() for c in courses_raw.split(',') if c.strip()]
-    elif isinstance(courses_raw, list):
-        course_names = courses_raw
-    else:
-        course_names = []
-
-    for i, name in enumerate(course_names):
+    for i, name in enumerate(_course_names(data)):
         course, _ = match_or_create_course(name)
         if course is not None and open_enquiry_for(lead, course):
             continue

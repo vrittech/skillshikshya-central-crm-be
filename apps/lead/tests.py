@@ -2095,3 +2095,105 @@ class EnquiryTests(SeatTestBase):
         rows = data['results'] if isinstance(data, dict) else data
         self.assertEqual([r['id'] for r in rows], [first['id']])
 
+
+class PhoneMatchTests(APITestCase):
+    """The same number typed any way finds the same lead, in any branch."""
+
+    URL = '/api/leads/phone-match/'
+
+    def setUp(self):
+        from apps.branch.models import Branch
+
+        self.ktm = Branch.objects.create(name='Kathmandu', code='KTM')
+        self.pkr = Branch.objects.create(name='Pokhara', code='PKR')
+        self.admin = User.objects.create_user(
+            email='phone@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+        self.course = Course.objects.create(name='Python', full_amount=30000)
+        self.lead = Lead.objects.create(
+            full_name='Hari Gurung', phone='+977 980-000-0800', branch=self.ktm,
+        )
+
+    def _match(self, phone, **params):
+        response = self.client.get(self.URL, {'phone': phone, **params})
+        self.assertEqual(response.status_code, 200)
+        return [row['id'] for row in response.data]
+
+    def test_phone_key(self):
+        from apps.lead.phones import phone_key
+
+        self.assertEqual(phone_key('+977 980-000-0800'), '9800000800')
+        self.assertEqual(phone_key('9779800000800'), '9800000800')
+        self.assertEqual(phone_key('980 000 0800'), '9800000800')
+        self.assertEqual(phone_key('01-4412345'), '014412345')
+        self.assertEqual(phone_key(None), '')
+
+    def test_finds_the_lead_however_the_number_is_typed(self):
+        for typed in ['9800000800', '+9779800000800', '980-000-0800']:
+            self.assertEqual(self._match(typed), [self.lead.id], typed)
+        self.assertEqual(self._match('9800000801'), [])
+        self.assertEqual(self._match('0800'), [])
+
+    def test_second_phone_and_exclude_and_deleted(self):
+        other = Lead.objects.create(full_name='Other', phone='9811111111', secondary_phone='9800000800')
+        self.assertEqual(sorted(self._match('9800000800')), sorted([self.lead.id, other.id]))
+        self.assertEqual(self._match('9800000800', exclude=other.id), [self.lead.id])
+        other.is_deleted = True
+        other.save()
+        self.assertEqual(self._match('9800000800'), [self.lead.id])
+
+    def test_match_shows_the_enquiries(self):
+        from apps.lead.enquiries import add_enquiry
+
+        add_enquiry(self.lead, course=self.course, user=self.admin)
+        row = self.client.get(self.URL, {'phone': '9800000800'}).data[0]
+        self.assertEqual(row['branch_name'], 'Kathmandu')
+        self.assertEqual(
+            [(e['course_name'], e['stage']) for e in row['enquiries']], [('Python', 'new')],
+        )
+
+    def test_new_lead_with_a_known_phone_is_refused_with_the_match(self):
+        body = {'full_name': 'Hari G', 'phone': '9779800000800'}
+        response = self.client.post('/api/leads/', body, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['phone'], ['A lead with this phone number already exists.'])
+        self.assertEqual([m['id'] for m in response.data['phone_match']], [self.lead.id])
+        self.assertEqual(Lead.objects.count(), 1)
+
+        response = self.client.post(
+            '/api/leads/', {**body, 'allow_duplicate_phone': True}, format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Lead.objects.count(), 2)
+
+    def test_other_branch_finds_the_lead_and_sees_it_after_taking_an_enquiry(self):
+        from apps.lead.enquiries import add_enquiry
+
+        counselor = User.objects.create_user(
+            email='pkr@test.com', name='Pokhara Counselor', password='pass', branch=self.pkr,
+        )
+        self.client.force_authenticate(counselor)
+        self.assertEqual(self._match('9800000800'), [self.lead.id])
+        self.assertEqual(self.client.get(f'/api/leads/{self.lead.id}/').status_code, 404)
+
+        enquiry = add_enquiry(self.lead, course=self.course, user=counselor)
+        self.assertEqual(enquiry.branch, self.pkr)
+        self.assertEqual(self.client.get(f'/api/leads/{self.lead.id}/').status_code, 200)
+        listed = self.client.get('/api/leads/').data['results']
+        self.assertEqual([row['id'] for row in listed], [self.lead.id])
+
+    def test_intake_from_a_known_number_adds_to_the_same_lead(self):
+        response = self.client.post('/api/public/lead-intake/', {
+            'name': 'Hari', 'phone_number': '980-000-0800', 'course_interests': 'Python',
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual((response.data['id'], response.data['existing']), (self.lead.id, True))
+        self.assertEqual(Lead.objects.count(), 1)
+        self.assertEqual(list(self.lead.course_interests.values_list('course__name', 'stage')), [('Python', 'new')])
+        # Asking again for the same course does not add a second open enquiry.
+        self.client.post('/api/public/lead-intake/', {
+            'name': 'Hari', 'phone_number': '9800000800', 'course_interests': 'Python',
+        }, format='json')
+        self.assertEqual(self.lead.course_interests.count(), 1)
+

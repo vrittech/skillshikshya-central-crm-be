@@ -1,3 +1,4 @@
+from django.db.models import Q
 from rest_framework.filters import BaseFilterBackend
 
 
@@ -18,3 +19,28 @@ class BranchFilterBackend(BaseFilterBackend):
             return queryset.filter(**filter_kwargs)
 
         return queryset
+
+
+class LeadBranchFilterBackend(BranchFilterBackend):
+    """Leads: a branch sees its own leads and leads with an enquiry taken at the branch.
+
+    A person may ask at any branch, so one lead can have enquiries from
+    several branches.
+    """
+
+    def filter_queryset(self, request, queryset, view):
+        user = request.user
+        user_branch = getattr(user, 'branch', None)
+        if user.is_staff or user.is_superuser:
+            branch_id = request.query_params.get('branch_id')
+            if branch_id:
+                return queryset.filter(
+                    Q(branch_id=branch_id) | Q(course_interests__branch_id=branch_id)
+                ).distinct()
+            return queryset
+        if user_branch:
+            return queryset.filter(
+                Q(branch=user_branch) | Q(course_interests__branch=user_branch)
+            ).distinct()
+        return queryset
+

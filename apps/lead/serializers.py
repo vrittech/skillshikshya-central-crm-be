@@ -729,3 +729,35 @@ class TeamsLicenceSerializer(serializers.ModelSerializer):
 class GiveLicenceSerializer(serializers.Serializer):
     enrollment = serializers.PrimaryKeyRelatedField(queryset=Enrollment.objects.all())
     account = serializers.EmailField()
+
+
+class PhoneMatchEnquirySerializer(serializers.ModelSerializer):
+    course_name = serializers.SerializerMethodField()
+    stage_display = serializers.CharField(source='get_stage_display', read_only=True)
+    branch_name = serializers.CharField(source='branch.name', read_only=True, default=None)
+
+    class Meta:
+        model = LeadCourseInterest
+        fields = ['id', 'course', 'course_name', 'stage', 'stage_display', 'branch_name']
+
+    def get_course_name(self, obj):
+        return obj.course.name if obj.course else obj.course_name
+
+
+class PhoneMatchSerializer(serializers.ModelSerializer):
+    """A lead found by phone number, from any branch."""
+
+    branch_name = serializers.CharField(source='branch.name', read_only=True, default=None)
+    counselor_name = serializers.CharField(source='assigned_counselor.name', read_only=True, default=None)
+    status_name = serializers.CharField(source='status.name', read_only=True, default=None)
+    enquiries = PhoneMatchEnquirySerializer(source='course_interests', many=True, read_only=True)
+
+    class Meta:
+        model = Lead
+        fields = [
+            'id', 'reference_number', 'full_name', 'phone', 'secondary_phone', 'email',
+            'branch', 'branch_name', 'counselor_name', 'status_name', 'is_converted',
+            'is_archived', 'created_at', 'enquiries',
+        ]
+        read_only_fields = fields
+

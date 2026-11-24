@@ -3,6 +3,7 @@ import logging
 from apps.course.matching import match_or_create_course
 from apps.lead.enquiries import add_enquiry
 from apps.lead.models import Lead, LeadSource, LeadType
+from apps.lead.phones import phone_matches
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ def _lead_exists(contact):
     if contact.get('id') and Lead.objects.filter(custom_data__orbitchat_id=contact['id']).exists():
         return True
     phone = contact.get('phone')
-    if phone and Lead.objects.filter(phone=phone).exists():
+    if phone and phone_matches(phone).exists():
         return True
     return False
 
