@@ -494,6 +494,7 @@ class EnrollmentHistory(models.Model):
 
     class Action(models.TextChoices):
         CANCEL = 'cancel', 'Cancel'
+        REINSTATE = 'reinstate', 'Reinstate'
         SWITCH_BATCH = 'switch_batch', 'Switch batch'
         PAUSE = 'pause', 'Pause'
         RESUME = 'resume', 'Resume'

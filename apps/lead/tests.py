@@ -330,3 +330,92 @@ class EnrollmentHistoryTests(APITestCase):
         delete = self.client.delete(f'{self.history_url}{row.id}/')
         self.assertEqual(delete.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
         self.assertEqual(EnrollmentHistory.objects.count(), 1)
+
+
+class EnrollmentCancelTests(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email='cancel@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+        course = Course.objects.create(name='Python', full_amount=30000)
+        self.lead = Lead.objects.create(full_name='Hari', phone='9800000300')
+        self.enrollment = Enrollment.objects.create(
+            lead=self.lead, course=course, enrollment_date=date.today(),
+            listed_fee=30000, agreed_amount=30000, status='active',
+        )
+        self.enrollment_url = f'/api/leads/{self.lead.id}/enrollments/{self.enrollment.id}/'
+        self.cancel_url = f'{self.enrollment_url}cancel/'
+
+    def test_cancel_with_reason(self):
+        response = self.client.post(
+            self.cancel_url, {'reason': 'Moved abroad'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'cancelled')
+        self.enrollment.refresh_from_db()
+        self.assertEqual(self.enrollment.status, 'cancelled')
+        self.assertEqual(self.enrollment.updated_by, self.admin)
+        row = self.enrollment.history.get()
+        self.assertEqual(row.action, 'cancel')
+        self.assertEqual(row.reason, 'Moved abroad')
+        self.assertEqual(row.before, {'status': 'active'})
+        self.assertEqual(row.after, {'status': 'cancelled'})
+        self.assertEqual(row.performed_by, self.admin)
+
+    def test_cancel_without_reason_is_refused(self):
+        for body in ({}, {'reason': '   '}):
+            response = self.client.post(self.cancel_url, body, format='json')
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertIn('reason', response.data)
+        self.enrollment.refresh_from_db()
+        self.assertEqual(self.enrollment.status, 'active')
+        self.assertFalse(self.enrollment.history.exists())
+
+    def test_cancel_twice_is_refused(self):
+        self.client.post(self.cancel_url, {'reason': 'Moved abroad'}, format='json')
+        response = self.client.post(self.cancel_url, {'reason': 'Again'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('already cancelled', response.data['detail'])
+        self.assertEqual(self.enrollment.history.count(), 1)
+
+    def test_patch_cannot_cancel_without_reason(self):
+        response = self.client.patch(
+            self.enrollment_url, {'status': 'cancelled'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('status', response.data)
+        self.enrollment.refresh_from_db()
+        self.assertEqual(self.enrollment.status, 'active')
+
+    def test_reinstate_restores_old_status_with_reason(self):
+        self.client.post(self.cancel_url, {'reason': 'Moved abroad'}, format='json')
+        response = self.client.post(
+            f'{self.enrollment_url}reinstate/', {'reason': 'Came back'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.enrollment.refresh_from_db()
+        self.assertEqual(self.enrollment.status, 'active')
+        row = self.enrollment.history.order_by('-id').first()
+        self.assertEqual(row.action, 'reinstate')
+        self.assertEqual(row.reason, 'Came back')
+        self.assertEqual(row.after, {'status': 'active'})
+
+    def test_reinstate_needs_a_cancelled_enrollment(self):
+        response = self.client.post(
+            f'{self.enrollment_url}reinstate/', {'reason': 'Came back'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(self.enrollment.history.exists())
+
+    def test_patch_cannot_reopen_a_cancelled_enrollment(self):
+        self.client.post(self.cancel_url, {'reason': 'Moved abroad'}, format='json')
+        response = self.client.patch(
+            self.enrollment_url, {'status': 'active'}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # Other fields of a cancelled enrollment can still be saved.
+        ok = self.client.patch(
+            self.enrollment_url, {'status': 'cancelled', 'remarks': 'Note'}, format='json',
+        )
+        self.assertEqual(ok.status_code, status.HTTP_200_OK)

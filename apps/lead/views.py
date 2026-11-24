@@ -12,6 +12,7 @@ from rest_framework.response import Response
 
 from django_filters.rest_framework import DjangoFilterBackend
 
+from apps.lead import services
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
@@ -23,7 +24,7 @@ from apps.lead.serializers import (
     LeadSourceSerializer, CampaignSerializer, LeadStatusSerializer,
     LeadPrioritySerializer, LeadTagSerializer, LeadTypeSerializer, LeadSerializer,
     LeadCourseInterestSerializer, EnrollmentSerializer, PaymentSerializer,
-    EnrollmentHistorySerializer,
+    EnrollmentHistorySerializer, ReasonSerializer,
     LeadCallSerializer, LeadActivitySerializer, FollowUpSerializer,
     LeadDocumentSerializer, NotificationSerializer,
     LeadListSerializer, LeadMinSerializer,
@@ -454,11 +455,32 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         serializer.save(updated_by=self.request.user)
 
     def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+        if self.action in [
+            'create', 'update', 'partial_update', 'destroy', 'cancel', 'reinstate',
+        ]:
             permission_classes = [IsAuthenticated, IsStaffOrHasPermission]
         else:
             permission_classes = [IsAuthenticated]
         return [p() for p in permission_classes]
+
+    def _reason(self, request):
+        serializer = ReasonSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return serializer.validated_data['reason']
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, *args, **kwargs):
+        enrollment = self.get_object()
+        reason = self._reason(request)
+        enrollment = services.cancel_enrollment(enrollment, reason=reason, user=request.user)
+        return Response(self.get_serializer(enrollment).data)
+
+    @action(detail=True, methods=['post'])
+    def reinstate(self, request, *args, **kwargs):
+        enrollment = self.get_object()
+        reason = self._reason(request)
+        enrollment = services.reinstate_enrollment(enrollment, reason=reason, user=request.user)
+        return Response(self.get_serializer(enrollment).data)
 
 
 class PaymentViewSet(viewsets.ModelViewSet):

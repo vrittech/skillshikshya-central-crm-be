@@ -123,6 +123,20 @@ class EnrollmentSerializer(serializers.ModelSerializer):
             'total_paid', 'remaining_amount', 'is_full_paid',
         ]
 
+    def validate_status(self, value):
+        # Cancel and reinstate need a reason, so they have their own actions.
+        current = self.instance.status if self.instance else None
+        cancelled = Enrollment.Status.CANCELLED
+        if value == cancelled and current != cancelled:
+            raise serializers.ValidationError(
+                'To cancel, use Cancel enrollment and give a reason.'
+            )
+        if current == cancelled and value != cancelled:
+            raise serializers.ValidationError(
+                'To reopen, use Reinstate enrollment and give a reason.'
+            )
+        return value
+
 
 class PaymentSerializer(serializers.ModelSerializer):
     received_by_name = serializers.CharField(source='received_by.name', read_only=True)
@@ -144,6 +158,12 @@ class EnrollmentHistorySerializer(serializers.ModelSerializer):
             'before', 'after', 'performed_by', 'performed_by_name', 'created_at',
         ]
         read_only_fields = fields
+
+
+class ReasonSerializer(serializers.Serializer):
+    """Body of every action that needs a reason. Blank or spaces-only is refused."""
+
+    reason = serializers.CharField()
 
 
 class LeadMinSerializer(serializers.ModelSerializer):
