@@ -164,16 +164,19 @@ class OwedReportTests(APITestCase):
         self.today = timezone.localdate()
         self.people = 0
 
-    def _enrollment(self, parts, paid=0, status='confirmed', branch=None):
+    def _enrollment(self, parts, paid=0, status='confirmed', branch=None, counselor=None, batch=None):
         """parts: list of (days from today, amount)."""
         from apps.lead.models import Installment, PaymentPlan
 
         self.people += 1
-        lead = Lead.objects.create(full_name=f'Student {self.people}', phone=f'98000020{self.people:02d}')
+        lead = Lead.objects.create(
+            full_name=f'Student {self.people}', phone=f'98000020{self.people:02d}',
+            assigned_counselor=counselor,
+        )
         enrollment = Enrollment.objects.create(
             lead=lead, course=self.course, enrollment_date=self.today, listed_fee=30000,
             agreed_amount=sum(amount for _, amount in parts), status=status,
-            branch=branch or self.branch,
+            branch=branch or self.branch, batch=batch,
         )
         plan = PaymentPlan.objects.create(enrollment=enrollment, reason='Plan', created_by=self.user)
         for days, amount in parts:
@@ -230,6 +233,44 @@ class OwedReportTests(APITestCase):
         self.assertEqual(data['summary']['over_90'], '10000.00')
         data = self._get('/api/reports/who-owes/', late_only='true')
         self.assertNotIn(not_late.id, [r['enrollment'] for r in data['results']])
+
+    def test_who_owes_by_counselor_and_by_batch(self):
+        from apps.course.models import CourseBatch
+
+        users = get_user_model().objects
+        ram = users.create_user(email='ram@test.com', name='Ram', password='pass')
+        sita = users.create_user(email='sita@test.com', name='Sita', password='pass')
+        nov = CourseBatch.objects.create(name='Python Nov', course=self.course, capacity=20)
+        dec = CourseBatch.objects.create(name='Python Dec', course=self.course, capacity=20)
+        late = self._enrollment([(-40, 10000)], counselor=ram, batch=nov)
+        self._enrollment([(10, 5000)], counselor=ram, batch=nov)
+        self._enrollment([(-5, 8000)], counselor=sita, batch=dec)
+        nobody = self._enrollment([(10, 3000)])
+
+        data = self._get('/api/reports/who-owes/')
+        row = next(r for r in data['results'] if r['enrollment'] == late.id)
+        self.assertEqual(
+            (row['counselor'], row['counselor_name'], row['batch'], row['batch_name']),
+            (ram.id, 'Ram', nov.id, 'Python Nov'),
+        )
+        self.assertEqual(
+            [(g['counselor_name'], g['students'], g['owed'], g['late'], g['days_late'])
+             for g in data['by_counselor']],
+            [('Ram', 2, '15000.00', '10000.00', 40), ('Sita', 1, '8000.00', '8000.00', 5),
+             (None, 1, '3000.00', '0', 0)],
+        )
+        self.assertEqual(
+            [(g['batch_name'], g['students'], g['owed']) for g in data['by_batch']],
+            [('Python Nov', 2, '15000.00'), ('Python Dec', 1, '8000.00'), (None, 1, '3000.00')],
+        )
+
+        mine = self._get('/api/reports/who-owes/', counselor=ram.id)
+        self.assertEqual(len(mine['results']), 2)
+        self.assertEqual(mine['summary']['total_owed'], '15000.00')
+        unassigned = self._get('/api/reports/who-owes/', counselor='none')
+        self.assertEqual([r['enrollment'] for r in unassigned['results']], [nobody.id])
+        in_batch = self._get('/api/reports/who-owes/', batch=dec.id)
+        self.assertEqual([g['counselor_name'] for g in in_batch['by_counselor']], ['Sita'])
 
     def test_who_owes_stays_inside_a_branch(self):
         here = self._enrollment([(-5, 10000)])

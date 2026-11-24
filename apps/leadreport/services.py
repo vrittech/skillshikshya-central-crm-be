@@ -619,7 +619,16 @@ def _owing_enrollments(request):
         value = _query_param(request, name)
         if value and str(value).isdigit():
             qs = qs.filter(**{f'{name}_id': int(value)})
-    return qs.select_related('lead', 'student', 'course', 'batch', 'branch').annotate(
+    # The counselor who chases the money: the lead's counselor, the same person
+    # the payment reminders hand the call to. 'none' = students with nobody.
+    counselor = _query_param(request, 'counselor')
+    if counselor == 'none':
+        qs = qs.filter(lead__assigned_counselor__isnull=True)
+    elif counselor and str(counselor).isdigit():
+        qs = qs.filter(lead__assigned_counselor_id=int(counselor))
+    return qs.select_related(
+        'lead', 'lead__assigned_counselor', 'student', 'course', 'batch', 'branch',
+    ).annotate(
         paid_total=Coalesce(
             Sum('payments__amount', filter=Q(payments__status='successful')),
             Decimal('0'),
@@ -632,6 +641,7 @@ def _owing_enrollments(request):
 
 def _who(enrollment):
     student = enrollment.student
+    counselor = enrollment.lead.assigned_counselor
     return {
         'enrollment': enrollment.id,
         'lead': enrollment.lead_id,
@@ -639,15 +649,39 @@ def _who(enrollment):
         'phone': (student.phone if student else None) or enrollment.lead.phone,
         'student_id': student.student_id if student else None,
         'course_name': enrollment.course.name,
+        'batch': enrollment.batch_id,
         'batch_name': enrollment.batch.name if enrollment.batch else None,
         'branch_name': enrollment.branch.name if enrollment.branch else None,
+        'counselor': counselor.id if counselor else None,
+        'counselor_name': counselor.name if counselor else None,
     }
+
+
+def _owed_groups(results, key, name):
+    """Who owes, added up per counselor or per batch: students, owed, late, longest late.
+
+    Rows with no counselor (or no batch) make one group with id None.
+    Biggest amount owed first.
+    """
+    groups = {}
+    for r in results:
+        g = groups.setdefault(r[key], {
+            key: r[key], name: r[name], 'students': 0,
+            'owed': Decimal('0'), 'late': Decimal('0'), 'days_late': 0,
+        })
+        g['students'] += 1
+        g['owed'] += r['owed']
+        g['late'] += r['late']
+        g['days_late'] = max(g['days_late'], r['days_late'])
+    rows = sorted(groups.values(), key=lambda g: (-g['owed'], g[name] or ''))
+    return [{**g, 'owed': str(g['owed']), 'late': str(g['late'])} for g in rows]
 
 
 def who_owes_report(request):
     """Every student who owes money: how much, how much is late, and how late.
 
-    Optional filters: course, batch (the money batch), late_only.
+    Optional filters: course, batch (the money batch), counselor (an id, or
+    'none'), late_only. by_counselor and by_batch add the rows up.
     """
     today = timezone.localdate()
     late_only = _to_bool(_query_param(request, 'late_only'))
@@ -689,6 +723,8 @@ def who_owes_report(request):
             'not_late': str(totals['owed'] - totals['late']),
             **{key: str(amount) for key, amount in buckets.items()},
         },
+        'by_counselor': _owed_groups(results, 'counselor', 'counselor_name'),
+        'by_batch': _owed_groups(results, 'batch', 'batch_name'),
         'results': [
             {
                 **r,
