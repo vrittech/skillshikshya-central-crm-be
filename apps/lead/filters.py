@@ -1,5 +1,9 @@
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
 import django_filters
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, OuterRef, Q
+from django.utils import timezone
 
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
@@ -216,16 +220,60 @@ class LeadActivityFilter(django_filters.FilterSet):
         fields = ['lead', 'activity_type', 'performed_by']
 
 
+NEPAL = ZoneInfo('Asia/Kathmandu')
+
+
+def nepal_today_bounds(now=None):
+    """Start of today and start of tomorrow in Nepal time."""
+    today = timezone.localtime(now or timezone.now(), NEPAL).date()
+    start = datetime.combine(today, time.min, tzinfo=NEPAL)
+    return start, start + timedelta(days=1)
+
+
+def due_bucket(scheduled_at, bounds):
+    """'overdue' (before today), 'today' or 'upcoming' (after today), by Nepal days."""
+    start, end = bounds
+    if scheduled_at < start:
+        return 'overdue'
+    return 'today' if scheduled_at < end else 'upcoming'
+
+
+def due_q(bucket, bounds):
+    start, end = bounds
+    return {
+        'overdue': Q(scheduled_at__lt=start),
+        'today': Q(scheduled_at__gte=start, scheduled_at__lt=end),
+        'upcoming': Q(scheduled_at__gte=end),
+    }[bucket]
+
+
+DUE_BUCKETS = ('overdue', 'today', 'upcoming')
+OPEN_FOLLOWUP = Q(status__in=[FollowUp.Status.PENDING, FollowUp.Status.MISSED])
+
+
 class FollowUpFilter(django_filters.FilterSet):
     scheduled_at__gte = django_filters.DateTimeFilter(field_name='scheduled_at', lookup_expr='gte')
     scheduled_at__lte = django_filters.DateTimeFilter(field_name='scheduled_at', lookup_expr='lte')
     # payment=true: only payment follow-ups (made by the reminder job); false: only the others.
     payment = django_filters.BooleanFilter(method='filter_payment')
+    # open=true: still to do (pending or missed); false: completed or cancelled.
+    open = django_filters.BooleanFilter(method='filter_open')
+    due = django_filters.ChoiceFilter(
+        choices=[(b, b.title()) for b in DUE_BUCKETS], method='filter_due',
+    )
 
     def filter_payment(self, queryset, name, value):
         if value is None:
             return queryset
         return queryset.filter(enrollment__isnull=not value)
+
+    def filter_open(self, queryset, name, value):
+        if value is None:
+            return queryset
+        return queryset.filter(OPEN_FOLLOWUP) if value else queryset.exclude(OPEN_FOLLOWUP)
+
+    def filter_due(self, queryset, name, value):
+        return queryset.filter(due_q(value, nepal_today_bounds()))
 
     class Meta:
         model = FollowUp

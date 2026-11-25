@@ -1725,6 +1725,60 @@ class EnrollmentListTests(SeatTestBase):
         self.assertEqual(len(seen), 105)
 
 
+class FollowUpAndPaymentListTests(SeatTestBase):
+    """The Follow-ups and Payments pages search, filter, count and total on the server."""
+
+    def test_follow_ups_filter_open_and_due_by_nepal_day(self):
+        from datetime import timedelta as td
+        from apps.lead.filters import nepal_today_bounds
+
+        start, end = nepal_today_bounds()
+        lead = Lead.objects.create(full_name='Sita Kc', phone='9822222222')
+        late = FollowUp.objects.create(lead=lead, scheduled_at=start - td(hours=1), purpose='Call back')
+        today = FollowUp.objects.create(lead=lead, scheduled_at=start + td(hours=1), purpose='Fee chat')
+        soon = FollowUp.objects.create(lead=lead, scheduled_at=end + td(hours=1), purpose='Demo')
+        FollowUp.objects.create(
+            lead=lead, scheduled_at=start - td(days=2), purpose='Done', status='completed',
+        )
+
+        def ids(**params):
+            data = self.client.get('/api/followups/', {'open': 'true', **params}).data
+            return [r['id'] for r in data['results']]
+
+        self.assertEqual(ids(due='overdue'), [late.id])
+        self.assertEqual(ids(due='today'), [today.id])
+        self.assertEqual(ids(due='upcoming'), [soon.id])
+        self.assertEqual(ids(search='fee'), [today.id])
+        self.assertEqual(sorted(ids()), sorted([late.id, today.id, soon.id]))
+        rows = self.client.get('/api/followups/', {'open': 'true', 'ordering': 'scheduled_at'}).data
+        self.assertEqual([r['due'] for r in rows['results']], ['overdue', 'today', 'upcoming'])
+
+        summary = self.client.get('/api/followups/summary/', {'open': 'true'}).data
+        self.assertEqual(summary, {'overdue': 1, 'today': 1, 'upcoming': 1, 'total': 3})
+        everything = self.client.get('/api/followups/summary/').data
+        self.assertEqual(everything['overdue'], 2)
+
+    def test_payments_search_and_summary_cover_every_page(self):
+        enrollment = self._enroll(self.batch)
+        for n in range(3):
+            Payment.objects.create(
+                enrollment=enrollment, amount=Decimal('1000'), payment_date=timezone.now(),
+                payment_method='cash', status='successful', transaction_reference=f'REF-{n}',
+            )
+        Payment.objects.create(
+            enrollment=enrollment, amount=Decimal('500'), payment_date=timezone.now(),
+            payment_method='esewa', status='failed', transaction_reference='ESW-9',
+        )
+        page = self.client.get('/api/payments/', {'page_size': 2}).data
+        self.assertEqual((page['count'], len(page['results'])), (4, 2))
+        summary = self.client.get('/api/payments/summary/').data
+        self.assertEqual(summary, {'count': 4, 'successful_total': '3000.00'})
+        found = self.client.get('/api/payments/', {'search': 'ESW-9'}).data['results']
+        self.assertEqual([r['transaction_reference'] for r in found], ['ESW-9'])
+        cash = self.client.get('/api/payments/summary/', {'payment_method': 'cash'}).data
+        self.assertEqual(cash, {'count': 3, 'successful_total': '3000.00'})
+
+
 class DueDateTests(SeatTestBase):
     """Due dates: set at confirm, changed with a reason, filled oldest first."""
 

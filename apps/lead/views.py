@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Count, Q, Sum
@@ -424,8 +425,9 @@ class GlobalFollowUpViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = FollowUp.objects.none()
     serializer_class = GlobalFollowUpSerializer
     pagination_class = CustomPagination
-    filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, BranchFilterBackend]
     filterset_class = FollowUpFilter
+    search_fields = ['lead__full_name', 'lead__phone', 'purpose', 'assigned_to__name']
     ordering_fields = ['scheduled_at', 'created_at']
     ordering = ['-scheduled_at']
 
@@ -435,9 +437,20 @@ class GlobalFollowUpViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        """How many follow-ups are overdue, due today and upcoming, with the list's filters."""
+        from apps.lead.filters import DUE_BUCKETS, due_q, nepal_today_bounds
+
+        bounds = nepal_today_bounds()
+        counts = self.filter_queryset(self.get_queryset()).aggregate(**{
+            bucket: Count('id', filter=due_q(bucket, bounds)) for bucket in DUE_BUCKETS
+        })
+        return Response({**counts, 'total': sum(counts.values())})
 
 
 class GlobalEnrollmentViewSet(viewsets.ReadOnlyModelViewSet):
@@ -470,8 +483,12 @@ class GlobalPaymentViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Payment.objects.none()
     serializer_class = GlobalPaymentSerializer
     pagination_class = CustomPagination
-    filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, BranchFilterBackend]
     filterset_class = GlobalPaymentFilter
+    search_fields = [
+        'enrollment__lead__full_name', 'enrollment__lead__phone', 'enrollment__course__name',
+        'transaction_reference',
+    ]
     ordering_fields = ['payment_date', 'amount', 'created_at']
     ordering = ['-payment_date']
 
@@ -481,9 +498,20 @@ class GlobalPaymentViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        """How many payments match the list's filters, and the total of the successful ones."""
+        totals = self.filter_queryset(self.get_queryset()).aggregate(
+            count=Count('id'),
+            successful=Coalesce(
+                Sum('amount', filter=Q(status=Payment.Status.SUCCESSFUL)), Decimal('0'),
+            ),
+        )
+        return Response({'count': totals['count'], 'successful_total': str(totals['successful'])})
 
 
 class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):

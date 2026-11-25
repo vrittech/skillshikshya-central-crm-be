@@ -824,17 +824,26 @@ class GlobalFollowUpSerializer(serializers.ModelSerializer):
     enrollment_course_name = serializers.CharField(
         source='enrollment.course.name', read_only=True, default=None,
     )
+    due = serializers.SerializerMethodField()
 
     class Meta:
         model = FollowUp
         fields = [
             'id', 'lead', 'lead_name', 'lead_phone',
             'assigned_to', 'assigned_to_name',
-            'scheduled_at', 'purpose', 'status',
+            'scheduled_at', 'due', 'purpose', 'status',
             'enrollment', 'enrollment_course_name',
             'branch', 'branch_name',
         ]
         read_only_fields = fields
+
+    def get_due(self, obj):
+        """'overdue', 'today' or 'upcoming', by Nepal days."""
+        from apps.lead.filters import due_bucket, nepal_today_bounds
+
+        if not hasattr(self, '_today'):
+            self._today = nepal_today_bounds()
+        return due_bucket(obj.scheduled_at, self._today)
 
 
 class GlobalEnrollmentSerializer(serializers.ModelSerializer):
