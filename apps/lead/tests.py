@@ -2361,7 +2361,7 @@ class TeamsLicenceTests(APITestCase):
                          ('action_required', 'Enrollment cancelled'))
         self.assertEqual(rows['class@x.com']['state'], 'in_use')
 
-        close_batch(self.batch, reason='Finished', user=self.admin)
+        close_batch(self.batch, reason='Finished', user=self.admin, close_anyway=True)
         rows = self._rows()
         self.assertEqual((rows['class@x.com']['state'], rows['class@x.com']['reason']),
                          ('action_required', 'Batch closed'))

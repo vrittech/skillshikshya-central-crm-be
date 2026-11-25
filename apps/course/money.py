@@ -42,36 +42,59 @@ def _per_enrollment(queryset):
     )
 
 
+def _with_money(enrollments):
+    """Enrollments with what each paid, was charged extra, discounted, written off and refunded."""
+    from apps.lead.models import Adjustment, Payment
+
+    kinds = Adjustment.Kind
+    return enrollments.annotate(
+        paid=_per_enrollment(Payment.objects.filter(status=Payment.Status.SUCCESSFUL)),
+        extra=_per_enrollment(Adjustment.objects.filter(kind=kinds.EXTRA_CHARGE)),
+        discount=_per_enrollment(Adjustment.objects.filter(kind=kinds.DISCOUNT)),
+        write_off=_per_enrollment(Adjustment.objects.filter(kind=kinds.WRITE_OFF)),
+        refund=_per_enrollment(Adjustment.objects.filter(kind=kinds.REFUND)),
+    )
+
+
+def _fee(e):
+    return e['agreed_amount'] + e['extra'] - e['discount'] - e['write_off']
+
+
+def batch_owing(batch_id):
+    """Students of the money batch who still owe, biggest amount first: (enrollment, owed)."""
+    from apps.lead.models import Enrollment
+
+    rows = []
+    enrollments = _with_money(
+        Enrollment.objects.filter(batch_id=batch_id, status__in=Enrollment.SEAT_STATUSES)
+    ).select_related('lead', 'student')
+    for e in enrollments:
+        values = {name: getattr(e, name) for name in ('agreed_amount', 'extra', 'discount', 'write_off')}
+        owed = _fee(values) - (e.paid - e.refund)
+        if owed > 0:
+            rows.append((e, owed))
+    rows.sort(key=lambda r: (-r[1], r[0].id))
+    return rows
+
+
 def batch_figures(batch_ids):
     """{batch id: figures} counted from today's data."""
-    from apps.lead.models import Adjustment, Enrollment, Payment
+    from apps.lead.models import Enrollment
 
     batch_ids = list(batch_ids)
     figures = {pk: empty_figures() for pk in batch_ids}
     if not batch_ids:
         return figures
 
-    kinds = Adjustment.Kind
-    enrollments = (
-        Enrollment.objects.filter(batch_id__in=batch_ids)
-        .annotate(
-            paid=_per_enrollment(Payment.objects.filter(status=Payment.Status.SUCCESSFUL)),
-            extra=_per_enrollment(Adjustment.objects.filter(kind=kinds.EXTRA_CHARGE)),
-            discount=_per_enrollment(Adjustment.objects.filter(kind=kinds.DISCOUNT)),
-            write_off=_per_enrollment(Adjustment.objects.filter(kind=kinds.WRITE_OFF)),
-            refund=_per_enrollment(Adjustment.objects.filter(kind=kinds.REFUND)),
-        )
-        .values(
-            'batch_id', 'status', 'agreed_amount',
-            'paid', 'extra', 'discount', 'write_off', 'refund',
-        )
+    enrollments = _with_money(Enrollment.objects.filter(batch_id__in=batch_ids)).values(
+        'batch_id', 'status', 'agreed_amount', 'paid', 'extra', 'discount', 'write_off', 'refund',
     )
     for e in enrollments:
         f = figures[e['batch_id']]
         collected = e['paid'] - e['refund']
         f['collected'] += collected
         if e['status'] in Enrollment.SEAT_STATUSES:
-            fee = e['agreed_amount'] + e['extra'] - e['discount'] - e['write_off']
+            fee = _fee(e)
             f['students'] += 1
             f['fees'] += fee
             f['owed'] += max(fee - collected, ZERO)

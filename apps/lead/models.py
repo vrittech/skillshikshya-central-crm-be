@@ -825,6 +825,7 @@ class EnrollmentHistory(models.Model):
         FREE_LICENCE = 'free_licence', 'Teams licence freed'
         PAUSE_LICENCE = 'pause_licence', 'Teams licence paused'
         RESUME_LICENCE = 'resume_licence', 'Teams licence back in use'
+        COMPLETE = 'complete', 'Completed'
 
     enrollment = models.ForeignKey(
         Enrollment, on_delete=models.PROTECT, related_name='history',

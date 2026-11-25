@@ -302,6 +302,8 @@ class BatchClosing(models.Model):
     owed = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
     costs = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
     profit = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    # What the close checklist still had open at close (apps.course.closing.check_record).
+    checklist = models.JSONField(null=True, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='batch_closings',
     )

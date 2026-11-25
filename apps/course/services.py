@@ -2,6 +2,7 @@
 from django.db import transaction
 from django.utils import timezone
 
+from apps.course import closing
 from apps.course.models import BatchClosing, BatchCost, CourseBatch
 from apps.course.money import MONEY_FIELDS, batch_figures
 from apps.lead.services import ActionRefused
@@ -41,20 +42,24 @@ def _lock(batch):
 
 
 @transaction.atomic
-def close_batch(batch, *, reason, user):
+def close_batch(batch, *, reason, user, close_anyway=False):
     """Close the batch and keep its figures as they are today.
 
-    Money and costs that come later still count on the batch; they show as
-    "after close". Students stay where they are: closing does not change
-    their enrollments. Their Teams licences show "Action required" until
-    someone takes them back.
+    The close checklist (apps.course.closing) must be clear, or close_anyway
+    set; what was still open is kept on the close row. Money and costs that
+    come later still count on the batch; they show as "after close". Closing
+    does not change enrollments: Mark completed does that before the close.
     """
     batch = _lock(batch)
     if batch.status == CourseBatch.Status.CLOSED:
         raise ActionRefused('This batch is already closed.')
+    check = closing.close_check(batch)
+    if not check['ready'] and not close_anyway:
+        raise closing.CloseBlocked(check)
     figures = batch_figures([batch.pk])[batch.pk]
     BatchClosing.objects.create(
         course_batch=batch, kind=BatchClosing.Kind.CLOSE, reason=reason, created_by=user,
+        checklist=closing.check_record(check, close_anyway=close_anyway),
         **figures,
     )
     batch.status = CourseBatch.Status.CLOSED

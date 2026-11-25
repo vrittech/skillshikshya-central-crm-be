@@ -348,9 +348,9 @@ class BatchMoneyTests(BatchTestBase):
 class CloseBatchTests(BatchTestBase):
     """Closing keeps the figures of that day; later money shows as after close."""
 
-    def _post(self, action, reason='Course finished', batch=None):
+    def _post(self, action, reason='Course finished', batch=None, **extra):
         return self.client.post(
-            f'/api/course-batches/{(batch or self.batch).id}/{action}/', {'reason': reason},
+            f'/api/course-batches/{(batch or self.batch).id}/{action}/', {'reason': reason, **extra},
             format='json',
         )
 
@@ -361,7 +361,7 @@ class CloseBatchTests(BatchTestBase):
         student = self._enrollment(paid=10000, seat=self.batch)
         add_cost(self.batch, kind='trainer', amount=4000, spent_on=timezone.localdate(), user=self.admin)
 
-        response = self._post('close')
+        response = self._post('close', close_anyway=True)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['status'], 'closed')
         at_close = response.data['at_close']
@@ -413,13 +413,13 @@ class CloseBatchTests(BatchTestBase):
         from apps.lead.models import Payment
 
         student = self._enrollment(paid=1000, seat=self.batch)
-        self._post('close')
+        self._post('close', close_anyway=True)
         self._post('reopen')
         Payment.objects.create(
             enrollment=student, amount=2000, payment_date=timezone.now(),
             payment_method='cash', status='successful',
         )
-        data = self._post('close').data
+        data = self._post('close', close_anyway=True).data
         self.assertEqual(data['at_close']['collected'], '3000.00')
         self.assertEqual(data['after_close']['collected'], '0.00')
 
@@ -451,6 +451,233 @@ class CloseBatchTests(BatchTestBase):
             row.save()
         with self.assertRaises(ValidationError):
             row.delete()
+
+
+class ClosingTestBase(BatchTestBase):
+    """A batch that started ten days ago (Nepal time), and students with a Student record."""
+
+    def setUp(self):
+        from apps.course.closing import nepal_today
+
+        super().setUp()
+        self.today = nepal_today()
+        self.batch.start_date = self.today - timedelta(days=10)
+        self.batch.save(update_fields=['start_date'])
+        self.url = f'/api/course-batches/{self.batch.id}/'
+
+    def _student(self, **kwargs):
+        from apps.student.models import Student
+
+        enrollment = self._enrollment(seat=self.batch, **kwargs)
+        enrollment.student = Student.objects.create(
+            full_name=enrollment.lead.full_name, phone=enrollment.lead.phone, lead=enrollment.lead,
+        )
+        enrollment.save(update_fields=['student'])
+        return enrollment
+
+    def _mark(self, enrollment, day, status='present'):
+        from apps.student.models import Attendance
+
+        Attendance.objects.create(
+            student=enrollment.student, course=self.course, date=day, status=status,
+        )
+
+
+class CloseChecklistTests(ClosingTestBase):
+    """Before a batch closes: students accounted for, attendance done, Teams back, who owes."""
+
+    def _check(self):
+        response = self.client.get(f'{self.url}close-check/')
+        self.assertEqual(response.status_code, 200)
+        return response.data
+
+    def test_checklist_lists_what_is_still_open(self):
+        from apps.lead.models import TeamsAccount
+        from apps.lead.teams import give_licence
+
+        studying = self._student(paid=10000)
+        done = self._student(status='completed', paid=30000)
+        pending = self._enrollment(status='pending')
+        day1, day2 = self.today - timedelta(days=2), self.today - timedelta(days=1)
+        self._mark(studying, day1)
+        self._mark(done, day1)
+        self._mark(studying, day2, 'absent')
+        account = TeamsAccount.objects.create(email='seat@x.com', created_by=self.admin)
+        give_licence(done, teams_account=account, user=self.admin)
+
+        data = self._check()
+        self.assertFalse(data['ready'])
+        self.assertEqual(
+            [(r['enrollment'], r['status']) for r in data['students']],
+            [(studying.id, 'confirmed'), (pending.id, 'pending')],
+        )
+        attendance = data['attendance']
+        self.assertEqual((attendance['days'], attendance['last_day']), (2, day2.isoformat()))
+        self.assertEqual(
+            [(r['enrollment'], r['missing'], r['dates']) for r in attendance['missing']],
+            [(done.id, 1, [day2.isoformat()])],
+        )
+        self.assertEqual([(r['enrollment'], r['account']) for r in data['teams']], [(done.id, 'seat@x.com')])
+        self.assertEqual(data['teams'][0]['state'], 'safe_to_remove')
+        self.assertEqual(data['owing']['count'], 1)
+        self.assertEqual(data['owing']['total'], '20000.00')
+        self.assertEqual(data['owing']['people'][0]['enrollment'], studying.id)
+
+    def test_no_attendance_at_all_is_open(self):
+        self._student(status='completed')
+        attendance = self._check()['attendance']
+        self.assertTrue(attendance['none_taken'])
+        self.assertFalse(attendance['ready'])
+
+    def test_close_is_refused_with_open_items_unless_close_anyway(self):
+        studying = self._student()
+        response = self.client.post(f'{self.url}close/', {'reason': 'Course over'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('close anyway', response.data['detail'])
+        self.assertEqual(response.data['checklist']['students'][0]['enrollment'], studying.id)
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.status, 'running')
+        self.assertFalse(self.batch.closings.exists())
+
+        response = self.client.post(
+            f'{self.url}close/', {'reason': 'Course over', 'close_anyway': True}, format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        saved = response.data['closings'][0]['checklist']
+        self.assertTrue(saved['closed_anyway'])
+        self.assertEqual(saved['students'], [studying.lead.full_name])
+        self.assertTrue(saved['attendance_none_taken'])
+
+    def test_clear_checklist_closes_even_when_someone_owes(self):
+        done = self._student(status='completed', paid=5000)
+        self._mark(done, self.today)
+        check = self._check()
+        self.assertTrue(check['ready'])
+        self.assertEqual(check['owing']['count'], 1)
+
+        response = self.client.post(f'{self.url}close/', {'reason': 'Course over'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        saved = response.data['closings'][0]['checklist']
+        self.assertEqual((saved['ready'], saved['closed_anyway']), (True, False))
+        self.assertEqual((saved['owing_count'], saved['owing_total']), (1, '25000.00'))
+
+    def test_mark_completed_finishes_students_with_a_history_row(self):
+        from apps.lead.models import EnrollmentHistory
+
+        first = self._student()
+        second = self._student(status='active')
+        pending = self._enrollment(status='pending')
+        url = f'{self.url}complete-students/'
+
+        response = self.client.post(url, {'reason': 'Course finished', 'enrollments': [first.id]}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['completed'], [first.id])
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual((first.status, second.status), ('completed', 'active'))
+        row = EnrollmentHistory.objects.get(enrollment=first, action='complete')
+        self.assertEqual((row.reason, row.before, row.after),
+                         ('Course finished', {'status': 'confirmed'}, {'status': 'completed'}))
+
+        response = self.client.post(url, {'reason': 'Course finished'}, format='json')
+        self.assertEqual(response.data['completed'], [second.id])
+        self.assertEqual([r['enrollment'] for r in response.data['checklist']['students']], [pending.id])
+        pending.refresh_from_db()
+        self.assertEqual(pending.status, 'pending')
+
+        self.assertEqual(self.client.post(url, {'reason': 'Again'}, format='json').status_code, 400)
+        self.assertEqual(self.client.post(url, {'reason': ' '}, format='json').status_code, 400)
+
+    def test_mark_completed_needs_permission_and_an_open_batch(self):
+        self._student()
+        clerk = User.objects.create_user(email='clerk3@test.com', name='Clerk', password='pass')
+        self.client.force_authenticate(clerk)
+        url = f'{self.url}complete-students/'
+        self.assertEqual(self.client.post(url, {'reason': 'Done'}, format='json').status_code, 403)
+        self.assertEqual(self.client.get(f'{self.url}close-check/').status_code, 200)
+
+        self.client.force_authenticate(self.admin)
+        self.client.post(f'{self.url}close/', {'reason': 'Over', 'close_anyway': True}, format='json')
+        response = self.client.post(url, {'reason': 'Done'}, format='json')
+        self.assertEqual(response.data['detail'], 'This batch is closed. Reopen it first.')
+
+
+class BatchAttendanceTests(ClosingTestBase):
+    """The batch's register: one day, everyone at once, with each student's totals."""
+
+    def _register(self, day=None):
+        response = self.client.get(f'{self.url}attendance/', {'date': day.isoformat()} if day else {})
+        self.assertEqual(response.status_code, 200)
+        return response.data
+
+    def _save(self, day, marks):
+        return self.client.post(
+            f'{self.url}attendance/',
+            {'date': day.isoformat(), 'marks': [{'student': e.student_id, 'status': s} for e, s in marks]},
+            format='json',
+        )
+
+    def test_mark_a_day_and_count_totals(self):
+        ram, sita = self._student(), self._student()
+        yesterday = self.today - timedelta(days=1)
+
+        response = self._save(self.today, [(ram, 'present'), (sita, 'absent')])
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual([r['status'] for r in response.data['students']], ['present', 'absent'])
+        self._save(yesterday, [(ram, 'present'), (sita, 'present')])
+
+        today = self._register()
+        self.assertEqual(today['date'], self.today.isoformat())
+        self.assertEqual(today['days'], [self.today.isoformat(), yesterday.isoformat()])
+        rows = {r['enrollment']: r for r in today['students']}
+        self.assertEqual((rows[ram.id]['present'], rows[ram.id]['absent'], rows[ram.id]['total']), (2, 0, 2))
+        self.assertEqual((rows[sita.id]['present'], rows[sita.id]['absent']), (1, 1))
+        earlier = self._register(self.today - timedelta(days=3))
+        self.assertEqual([r['status'] for r in earlier['students']], [None, None])
+
+        # Saving the same day again changes the mark, never adds a second one.
+        self._save(self.today, [(sita, 'present')])
+        rows = {r['enrollment']: r for r in self._register()['students']}
+        self.assertEqual((rows[sita.id]['status'], rows[sita.id]['total']), ('present', 2))
+
+    def test_refuses_future_days_other_students_and_a_closed_batch(self):
+        from apps.course.models import CourseBatch
+
+        ram = self._student()
+        self.assertEqual(self._save(self.today + timedelta(days=1), [(ram, 'present')]).status_code, 400)
+        self.assertEqual(
+            self._save(self.today - timedelta(days=11), [(ram, 'present')]).data['detail'],
+            'This day is before the batch starts.',
+        )
+        elsewhere = self._student(status='confirmed')
+        elsewhere.current_batch = self.other
+        elsewhere.save(update_fields=['current_batch'])
+        self.assertEqual(self._save(self.today, [(elsewhere, 'present')]).status_code, 400)
+
+        CourseBatch.objects.filter(pk=self.batch.pk).update(status='closed')
+        self.assertEqual(self._save(self.today, [(ram, 'present')]).status_code, 400)
+        self.assertTrue(self._register()['closed'])
+
+    def test_changing_a_saved_mark_needs_change_permission(self):
+        from django.contrib.auth.models import Permission
+
+        ram, sita = self._student(), self._student()
+        clerk = User.objects.create_user(email='clerk4@test.com', name='Clerk', password='pass')
+        self.client.force_authenticate(clerk)
+        self.assertEqual(self._register()['students'][0]['status'], None)
+        self.assertEqual(self._save(self.today, [(ram, 'present')]).status_code, 403)
+
+        clerk.user_permissions.add(Permission.objects.get(codename='add_attendance'))
+        clerk = User.objects.get(pk=clerk.pk)
+        self.client.force_authenticate(clerk)
+        self.assertEqual(self._save(self.today, [(ram, 'present')]).status_code, 200)
+        # Same mark again plus a new one is fine; changing a saved mark is not.
+        self.assertEqual(self._save(self.today, [(ram, 'present'), (sita, 'absent')]).status_code, 200)
+        self.assertEqual(self._save(self.today, [(ram, 'absent')]).status_code, 400)
+
+        clerk.user_permissions.add(Permission.objects.get(codename='change_attendance'))
+        self.client.force_authenticate(User.objects.get(pk=clerk.pk))
+        self.assertEqual(self._save(self.today, [(ram, 'absent')]).status_code, 200)
 
 
 class ShiftTests(APITestCase):

@@ -180,6 +180,29 @@ class AddCostSerializer(serializers.Serializer):
         return attrs
 
 
+class CloseSerializer(serializers.Serializer):
+    reason = serializers.CharField()
+    close_anyway = serializers.BooleanField(required=False, default=False)
+
+
+class CompleteStudentsSerializer(serializers.Serializer):
+    reason = serializers.CharField()
+    # Only these enrollments. Left out: everyone still studying in the batch.
+    enrollments = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), required=False, allow_empty=False,
+    )
+
+
+class RegisterMarkSerializer(serializers.Serializer):
+    student = serializers.IntegerField(min_value=1)
+    status = serializers.ChoiceField(choices=['present', 'absent'])
+
+
+class RegisterSerializer(serializers.Serializer):
+    date = serializers.DateField()
+    marks = RegisterMarkSerializer(many=True, allow_empty=False)
+
+
 class BatchClosingSerializer(serializers.ModelSerializer):
     kind_display = serializers.CharField(source='get_kind_display', read_only=True)
     created_by_name = serializers.CharField(source='created_by.name', read_only=True)
@@ -188,7 +211,7 @@ class BatchClosingSerializer(serializers.ModelSerializer):
         model = BatchClosing
         fields = [
             'id', 'kind', 'kind_display', 'reason',
-            'students', 'fees', 'collected', 'owed', 'costs', 'profit',
+            'students', 'fees', 'collected', 'owed', 'costs', 'profit', 'checklist',
             'created_by', 'created_by_name', 'created_at',
         ]
         read_only_fields = fields

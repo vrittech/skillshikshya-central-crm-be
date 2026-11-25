@@ -1,6 +1,6 @@
 from django.db.models import Count, F, Q
 from django.shortcuts import get_object_or_404
-from rest_framework import viewsets
+from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.filters import SearchFilter, OrderingFilter
@@ -8,13 +8,14 @@ from rest_framework.permissions import IsAuthenticated
 
 from django_filters.rest_framework import DjangoFilterBackend
 
-from apps.course import services
+from apps.course import closing, services
 from apps.course.models import Course, Batch, BatchCost, CourseBatch, CourseCategory
 from apps.course.filters import CourseFilter, BatchFilter, CourseBatchFilter, CourseCategoryFilter
 from apps.course.money import batch_figures, figures_json
 from apps.course.serializers import (
     AddCostSerializer, BatchClosingSerializer, BatchCostSerializer, BatchSerializer,
-    CourseBatchSerializer, CourseCategorySerializer, CourseSerializer,
+    CloseSerializer, CompleteStudentsSerializer, CourseBatchSerializer, CourseCategorySerializer,
+    CourseSerializer, RegisterSerializer,
 )
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission, needs
@@ -127,6 +128,8 @@ class CourseBatchViewSet(viewsets.ModelViewSet):
         'void_cost': 'course.change_batchcost',
         'close': 'course.change_coursebatch',
         'reopen': 'course.change_coursebatch',
+        'complete_students': 'lead.change_enrollment',
+        'mark_attendance': 'student.add_attendance',
     }
 
     def get_permissions(self):
@@ -165,9 +168,59 @@ class CourseBatchViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def close(self, request, *args, **kwargs):
-        """Close the batch with a reason. Its figures are kept as they are today."""
-        batch = services.close_batch(self.get_object(), reason=self._reason(request), user=request.user)
+        """Close the batch with a reason. Its figures are kept as they are today.
+
+        With open checklist items it closes only when close_anyway is true;
+        otherwise the reply is 400 with the checklist.
+        """
+        body = CloseSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        try:
+            batch = services.close_batch(self.get_object(), user=request.user, **body.validated_data)
+        except closing.CloseBlocked as blocked:
+            return Response(
+                {'detail': str(blocked.detail), 'checklist': blocked.check}, status=400,
+            )
         return self._money_reply(batch)
+
+    @action(detail=True, methods=['get'], url_path='close-check')
+    def close_check(self, request, *args, **kwargs):
+        """What is still open before the batch can close: students, attendance, Teams, who owes."""
+        return Response(closing.close_check(self.get_object()))
+
+    @action(detail=True, methods=['post'], url_path='complete-students')
+    def complete_students(self, request, *args, **kwargs):
+        """Mark students still studying in the batch completed, with a reason."""
+        batch = self.get_object()
+        body = CompleteStudentsSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        done = closing.complete_students(
+            batch, reason=body.validated_data['reason'], user=request.user,
+            enrollment_ids=body.validated_data.get('enrollments'),
+        )
+        return Response({'completed': done, 'checklist': closing.close_check(batch)})
+
+    @action(detail=True, methods=['get'])
+    def attendance(self, request, *args, **kwargs):
+        """The batch's register for one day (?date=, today by default) with each student's totals."""
+        batch = self.get_object()
+        day = request.query_params.get('date')
+        day = serializers.DateField().to_internal_value(day) if day else closing.nepal_today()
+        return Response(closing.register(batch, day))
+
+    @attendance.mapping.post
+    def mark_attendance(self, request, *args, **kwargs):
+        """Save a day's marks. Changing a saved mark also needs student.change_attendance."""
+        batch = self.get_object()
+        body = RegisterSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        user = request.user
+        day = body.validated_data['date']
+        closing.mark_register(
+            batch, day=day, marks=body.validated_data['marks'], user=user,
+            can_change=user.is_staff or user.has_perm('student.change_attendance'),
+        )
+        return Response(closing.register(batch, day))
 
     @action(detail=True, methods=['post'])
     def reopen(self, request, *args, **kwargs):
