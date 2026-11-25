@@ -5,6 +5,8 @@
 - Enrollment confirmed: to the student, with the fee invoice attached.
 - Payment received: to the student, with the receipt attached.
 - Invoice: an invoice or receipt sent again.
+- Teams account: the student's Teams sign-in, sent straight away. The
+  password is in the email only; the log keeps it hidden.
 
 No email goes out when a lead is created. Each one is logged in EmailLog
 (see apps.global_config.mailer) and shows on the lead's History tab.
@@ -14,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from django.conf import settings
 
-from apps.global_config.mailer import queue_email
+from apps.global_config.mailer import queue_email, send_now
 from apps.global_config.models import EmailLog
 
 NEPAL = ZoneInfo('Asia/Kathmandu')
@@ -256,4 +258,31 @@ def invoice_again(invoice, *, user=None):
         },
         lead=enrollment.lead, enrollment=enrollment, invoice=invoice, cc=_invoice_cc(),
         branch=enrollment.branch, user=user,
+    )
+
+
+TEAMS_SIGN_IN_URL = 'https://teams.microsoft.com'
+HIDDEN = '\u2022' * 8
+
+
+def teams_details(licence, password, *, user=None):
+    """To the student: their Teams sign-in. Sent now, never queued, password not kept."""
+    enrollment = licence.enrollment
+    context = {
+        'name': _name(enrollment),
+        'course': enrollment.course.name,
+        'sign_in_url': TEAMS_SIGN_IN_URL,
+        'account': licence.account,
+        'password': password,
+        'rows': [('Course', enrollment.course.name), *batch_rows(enrollment)],
+        'counselor': counselor_of(enrollment.lead),
+    }
+    return send_now(
+        EmailLog.Kind.TEAMS_ACCOUNT,
+        to=recipient(enrollment),
+        subject=f'Your Microsoft Teams account for {enrollment.course.name}',
+        template='lead/emails/teams_account.html',
+        context=context,
+        hidden_context={'password': HIDDEN},
+        lead=enrollment.lead, enrollment=enrollment, branch=enrollment.branch, user=user,
     )

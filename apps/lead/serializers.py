@@ -5,12 +5,13 @@ from rest_framework.exceptions import ValidationError
 from django.core.exceptions import ValidationError as DjangoValidationError
 
 from apps.callminutes.utils import format_duration, parse_duration_to_seconds
+from apps.branch.models import Branch
 from apps.course.models import Course, CourseBatch
 from apps.global_config.filters import walled_branch_id
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
-    Adjustment, Placement, ReminderLog, TeamsLicence, EnquiryStageChange,
+    Adjustment, Placement, ReminderLog, TeamsAccount, TeamsLicence, EnquiryStageChange,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, VoiceNote,
 )
 
@@ -285,9 +286,14 @@ class EnrollmentSerializer(serializers.ModelSerializer):
         licence = next((t for t in obj.teams_licences.all() if t.is_open), None)
         if licence is None:
             return None
+        from apps.lead.teams import STATE_LABELS, licence_state
+
+        state, reason = licence_state(licence)
         return {
-            'id': licence.id, 'account': licence.account, 'assigned_at': licence.assigned_at,
-            'paused_at': licence.paused_at,
+            'id': licence.id, 'teams_account': licence.teams_account_id, 'account': licence.account,
+            'assigned_at': licence.assigned_at, 'paused_at': licence.paused_at,
+            'details_sent_at': licence.details_sent_at, 'details_sent_to': licence.details_sent_to,
+            'state': state, 'state_label': STATE_LABELS[state], 'reason': reason,
         }
 
     def get_has_fee_invoice(self, obj):
@@ -791,13 +797,15 @@ class TeamsLicenceSerializer(serializers.ModelSerializer):
     )
     assigned_by_name = serializers.CharField(source='assigned_by.name', read_only=True)
     released_by_name = serializers.CharField(source='released_by.name', read_only=True, default=None)
+    state = serializers.SerializerMethodField()
 
     class Meta:
         model = TeamsLicence
         fields = [
             'id', 'enrollment', 'lead', 'name', 'student_id', 'course_name', 'batch_name',
-            'account', 'assigned_by', 'assigned_by_name', 'assigned_at',
+            'teams_account', 'account', 'assigned_by', 'assigned_by_name', 'assigned_at',
             'released_at', 'released_by', 'released_by_name', 'release_reason', 'paused_at',
+            'details_sent_at', 'details_sent_to', 'state',
         ]
         read_only_fields = fields
 
@@ -805,10 +813,43 @@ class TeamsLicenceSerializer(serializers.ModelSerializer):
         e = obj.enrollment
         return e.student.full_name if e.student_id else e.lead.full_name
 
+    def get_state(self, obj):
+        from apps.lead.teams import STATE_LABELS, licence_state
+
+        if not obj.is_open:
+            return None
+        state, reason = licence_state(obj)
+        return {'state': state, 'label': STATE_LABELS[state], 'reason': reason}
+
 
 class GiveLicenceSerializer(serializers.Serializer):
     enrollment = serializers.PrimaryKeyRelatedField(queryset=Enrollment.objects.all())
-    account = serializers.EmailField()
+    teams_account = serializers.PrimaryKeyRelatedField(queryset=TeamsAccount.objects.all())
+    # Sent to the student with the account when send_details is on. Never kept.
+    password = serializers.CharField(required=False, allow_blank=True, trim_whitespace=False, max_length=256)
+    send_details = serializers.BooleanField(default=False)
+
+    def validate(self, attrs):
+        if attrs['send_details'] and not attrs.get('password', '').strip():
+            raise serializers.ValidationError({'password': 'Enter the password to send.'})
+        return attrs
+
+
+class SendTeamsDetailsSerializer(serializers.Serializer):
+    password = serializers.CharField(trim_whitespace=False, max_length=256)
+
+    def validate_password(self, value):
+        if not value.strip():
+            raise serializers.ValidationError('Enter the password to send.')
+        return value
+
+
+class AddTeamsAccountsSerializer(serializers.Serializer):
+    emails = serializers.ListField(child=serializers.EmailField(), allow_empty=False, max_length=500)
+    # Empty = any branch may give it.
+    branch = serializers.PrimaryKeyRelatedField(
+        queryset=Branch.objects.all(), required=False, allow_null=True,
+    )
 
 
 class PhoneMatchEnquirySerializer(serializers.ModelSerializer):

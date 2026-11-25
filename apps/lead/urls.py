@@ -6,7 +6,7 @@ from apps.lead.views import (
     LeadSourceViewSet, CampaignViewSet, LeadStatusViewSet,
     LeadPriorityViewSet, LeadTagViewSet, LeadTypeViewSet, LeadViewSet,
     LeadCourseInterestViewSet, EnrollmentViewSet, PaymentViewSet, EnrollmentHistoryViewSet,
-    AdjustmentViewSet, EnrollmentReminderViewSet, TeamsLicenceViewSet,
+    AdjustmentViewSet, EnrollmentReminderViewSet, TeamsLicenceViewSet, TeamsAccountViewSet,
     GlobalCallViewSet,
     LeadCallViewSet, LeadActivityViewSet, FollowUpViewSet, LeadDocumentViewSet, VoiceNoteViewSet,
     NotificationViewSet,
@@ -32,6 +32,7 @@ router.register(r'enrollments', GlobalEnrollmentViewSet)
 router.register(r'payments', GlobalPaymentViewSet)
 router.register(r'calls', GlobalCallViewSet)
 router.register(r'teams-licences', TeamsLicenceViewSet, basename='teams-licence')
+router.register(r'teams-accounts', TeamsAccountViewSet, basename='teams-account')
 
 lead_router = DefaultRouter()
 lead_router.register(r'calls', LeadCallViewSet, basename='lead-call')

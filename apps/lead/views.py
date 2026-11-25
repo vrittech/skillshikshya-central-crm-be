@@ -19,6 +19,7 @@ from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 
 from apps.lead import services
+from apps.lead.services import ActionRefused
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
@@ -33,6 +34,7 @@ from apps.lead.serializers import (
     LeadCourseInterestSerializer, EnrollmentSerializer, PaymentSerializer,
     EnrollmentHistorySerializer, ReasonSerializer, AdjustmentSerializer, SeatActionSerializer,
     DueDatesSerializer, ReminderLogSerializer, GiveLicenceSerializer, TeamsLicenceSerializer,
+    SendTeamsDetailsSerializer, AddTeamsAccountsSerializer,
     EnquiryStageChangeSerializer, EnquiryStageSerializer, EnquiryLostSerializer,
     PhoneMatchSerializer,
     LeadCallSerializer, LeadActivitySerializer, FollowUpSerializer,
@@ -1113,7 +1115,11 @@ class VoiceNoteViewSet(
 class TeamsLicenceViewSet(
     mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet,
 ):
-    """Teams licences. POST gives one; POST {id}/free/ frees it with a reason."""
+    """Teams licences given to students.
+
+    POST gives a ready account (and can email the sign-in), POST {id}/free/
+    takes it back with a reason, POST {id}/send-details/ emails the sign-in.
+    """
 
     serializer_class = TeamsLicenceSerializer
     pagination_class = CustomPagination
@@ -1130,25 +1136,49 @@ class TeamsLicenceViewSet(
         )
 
     def get_permissions(self):
-        perms = {'create': 'lead.add_teamslicence', 'free': 'lead.change_teamslicence'}
+        perms = {
+            'create': 'lead.add_teamslicence',
+            'free': 'lead.change_teamslicence',
+            'send_details': 'lead.add_teamslicence',
+        }
         if self.action in perms:
             return [IsAuthenticated(), needs(perms[self.action])()]
         return [IsAuthenticated()]
 
-    def _reply(self, licence, status_code=200):
+    def _reply(self, licence, status_code=200, email=None):
         licence = self.get_queryset().get(pk=licence.pk)
-        return Response(self.get_serializer(licence).data, status=status_code)
+        data = dict(self.get_serializer(licence).data)
+        if email is not None:
+            data['email'] = {'status': email.status, 'to': email.to_email, 'error': email.error}
+        return Response(data, status=status_code)
+
+    def _check_branch(self, enrollment):
+        branch_id = walled_branch_id(self.request.user)
+        if branch_id is not None and enrollment.branch_id != branch_id:
+            raise ValidationError({'enrollment': 'This enrollment belongs to another branch.'})
 
     def create(self, request, *args, **kwargs):
-        from apps.lead.teams import give_licence
+        from apps.lead.teams import give_licence, send_details
 
         body = GiveLicenceSerializer(data=request.data)
         body.is_valid(raise_exception=True)
-        licence = give_licence(
-            body.validated_data['enrollment'], account=body.validated_data['account'],
-            user=request.user,
-        )
-        return self._reply(licence, status.HTTP_201_CREATED)
+        data = body.validated_data
+        self._check_branch(data['enrollment'])
+        licence = give_licence(data['enrollment'], teams_account=data['teams_account'], user=request.user)
+        email = None
+        if data['send_details']:
+            email = send_details(licence, password=data['password'], user=request.user)
+        return self._reply(licence, status.HTTP_201_CREATED, email=email)
+
+    @action(detail=True, methods=['post'], url_path='send-details')
+    def send_details(self, request, *args, **kwargs):
+        from apps.lead.teams import send_details
+
+        body = SendTeamsDetailsSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        licence = self.get_object()
+        email = send_details(licence, password=body.validated_data['password'], user=request.user)
+        return self._reply(licence, email=email)
 
     @action(detail=True, methods=['post'])
     def free(self, request, *args, **kwargs):
@@ -1163,4 +1193,105 @@ class TeamsLicenceViewSet(
     def summary(self, request):
         from apps.lead.teams import summary
 
-        return Response(summary())
+        return Response(summary(_teams_branch(request)))
+
+
+def _teams_branch(request):
+    """The branch whose Teams accounts to show: the user's own, or ?branch_id for staff."""
+    branch_id = walled_branch_id(request.user)
+    if branch_id is None:
+        picked = request.query_params.get('branch_id')
+        branch_id = int(picked) if picked and picked.isdigit() else None
+    return branch_id
+
+
+class TeamsAccountViewSet(viewsets.ViewSet):
+    """The Teams accounts the institute owns, each with its state.
+
+    GET lists them (?state=, ?search=, ?give_at=<branch> for accounts that can
+    be given at a branch). POST {emails, branch} adds accounts. POST
+    {id}/retire/ with a reason stops counting one; {id}/restore/ undoes it.
+    """
+
+    def get_permissions(self):
+        perms = {
+            'create': 'lead.add_teamsaccount',
+            'retire': 'lead.change_teamsaccount',
+            'restore': 'lead.change_teamsaccount',
+        }
+        if self.action in perms:
+            return [IsAuthenticated(), needs(perms[self.action])()]
+        return [IsAuthenticated()]
+
+    def _account(self, pk):
+        """An account this user may change: their branch's. Shared ones are for staff."""
+        from apps.lead.teams import visible_accounts
+
+        branch_id = walled_branch_id(self.request.user)
+        account = get_object_or_404(visible_accounts(branch_id), pk=pk)
+        if branch_id is not None and account.branch_id is None:
+            raise ActionRefused('This account is shared by every branch. An admin can change it.')
+        return account
+
+    def _row(self, account):
+        from apps.lead.teams import account_row, visible_accounts
+
+        branch_id = _teams_branch(self.request)
+        return account_row(visible_accounts(branch_id).get(pk=account.pk), branch_id=branch_id)
+
+    def list(self, request):
+        from apps.lead.teams import account_rows
+
+        rows = account_rows(_teams_branch(request))
+        give_at = request.query_params.get('give_at')
+        if give_at and give_at.isdigit():
+            rows = [r for r in rows if r['branch'] in (None, int(give_at))]
+        state = request.query_params.get('state')
+        if state:
+            rows = [r for r in rows if r['state'] == state]
+        search = (request.query_params.get('search') or '').strip().lower()
+        if search:
+            def hit(row):
+                licence = row['licence'] or {}
+                text = ' '.join(str(v or '') for v in (
+                    row['email'], licence.get('name'), licence.get('student_id'),
+                    licence.get('email'), licence.get('course_name'), licence.get('batch_name'),
+                ))
+                return search in text.lower()
+
+            rows = [r for r in rows if hit(r)]
+        return Response(rows)
+
+    def create(self, request):
+        from apps.lead.teams import add_accounts
+
+        body = AddTeamsAccountsSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        branch = body.validated_data.get('branch')
+        branch_id = walled_branch_id(request.user)
+        if branch_id is not None:
+            branch = request.user.branch
+        added, existing = add_accounts(body.validated_data['emails'], branch=branch, user=request.user)
+        return Response({'added': added, 'existing': existing}, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
+    def retire(self, request, pk=None):
+        from apps.lead.teams import retire_account
+
+        body = ReasonSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        account = retire_account(self._account(pk), reason=body.validated_data['reason'], user=request.user)
+        return Response(self._row(account))
+
+    @action(detail=True, methods=['post'])
+    def restore(self, request, pk=None):
+        from apps.lead.teams import restore_account
+
+        account = restore_account(self._account(pk))
+        return Response(self._row(account))
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        from apps.lead.teams import summary
+
+        return Response(summary(_teams_branch(request)))

@@ -109,12 +109,6 @@ def _code(batch):
     return batch.coursebatch_id if batch is not None else None
 
 
-def _free_teams_licence(enrollment, *, reason, user):
-    from apps.lead.teams import free_for_enrollment
-
-    free_for_enrollment(enrollment, reason=reason, user=user)
-
-
 def _pause_teams_licence(enrollment, *, reason, user):
     from apps.lead.teams import pause_for_enrollment
 
@@ -300,7 +294,7 @@ def cancel_enrollment(enrollment, *, reason, user):
         before={'status': old_status},
         after={'status': enrollment.status},
     )
-    _free_teams_licence(enrollment, reason=f'Cancelled: {reason}', user=user)
+    # The Teams licence stays with the student and shows "Action required".
     return enrollment
 
 

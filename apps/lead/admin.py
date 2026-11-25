@@ -4,7 +4,7 @@ from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, Adjustment,
     EnrollmentHistory, LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, Placement,
-    PaymentPlan, Installment, ReminderConfig, ReminderLog, TeamsConfig, TeamsLicence,
+    PaymentPlan, Installment, ReminderConfig, ReminderLog, TeamsAccount, TeamsLicence,
     EnquiryStageChange, VoiceNote, LeadChange,
 )
 
@@ -125,15 +125,17 @@ class ReminderLogAdmin(ReadOnlyAdmin):
     list_select_related = ['enrollment__lead']
 
 
-@admin.register(TeamsConfig)
-class TeamsConfigAdmin(admin.ModelAdmin):
-    list_display = ['__str__', 'total_licences', 'updated_at']
+@admin.register(TeamsAccount)
+class TeamsAccountAdmin(admin.ModelAdmin):
+    list_display = ('email', 'branch', 'is_active', 'created_at')
+    list_filter = ('is_active', 'branch')
+    search_fields = ('email',)
+    readonly_fields = ('retired_at', 'retired_by', 'created_by', 'created_at')
 
-    def has_add_permission(self, request):
-        return not TeamsConfig.objects.exists()
-
-    def has_delete_permission(self, request, obj=None):
-        return False
+    def save_model(self, request, obj, form, change):
+        if not change:
+            obj.created_by = request.user
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(TeamsLicence)

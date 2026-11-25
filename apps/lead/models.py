@@ -1024,30 +1024,45 @@ class Installment(models.Model):
         raise ValidationError('Due dates cannot be deleted.')
 
 
-class TeamsConfig(models.Model):
-    """Singleton row (pk=1): how many Microsoft Teams licences we have."""
+class TeamsAccount(models.Model):
+    """A Microsoft Teams sign-in the institute owns. Each one is a licence to give.
 
-    total_licences = models.PositiveIntegerField(
-        null=True, blank=True, help_text='Blank means no limit.',
+    The list of active accounts is the licence total. An account is given to
+    one student at a time (a TeamsLicence row); when it is taken back it is
+    ready to give again. A retired account (removed from Microsoft 365) is
+    kept for the record and no longer counted.
+    """
+
+    RETIRE_FIELDS = {'is_active', 'retired_at', 'retired_by', 'retire_reason'}
+
+    email = models.EmailField(unique=True)
+    # The branch that keeps it. Empty = any branch may give it.
+    branch = models.ForeignKey(
+        'branch.Branch', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='teams_accounts',
     )
-    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
+    retired_at = models.DateTimeField(null=True, blank=True)
+    retired_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        null=True, blank=True, related_name='+',
+    )
+    retire_reason = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'teams_licence_config'
-        verbose_name = 'Teams licence settings'
-        verbose_name_plural = 'Teams licence settings'
+        db_table = 'teams_accounts'
+        ordering = ['email']
 
     def __str__(self):
-        return f'Teams licences ({self.total_licences if self.total_licences is not None else "no limit"})'
+        return self.email
 
     def save(self, *args, **kwargs):
-        self.pk = 1
+        self.email = (self.email or '').strip().lower()
         super().save(*args, **kwargs)
-
-    @classmethod
-    def load(cls):
-        obj, _ = cls.objects.get_or_create(pk=1)
-        return obj
 
 
 class TeamsLicence(models.Model):
@@ -1064,11 +1079,16 @@ class TeamsLicence(models.Model):
     FREE_FIELDS = {'released_at', 'released_by', 'release_reason'}
     # Set on pause, cleared on resume. Each change also writes a history row.
     PAUSE_FIELDS = {'paused_at'}
+    # Set each time the sign-in details are emailed to the student.
+    DETAILS_FIELDS = {'details_sent_at', 'details_sent_to'}
 
     enrollment = models.ForeignKey(
         Enrollment, on_delete=models.PROTECT, related_name='teams_licences',
     )
-    # The Teams sign-in given to the student.
+    teams_account = models.ForeignKey(
+        TeamsAccount, on_delete=models.PROTECT, related_name='licences', null=True,
+    )
+    # The Teams sign-in given to the student, as it was then.
     account = models.EmailField()
     branch = models.ForeignKey(
         'branch.Branch', on_delete=models.SET_NULL,
@@ -1086,6 +1106,10 @@ class TeamsLicence(models.Model):
     release_reason = models.TextField(null=True, blank=True)
     # Set while the student is paused.
     paused_at = models.DateTimeField(null=True, blank=True)
+    # The last time the sign-in details were emailed, and to whom. The
+    # password itself is never stored.
+    details_sent_at = models.DateTimeField(null=True, blank=True)
+    details_sent_to = models.EmailField(blank=True)
 
     class Meta:
         db_table = 'teams_licences'
@@ -1116,9 +1140,9 @@ class TeamsLicence(models.Model):
 
     def save(self, *args, **kwargs):
         update_fields = kwargs.get('update_fields')
-        allowed = self.FREE_FIELDS | self.PAUSE_FIELDS
+        allowed = self.FREE_FIELDS | self.PAUSE_FIELDS | self.DETAILS_FIELDS
         if self.pk is not None and not (update_fields and set(update_fields) <= allowed):
-            raise ValidationError('A Teams licence cannot be changed. Free it and give a new one.')
+            raise ValidationError('A Teams licence cannot be changed. Take it back and give a new one.')
         self.account = (self.account or '').strip().lower()
         super().save(*args, **kwargs)
 
