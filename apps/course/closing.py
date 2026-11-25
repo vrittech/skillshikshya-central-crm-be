@@ -1,9 +1,14 @@
-"""Closing a batch properly: the close checklist, finishing its students, and its register.
+"""Closing a batch properly: the close checklist, completing its students, and its register.
+
+Closing marks every student sitting in the batch (confirmed or active)
+completed, each with a history row. Paused students and students who moved
+to another batch are not in it, so closing leaves them alone. Reopening puts
+the students that close completed back as they were.
 
 Before a batch closes, the checklist looks at:
 
-- students: no one still studying (confirmed or active) in the batch, and no
-  one still pending for it. Mark completed finishes the ones studying.
+- students: who closing will mark completed, and anyone still pending for
+  the batch (pending is open: cancel them or move them first).
 - attendance: every student in the batch has a mark on every register day
   since they sat in it. A register day is a day anyone in the batch was marked.
 - teams: no student in the batch still holds a Teams licence.
@@ -21,6 +26,9 @@ from django.db.models import Count, Q
 from apps.course.models import CourseBatch
 from apps.course.money import batch_owing
 from apps.lead.services import ActionRefused
+
+# Students still studying. Closing the batch marks them completed.
+STUDYING = ('confirmed', 'active')
 
 
 def nepal_today():
@@ -70,17 +78,18 @@ def _in_window(qs, batch):
 
 
 def _students(batch, rows):
+    """(who closing marks completed, who is still pending for the batch)."""
     from apps.lead.models import Enrollment
 
-    studying = [e for e in rows if e.status != Enrollment.Status.COMPLETED]
+    labels = dict(Enrollment.Status.choices)
+
+    def person(e):
+        return {**_person(e), 'status': e.status, 'status_display': labels[e.status]}
+
     pending = Enrollment.objects.filter(
         batch=batch, status=Enrollment.Status.PENDING,
     ).select_related('lead', 'student').order_by('lead__full_name', 'id')
-    labels = dict(Enrollment.Status.choices)
-    return [
-        {**_person(e), 'status': e.status, 'status_display': labels[e.status]}
-        for e in [*studying, *pending]
-    ]
+    return [person(e) for e in rows if e.status in STUDYING], [person(e) for e in pending]
 
 
 def _attendance(batch, rows):
@@ -147,14 +156,15 @@ def _owing(batch):
 def close_check(batch):
     """What is still open before the batch can close. JSON-ready."""
     rows = list(seated(batch))
-    students = _students(batch, rows)
+    completing, pending = _students(batch, rows)
     attendance = _attendance(batch, rows)
     licences = _teams(rows)
     return {
         'batch': batch.pk,
         'status': batch.status,
-        'ready': not students and attendance['ready'] and not licences,
-        'students': students,
+        'ready': not pending and attendance['ready'] and not licences,
+        'completing': completing,
+        'pending': pending,
         'attendance': attendance,
         'teams': licences,
         'owing': _owing(batch),
@@ -169,7 +179,7 @@ def check_record(check, *, close_anyway):
     return {
         'ready': check['ready'],
         'closed_anyway': close_anyway and not check['ready'],
-        'students': names(check['students']),
+        'pending': names(check['pending']),
         'attendance_none_taken': check['attendance']['none_taken'],
         'attendance_missing': names(check['attendance']['missing']),
         'teams': names(check['teams']),
@@ -189,27 +199,17 @@ class CloseBlocked(ActionRefused):
 # ---------------------------------------------------------------- students
 
 
-def _lock(batch):
-    return CourseBatch.objects.select_for_update().get(pk=batch.pk)
+def complete_seated(batch, *, reason, user):
+    """Mark students sitting in the batch completed, each with a history row.
 
-
-@transaction.atomic
-def complete_students(batch, *, reason, user, enrollment_ids=None):
-    """Mark students still studying in the batch completed, each with a history row.
-
-    All of them, or only enrollment_ids. Returns the ids marked completed.
+    Called by close_batch inside its transaction. Returns who was completed
+    and their status before, to keep on the close row.
     """
     from apps.lead.models import Enrollment, EnrollmentHistory
 
-    batch = _lock(batch)
-    if batch.status == CourseBatch.Status.CLOSED:
-        raise ActionRefused('This batch is closed. Reopen it first.')
     studying = Enrollment.objects.select_for_update().filter(
-        current_batch=batch,
-        status__in=[Enrollment.Status.CONFIRMED, Enrollment.Status.ACTIVE],
+        current_batch=batch, status__in=STUDYING,
     ).order_by('id')
-    if enrollment_ids is not None:
-        studying = studying.filter(pk__in=enrollment_ids)
     done = []
     for e in studying:
         before = e.status
@@ -224,13 +224,43 @@ def complete_students(batch, *, reason, user, enrollment_ids=None):
             before={'status': before},
             after={'status': Enrollment.Status.COMPLETED},
         )
-        done.append(e.id)
-    if not done:
-        raise ActionRefused('No one picked is still studying in this batch.')
+        done.append({'enrollment': e.id, 'before': before})
     return done
 
 
+def undo_completed(batch, completed, *, reason, user):
+    """Put the students a close completed back to their status before it.
+
+    Only those still completed and still sitting in the batch. Returns how many.
+    """
+    from apps.lead.models import Enrollment, EnrollmentHistory
+
+    before = {row['enrollment']: row['before'] for row in completed}
+    back = Enrollment.objects.select_for_update().filter(
+        pk__in=list(before), current_batch=batch, status=Enrollment.Status.COMPLETED,
+    ).order_by('id')
+    count = 0
+    for e in back:
+        e.status = before[e.id]
+        e.updated_by = user
+        e.save(update_fields=['status', 'updated_by', 'updated_at'])
+        EnrollmentHistory.record(
+            enrollment=e,
+            action=EnrollmentHistory.Action.UNDO_COMPLETE,
+            reason=reason,
+            performed_by=user,
+            before={'status': Enrollment.Status.COMPLETED},
+            after={'status': e.status},
+        )
+        count += 1
+    return count
+
+
 # ---------------------------------------------------------------- register
+
+
+def _lock(batch):
+    return CourseBatch.objects.select_for_update().get(pk=batch.pk)
 
 
 def register(batch, day):

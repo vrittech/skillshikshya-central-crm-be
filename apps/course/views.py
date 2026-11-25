@@ -14,8 +14,8 @@ from apps.course.filters import CourseFilter, BatchFilter, CourseBatchFilter, Co
 from apps.course.money import batch_figures, figures_json
 from apps.course.serializers import (
     AddCostSerializer, BatchClosingSerializer, BatchCostSerializer, BatchSerializer,
-    CloseSerializer, CompleteStudentsSerializer, CourseBatchSerializer, CourseCategorySerializer,
-    CourseSerializer, RegisterSerializer,
+    CloseSerializer, CourseBatchSerializer, CourseCategorySerializer, CourseSerializer,
+    RegisterSerializer,
 )
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission, needs
@@ -128,7 +128,6 @@ class CourseBatchViewSet(viewsets.ModelViewSet):
         'void_cost': 'course.change_batchcost',
         'close': 'course.change_coursebatch',
         'reopen': 'course.change_coursebatch',
-        'complete_students': 'lead.change_enrollment',
         'mark_attendance': 'student.add_attendance',
     }
 
@@ -168,7 +167,8 @@ class CourseBatchViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def close(self, request, *args, **kwargs):
-        """Close the batch with a reason. Its figures are kept as they are today.
+        """Close the batch with a reason. Students in it are marked completed and
+        its figures are kept as they are today.
 
         With open checklist items it closes only when close_anyway is true;
         otherwise the reply is 400 with the checklist.
@@ -187,18 +187,6 @@ class CourseBatchViewSet(viewsets.ModelViewSet):
     def close_check(self, request, *args, **kwargs):
         """What is still open before the batch can close: students, attendance, Teams, who owes."""
         return Response(closing.close_check(self.get_object()))
-
-    @action(detail=True, methods=['post'], url_path='complete-students')
-    def complete_students(self, request, *args, **kwargs):
-        """Mark students still studying in the batch completed, with a reason."""
-        batch = self.get_object()
-        body = CompleteStudentsSerializer(data=request.data)
-        body.is_valid(raise_exception=True)
-        done = closing.complete_students(
-            batch, reason=body.validated_data['reason'], user=request.user,
-            enrollment_ids=body.validated_data.get('enrollments'),
-        )
-        return Response({'completed': done, 'checklist': closing.close_check(batch)})
 
     @action(detail=True, methods=['get'])
     def attendance(self, request, *args, **kwargs):

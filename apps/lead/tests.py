@@ -2361,16 +2361,28 @@ class TeamsLicenceTests(APITestCase):
                          ('action_required', 'Enrollment cancelled'))
         self.assertEqual(rows['class@x.com']['state'], 'in_use')
 
+        # Closing the batch marks the student completed: the licence is safe to remove.
         close_batch(self.batch, reason='Finished', user=self.admin, close_anyway=True)
         rows = self._rows()
         self.assertEqual((rows['class@x.com']['state'], rows['class@x.com']['reason']),
-                         ('action_required', 'Batch closed'))
+                         ('safe_to_remove', 'Course completed'))
         self.assertFalse(TeamsLicence.objects.filter(released_at__isnull=False).exists())
         self.assertEqual(self._summary(), {
-            'total': 5, 'ready': 0, 'in_use': 0, 'safe_to_remove': 1, 'action_required': 4, 'retired': 0,
+            'total': 5, 'ready': 0, 'in_use': 0, 'safe_to_remove': 2, 'action_required': 3, 'retired': 0,
         })
         filtered = self.client.get(self.ACCOUNTS, {'state': 'safe_to_remove'}).data
-        self.assertEqual([r['email'] for r in filtered], ['done@x.com'])
+        self.assertCountEqual([r['email'] for r in filtered], ['done@x.com', 'class@x.com'])
+
+    def test_a_student_still_seated_in_a_closed_batch_needs_action(self):
+        """Closing completes everyone, but a student set back to active later shows Batch closed."""
+        from apps.course.services import close_batch
+
+        studying = self._student()
+        self._give(studying, self._account('late@x.com'))
+        close_batch(self.batch, reason='Finished', user=self.admin, close_anyway=True)
+        Enrollment.objects.filter(pk=studying.pk).update(status='active')
+        row = self._rows()['late@x.com']
+        self.assertEqual((row['state'], row['reason']), ('action_required', 'Batch closed'))
 
     def test_pause_asks_for_action_and_resume_puts_it_back(self):
         account = self._account('kept@x.com')

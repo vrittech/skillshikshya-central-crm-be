@@ -383,9 +383,9 @@ class CloseBatchTests(BatchTestBase):
         self.assertEqual(data['figures']['profit'], '10000.00')
         self.assertIsNotNone(data['closed_at'])
 
-        # Closing doesn't change the students' enrollments.
+        # Closing marks the student completed; they stay in the batch.
         student.refresh_from_db()
-        self.assertEqual((student.status, student.current_batch_id), ('confirmed', self.batch.id))
+        self.assertEqual((student.status, student.current_batch_id), ('completed', self.batch.id))
 
         report = self.client.get('/api/reports/batch-profit/').data
         nov = next(r for r in report['results'] if r['batch'] == self.batch.id)
@@ -507,10 +507,9 @@ class CloseChecklistTests(ClosingTestBase):
 
         data = self._check()
         self.assertFalse(data['ready'])
-        self.assertEqual(
-            [(r['enrollment'], r['status']) for r in data['students']],
-            [(studying.id, 'confirmed'), (pending.id, 'pending')],
-        )
+        self.assertEqual([(r['enrollment'], r['status']) for r in data['completing']],
+                         [(studying.id, 'confirmed')])
+        self.assertEqual([r['enrollment'] for r in data['pending']], [pending.id])
         attendance = data['attendance']
         self.assertEqual((attendance['days'], attendance['last_day']), (2, day2.isoformat()))
         self.assertEqual(
@@ -529,15 +528,25 @@ class CloseChecklistTests(ClosingTestBase):
         self.assertTrue(attendance['none_taken'])
         self.assertFalse(attendance['ready'])
 
+    def test_studying_students_are_not_open_but_pending_ones_are(self):
+        studying = self._student()
+        self._mark(studying, self.today)
+        self.assertTrue(self._check()['ready'])
+        self._enrollment(status='pending')
+        self.assertFalse(self._check()['ready'])
+
     def test_close_is_refused_with_open_items_unless_close_anyway(self):
         studying = self._student()
+        pending = self._enrollment(status='pending')
         response = self.client.post(f'{self.url}close/', {'reason': 'Course over'}, format='json')
         self.assertEqual(response.status_code, 400)
         self.assertIn('close anyway', response.data['detail'])
-        self.assertEqual(response.data['checklist']['students'][0]['enrollment'], studying.id)
+        self.assertEqual(response.data['checklist']['pending'][0]['enrollment'], pending.id)
         self.batch.refresh_from_db()
         self.assertEqual(self.batch.status, 'running')
         self.assertFalse(self.batch.closings.exists())
+        studying.refresh_from_db()
+        self.assertEqual(studying.status, 'confirmed')
 
         response = self.client.post(
             f'{self.url}close/', {'reason': 'Course over', 'close_anyway': True}, format='json',
@@ -545,8 +554,9 @@ class CloseChecklistTests(ClosingTestBase):
         self.assertEqual(response.status_code, 200)
         saved = response.data['closings'][0]['checklist']
         self.assertTrue(saved['closed_anyway'])
-        self.assertEqual(saved['students'], [studying.lead.full_name])
+        self.assertEqual(saved['pending'], [pending.lead.full_name])
         self.assertTrue(saved['attendance_none_taken'])
+        self.assertEqual(saved['completed'], [{'enrollment': studying.id, 'before': 'confirmed'}])
 
     def test_clear_checklist_closes_even_when_someone_owes(self):
         done = self._student(status='completed', paid=5000)
@@ -561,45 +571,84 @@ class CloseChecklistTests(ClosingTestBase):
         self.assertEqual((saved['ready'], saved['closed_anyway']), (True, False))
         self.assertEqual((saved['owing_count'], saved['owing_total']), (1, '25000.00'))
 
-    def test_mark_completed_finishes_students_with_a_history_row(self):
+    def _close(self, reason='Course over'):
+        response = self.client.post(
+            f'{self.url}close/', {'reason': reason, 'close_anyway': True}, format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        return response
+
+    def test_closing_completes_only_the_students_in_the_batch(self):
+        from apps.lead.models import Enrollment, EnrollmentHistory, Placement
+
+        confirmed = self._student()
+        active = self._student(status='active')
+        dropped = self._student(status='dropped_out')
+        pending = self._enrollment(status='pending')
+        paused = self._enrollment()  # paused out of this batch: no seat now
+        Placement.objects.create(
+            enrollment=paused, kind='pause', from_batch=self.batch, started_on=self.today,
+            reason='Exams', created_by=self.admin,
+        )
+        moved = self._enrollment(seat=self.other)  # moved to the December batch
+        Placement.objects.create(
+            enrollment=moved, kind='move', course_batch=self.other, from_batch=self.batch,
+            started_on=self.today, reason='Timing', created_by=self.admin,
+        )
+
+        self._close('Course finished')
+        statuses = dict(Enrollment.objects.filter(
+            pk__in=[confirmed.id, active.id, dropped.id, pending.id, paused.id, moved.id],
+        ).values_list('id', 'status'))
+        self.assertEqual(statuses, {
+            confirmed.id: 'completed', active.id: 'completed', dropped.id: 'dropped_out',
+            pending.id: 'pending', paused.id: 'confirmed', moved.id: 'confirmed',
+        })
+        rows = EnrollmentHistory.objects.filter(action='complete').order_by('enrollment_id')
+        self.assertEqual(
+            [(r.enrollment_id, r.before, r.reason) for r in rows],
+            [(confirmed.id, {'status': 'confirmed'}, 'Batch closed: Course finished'),
+             (active.id, {'status': 'active'}, 'Batch closed: Course finished')],
+        )
+
+    def test_reopening_puts_back_the_students_the_close_completed(self):
         from apps.lead.models import EnrollmentHistory
 
-        first = self._student()
-        second = self._student(status='active')
-        pending = self._enrollment(status='pending')
-        url = f'{self.url}complete-students/'
+        confirmed = self._student()
+        active = self._student(status='active')
+        already_done = self._student(status='completed')
+        self._close()
+        # Someone changed this student after the close; reopening leaves them alone.
+        active.refresh_from_db()
+        active.status = 'dropped_out'
+        active.save(update_fields=['status'])
 
-        response = self.client.post(url, {'reason': 'Course finished', 'enrollments': [first.id]}, format='json')
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data['completed'], [first.id])
-        first.refresh_from_db()
-        second.refresh_from_db()
-        self.assertEqual((first.status, second.status), ('completed', 'active'))
-        row = EnrollmentHistory.objects.get(enrollment=first, action='complete')
-        self.assertEqual((row.reason, row.before, row.after),
-                         ('Course finished', {'status': 'confirmed'}, {'status': 'completed'}))
+        response = self.client.post(
+            f'{self.url}reopen/', {'reason': 'Two classes left'}, format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        for e in (confirmed, active, already_done):
+            e.refresh_from_db()
+        self.assertEqual(
+            (confirmed.status, active.status, already_done.status),
+            ('confirmed', 'dropped_out', 'completed'),
+        )
+        row = EnrollmentHistory.objects.get(action='undo_complete')
+        self.assertEqual((row.enrollment_id, row.reason, row.after),
+                         (confirmed.id, 'Batch reopened: Two classes left', {'status': 'confirmed'}))
 
-        response = self.client.post(url, {'reason': 'Course finished'}, format='json')
-        self.assertEqual(response.data['completed'], [second.id])
-        self.assertEqual([r['enrollment'] for r in response.data['checklist']['students']], [pending.id])
-        pending.refresh_from_db()
-        self.assertEqual(pending.status, 'pending')
+        # Closing again completes them again.
+        self._close()
+        confirmed.refresh_from_db()
+        self.assertEqual(confirmed.status, 'completed')
 
-        self.assertEqual(self.client.post(url, {'reason': 'Again'}, format='json').status_code, 400)
-        self.assertEqual(self.client.post(url, {'reason': ' '}, format='json').status_code, 400)
-
-    def test_mark_completed_needs_permission_and_an_open_batch(self):
-        self._student()
+    def test_close_check_is_open_to_anyone_who_can_see_the_batch(self):
         clerk = User.objects.create_user(email='clerk3@test.com', name='Clerk', password='pass')
         self.client.force_authenticate(clerk)
-        url = f'{self.url}complete-students/'
-        self.assertEqual(self.client.post(url, {'reason': 'Done'}, format='json').status_code, 403)
         self.assertEqual(self.client.get(f'{self.url}close-check/').status_code, 200)
-
-        self.client.force_authenticate(self.admin)
-        self.client.post(f'{self.url}close/', {'reason': 'Over', 'close_anyway': True}, format='json')
-        response = self.client.post(url, {'reason': 'Done'}, format='json')
-        self.assertEqual(response.data['detail'], 'This batch is closed. Reopen it first.')
+        self.assertEqual(
+            self.client.post(f'{self.url}close/', {'reason': 'Over'}, format='json').status_code, 403,
+        )
 
 
 class BatchAttendanceTests(ClosingTestBase):

@@ -185,14 +185,6 @@ class CloseSerializer(serializers.Serializer):
     close_anyway = serializers.BooleanField(required=False, default=False)
 
 
-class CompleteStudentsSerializer(serializers.Serializer):
-    reason = serializers.CharField()
-    # Only these enrollments. Left out: everyone still studying in the batch.
-    enrollments = serializers.ListField(
-        child=serializers.IntegerField(min_value=1), required=False, allow_empty=False,
-    )
-
-
 class RegisterMarkSerializer(serializers.Serializer):
     student = serializers.IntegerField(min_value=1)
     status = serializers.ChoiceField(choices=['present', 'absent'])
