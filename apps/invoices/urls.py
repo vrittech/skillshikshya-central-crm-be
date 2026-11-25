@@ -2,12 +2,13 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from apps.invoices.views import (
-    InvoiceListAPIView, StudentInvoiceListAPIView,
+    InvoiceListAPIView, InvoicePdfAPIView, StudentInvoiceListAPIView,
     cancel_invoice, email_config, resend_invoice,
 )
 
 urlpatterns = [
     path('invoices/', InvoiceListAPIView.as_view(), name='invoice-list'),
+    path('invoices/<int:pk>/pdf/', InvoicePdfAPIView.as_view(), name='invoice-pdf'),
     path(
         'invoices/<int:pk>/resend/',
         resend_invoice, name='invoice-resend',

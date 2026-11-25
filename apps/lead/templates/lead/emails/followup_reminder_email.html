@@ -1,62 +1,11 @@
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body style="font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 0; background-color: #f4f6f8;">
-  <table style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
-    <tr>
-      <td style="background: linear-gradient(135deg, #1b5e20, #2e7d32); padding: 30px 40px; text-align: center;">
-        <h1 style="color: #ffffff; margin: 0; font-size: 24px; letter-spacing: 1px;">SKILL SHIKSHA</h1>
-        <p style="color: #a5d6a7; margin: 4px 0 0; font-size: 14px;">Follow-up Reminder</p>
-      </td>
-    </tr>
-
-    <tr>
-      <td style="padding: 30px 40px 20px;">
-        <p style="color: #333; font-size: 15px; line-height: 1.6;">Dear <strong style="color: #2e7d32;">{{ user_name }}</strong>,</p>
-        <p style="color: #555; font-size: 14px; line-height: 1.6;">This is a reminder for a scheduled follow-up.</p>
-      </td>
-    </tr>
-
-    <tr>
-      <td style="padding: 0 40px 10px;">
-        <table style="width: 100%; border-collapse: collapse; background: #f9fafb; border-radius: 8px; overflow: hidden;">
-          <tr>
-            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; color: #6b7280; font-size: 13px; width: 40%;">Lead</td>
-            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; color: #111827; font-size: 14px; font-weight: bold;">{{ lead_name }}</td>
-          </tr>
-          <tr>
-            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; color: #6b7280; font-size: 13px;">Reference</td>
-            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; color: #111827; font-size: 14px;">{{ reference_number }}</td>
-          </tr>
-          <tr>
-            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; color: #6b7280; font-size: 13px;">Scheduled At</td>
-            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; color: #111827; font-size: 14px;">{{ scheduled_at }}</td>
-          </tr>
-          <tr>
-            <td style="padding: 12px 16px; color: #6b7280; font-size: 13px;">Purpose</td>
-            <td style="padding: 12px 16px; color: #111827; font-size: 14px;">{{ purpose }}</td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-
-    <tr>
-      <td style="padding: 20px 40px 30px; text-align: center;">
-        <a href="{{ lead_url }}" style="display: inline-block; background: #2e7d32; color: #ffffff; text-decoration: none; padding: 14px 36px; border-radius: 6px; font-size: 16px; font-weight: bold;">View Lead</a>
-      </td>
-    </tr>
-
-    <tr>
-      <td style="padding: 0 40px 10px;">
-        <p style="color: #555; font-size: 13px; line-height: 1.5;">This is an automated reminder. Please do not reply.</p>
-      </td>
-    </tr>
-
-    <tr>
-      <td style="background: #1b5e20; padding: 16px 40px; text-align: center;">
-        <p style="color: #a5d6a7; font-size: 11px; margin: 0;">&copy; {% now "Y" %} Skill Shikshya. All rights reserved.</p>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
+{% extends "emails/base.html" %}
+{% block subject %}Follow-up reminder: {{ lead_name }}{% endblock %}
+{% block preheader %}Follow-up with {{ lead_name }} at {{ scheduled_at }}.{% endblock %}
+{% block title %}Follow-up reminder{% endblock %}
+{% block content %}
+<p style="margin:0 0 12px;">Dear {{ user_name }},</p>
+<p style="margin:0;">You have a follow-up coming up.</p>
+{% include "emails/_details.html" with rows=rows %}
+{% include "emails/_button.html" with url=lead_url label="Open lead" %}
+{% endblock %}
+{% block signoff %}{{ org.name }} CRM{% endblock %}

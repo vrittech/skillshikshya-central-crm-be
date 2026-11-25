@@ -1,3 +1,4 @@
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 
 from rest_framework import generics, status
@@ -14,7 +15,6 @@ from apps.invoices.serializers import (
     InvoiceEmailConfigSerializer, InvoiceSerializer,
 )
 from apps.invoices.services import cancel_invoice as cancel_invoice_service
-from apps.invoices.tasks import send_invoice_email_task
 from apps.lead.serializers import ReasonSerializer
 
 
@@ -31,6 +31,27 @@ class InvoiceListAPIView(generics.ListAPIView):
         return Invoice.objects.select_related(
             'enrollment', 'student', 'payment', 'branch',
         )
+
+
+class InvoicePdfAPIView(generics.RetrieveAPIView):
+    """GET invoices/{id}/pdf/: the invoice or receipt as a PDF, for anyone who can see it."""
+
+    permission_classes = [IsAuthenticated]
+    filter_backends = [BranchFilterBackend]
+
+    def get_queryset(self):
+        return Invoice.objects.select_related(
+            'enrollment__lead', 'enrollment__course', 'enrollment__branch', 'enrollment__batch__batch',
+            'student', 'payment__received_by', 'branch',
+        )
+
+    def retrieve(self, request, *args, **kwargs):
+        from apps.invoices.pdf import invoice_pdf
+
+        invoice = self.get_object()
+        response = HttpResponse(invoice_pdf(invoice), content_type='application/pdf')
+        response['Content-Disposition'] = f'inline; filename="{invoice.invoice_number}.pdf"'
+        return response
 
 
 class StudentInvoiceListAPIView(InvoiceListAPIView):
@@ -51,20 +72,18 @@ def resend_invoice(request, pk):
             {'detail': 'A cancelled invoice is not sent again.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    recipient = (
-        invoice.emailed_to
-        or (invoice.student.email if invoice.student and invoice.student.email else None)
-        or invoice.enrollment.lead.email
-    )
-    if not recipient:
+    from apps.global_config.models import EmailLog
+    from apps.lead.emails import invoice_again
+
+    log = invoice_again(invoice, user=request.user)
+    if log.status == EmailLog.Status.SKIPPED:
         return Response(
             {'detail': 'Cannot resend: student/lead has no email address.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    send_invoice_email_task.delay(invoice.id)
     return Response({
         'detail': f'Invoice {invoice.invoice_number} queued for re-send.',
-        'to': recipient,
+        'to': log.to_email,
     })
 
 

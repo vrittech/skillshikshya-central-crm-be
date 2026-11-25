@@ -16,9 +16,9 @@ from django.core.mail import send_mail
 from django.db import IntegrityError, transaction
 from django.db.models import Prefetch, Q, Sum
 from django.db.models.functions import Coalesce
-from django.template.loader import render_to_string
 from django.utils import timezone
 
+from apps.global_config.mailer import render_email
 from apps.lead.models import (
     Enrollment, FollowUp, Placement, PaymentPlan, ReminderConfig, ReminderLog,
 )
@@ -174,7 +174,7 @@ def _send_email(enrollment, items):
             f'Dear {name},\n\n{enrollment.course.name}:\n' + '\n'.join(lines),
             settings.DEFAULT_FROM_EMAIL,
             [to],
-            html_message=render_to_string('lead/emails/payment_reminder_email.html', context),
+            html_message=render_email('lead/emails/payment_reminder_email.html', context)[0],
             fail_silently=False,
         )
     except Exception as exc:  # noqa: BLE001 — any mail error is logged and retried tomorrow

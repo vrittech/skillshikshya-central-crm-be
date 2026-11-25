@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>{% block subject %}{% endblock %}</title>
+</head>
+<body style="margin:0; padding:0; background:#f4f5f4; -webkit-text-size-adjust:100%;">
+<div style="display:none; max-height:0; overflow:hidden; opacity:0; color:transparent;">{% block preheader %}{% endblock %}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f4;">
+  <tr>
+    <td align="center" style="padding:28px 12px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:100%; max-width:600px; background:#ffffff; border:1px solid #e3e6e4; border-radius:10px; font-family:Arial, Helvetica, sans-serif; color:#1c2421;">
+        <tr>
+          <td style="padding:22px 32px; border-bottom:1px solid #e3e6e4;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                {% if org.logo_url %}
+                <td valign="middle" style="padding-right:14px; width:1%;">
+                  <img src="{{ org.logo_url }}" alt="" height="36" style="display:block; height:36px; width:auto; max-width:160px; border:0;">
+                </td>
+                {% endif %}
+                <td valign="middle" style="font-size:16px; font-weight:bold; color:#1c2421;">
+                  {{ org.name }}
+                  {% if org.address %}<div style="font-size:12px; font-weight:normal; color:#5f6b66; padding-top:2px;">{{ org.address }}</div>{% endif %}
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:28px 32px 8px;">
+            <h1 style="margin:0 0 16px; font-size:21px; line-height:28px; color:#00694c;">{% block title %}{% endblock %}</h1>
+            <div style="font-size:14px; line-height:22px; color:#1c2421;">
+              {% block content %}{% endblock %}
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:8px 32px 28px; font-size:14px; line-height:22px; color:#1c2421;">
+            {% block signoff %}Regards,<br><strong>{{ org.name }}</strong>{% endblock %}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:18px 32px; background:#f8f9f8; border-top:1px solid #e3e6e4; border-radius:0 0 10px 10px; font-size:12px; line-height:18px; color:#5f6b66;">
+            <strong style="color:#1c2421;">{{ org.name }}</strong>{% if org.address %} · {{ org.address }}{% endif %}<br>
+            {% if org.phone %}{{ org.phone }}{% endif %}{% if org.phone and org.email %} · {% endif %}{% if org.email %}<a href="mailto:{{ org.email }}" style="color:#00694c; text-decoration:none;">{{ org.email }}</a>{% endif %}{% if org.website %}{% if org.phone or org.email %} · {% endif %}{{ org.website }}{% endif %}
+            {% block footer_note %}{% endblock %}
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+</body>
+</html>

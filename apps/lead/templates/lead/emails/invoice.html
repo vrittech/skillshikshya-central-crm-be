@@ -1,0 +1,9 @@
+{% extends "emails/base.html" %}
+{% block subject %}{{ label }} {{ invoice.invoice_number }}{% endblock %}
+{% block preheader %}{{ label }} {{ invoice.invoice_number }} for {{ invoice.course_name }}.{% endblock %}
+{% block title %}{{ label }} {{ invoice.invoice_number }}{% endblock %}
+{% block content %}
+<p style="margin:0 0 12px;">Dear {{ name }},</p>
+<p style="margin:0;">Please find your {{ label|lower }} for <strong>{{ invoice.course_name }}</strong> attached to this email.</p>
+{% include "emails/_details.html" with rows=rows %}
+{% endblock %}

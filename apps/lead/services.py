@@ -370,18 +370,25 @@ def student_for_lead(lead, *, enrollment, user):
     return student, created
 
 
-def issue_fee_invoice(enrollment, *, user):
-    """Make the course-fee invoice for an enrollment, unless it has an active one."""
+def issue_fee_invoice(enrollment, *, user, email=True):
+    """Make the course-fee invoice for an enrollment, unless it has an active one.
+
+    With email=True the invoice is emailed on its own. Confirm passes False and
+    sends it with the confirmation email instead.
+    """
     from apps.invoices.services import create_invoice
+    from apps.lead.emails import invoice_again
 
     if enrollment.invoices.filter(type='enrollment', status='active').exists():
         return None
-    invoice, _ = create_invoice(
+    invoice = create_invoice(
         enrollment=enrollment,
         invoice_type='enrollment',
         amount=enrollment.agreed_amount,
         created_by=user,
     )
+    if email:
+        invoice_again(invoice, user=user)
     return invoice
 
 
@@ -461,23 +468,28 @@ def confirm_enrollment(enrollment, *, user, due_dates=None):
             'due_dates': _parts_json(due_dates or []),
         },
     )
-    issue_fee_invoice(enrollment, user=user)
+    from apps.lead.emails import enrollment_confirmed
+
+    invoice = issue_fee_invoice(enrollment, user=user, email=False)
+    enrollment_confirmed(enrollment, invoice, user=user)
     return enrollment
 
 
 def issue_receipt(payment, *, user):
-    """Make the receipt for a successful payment, once."""
+    """Make the receipt for a successful payment, once, and email it to the student."""
     from apps.invoices.services import create_invoice
+    from apps.lead.emails import payment_received
 
     if payment.status != Payment.Status.SUCCESSFUL or payment.invoices.exists():
         return None
-    invoice, _ = create_invoice(
+    invoice = create_invoice(
         enrollment=payment.enrollment,
         invoice_type='payment',
         amount=payment.amount,
         payment=payment,
         created_by=user,
     )
+    payment_received(payment, invoice, user=user)
     return invoice
 
 

@@ -5,31 +5,12 @@ from zoneinfo import ZoneInfo
 from celery import shared_task
 from django.conf import settings
 from django.core.mail import send_mail
-from django.template.loader import render_to_string
 from django.utils import timezone
+
+from apps.global_config.mailer import render_email
 
 NEPAL_TZ = ZoneInfo('Asia/Kathmandu')
 logger = logging.getLogger(__name__)
-
-
-@shared_task
-def send_counselor_assignment_email_task(counselor_name, counselor_email, reference_number, full_name, phone, email, lead_url):
-    html_message = render_to_string('lead/emails/counselor_assignment_email.html', {
-        'counselor_name': counselor_name,
-        'reference_number': reference_number,
-        'full_name': full_name,
-        'phone': phone,
-        'email': email,
-        'lead_url': lead_url,
-    })
-    send_mail(
-        'New Lead Assigned - Skill Shikshya CRM',
-        f'Lead {reference_number} ({full_name}) has been assigned to you. View: {lead_url}',
-        settings.DEFAULT_FROM_EMAIL,
-        [counselor_email],
-        html_message=html_message,
-        fail_silently=False,
-    )
 
 
 @shared_task
@@ -67,13 +48,18 @@ def send_followup_reminders_task():
             frontend_url = settings.FRONTEND_URL.rstrip('/')
             lead_url = f'{frontend_url}/leads/{fup.lead_id}'
             local_scheduled = fup.scheduled_at.astimezone(NEPAL_TZ).strftime('%Y-%m-%d %H:%M')
-            html_message = render_to_string('lead/emails/followup_reminder_email.html', {
+            html_message, _ = render_email('lead/emails/followup_reminder_email.html', {
                 'user_name': user.name,
                 'lead_name': fup.lead.full_name,
-                'reference_number': fup.lead.reference_number,
                 'scheduled_at': local_scheduled,
-                'purpose': fup.purpose or '—',
                 'lead_url': lead_url,
+                'rows': [
+                    ('Lead', fup.lead.full_name),
+                    ('Reference', fup.lead.reference_number),
+                    ('Phone', fup.lead.phone),
+                    ('When', f'{local_scheduled} (Nepal time)'),
+                    ('Purpose', fup.purpose or ''),
+                ],
             })
             send_mail(
                 'Follow-up Reminder - Skill Shikshya CRM',

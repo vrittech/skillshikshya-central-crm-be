@@ -1,6 +1,5 @@
 from datetime import date
 from decimal import Decimal
-from unittest import mock
 
 from django.contrib import admin as django_admin
 from django.contrib.auth import get_user_model
@@ -155,15 +154,19 @@ class InvoiceEndpointTests(InvoiceTestBase):
         response = self.client.post(f'/api/invoices/{invoice.id}/resend/')
         self.assertIn(response.status_code, (403, 401))
 
-    @mock.patch('apps.invoices.views.send_invoice_email_task.delay')
-    def test_resend_queues_task(self, mock_delay):
+    def test_resend_queues_the_email_with_the_pdf(self):
+        from apps.global_config.models import EmailLog
+
+        self.enrollment.lead.email = 'student@example.com'
+        self.enrollment.lead.save(update_fields=['email'])
         invoice = Invoice.objects.create(
             enrollment=self.enrollment, type='enrollment',
             course_name='X', amount=28000,
         )
         response = self.client.post(f'/api/invoices/{invoice.id}/resend/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        mock_delay.assert_called_once_with(invoice.id)
+        log = EmailLog.objects.get(kind='invoice')
+        self.assertEqual((log.to_email, log.invoice_id, log.status), ('student@example.com', invoice.id, 'queued'))
 
     def test_email_config_get_put_staff_only(self):
         response = self.client.put('/api/invoices/email-config/', {
@@ -224,8 +227,7 @@ class InvoiceBranchScopingTests(InvoiceTestBase):
             listed_fee=10, agreed_amount=10, status='active',
             branch=self.branch,
         )
-        invoice, _ = __import__('apps.invoices.services', fromlist=['create_invoice']) \
-            .create_invoice(enrollment=enr, invoice_type='enrollment', amount=10)
+        invoice = create_invoice(enrollment=enr, invoice_type='enrollment', amount=10)
         self.assertEqual(invoice.branch_id, self.branch.id)
 
 
@@ -269,13 +271,14 @@ class InvoiceCancelTests(InvoiceTestBase):
         )
         self.assertIn(response.status_code, (403, 401))
 
-    @mock.patch('apps.invoices.views.send_invoice_email_task.delay')
-    def test_cancelled_invoice_is_not_resent(self, mock_delay):
+    def test_cancelled_invoice_is_not_resent(self):
+        from apps.global_config.models import EmailLog
+
         invoice = self._invoice()
         self.client.post(f'/api/invoices/{invoice.id}/cancel/', {'reason': 'Wrong'}, format='json')
         response = self.client.post(f'/api/invoices/{invoice.id}/resend/')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        mock_delay.assert_not_called()
+        self.assertFalse(EmailLog.objects.filter(kind='invoice').exists())
 
     def test_voiding_a_payment_cancels_its_receipt(self):
         payments_url = f'/api/leads/{self.lead.id}/enrollments/{self.enrollment.id}/payments/'
@@ -311,7 +314,7 @@ class CreateInvoiceMoneyTests(InvoiceTestBase):
             enrollment=self.enrollment, kind='discount', amount=Decimal('1000.25'),
             reason='Scholarship', created_by=self.admin,
         )
-        invoice, _ = create_invoice(self.enrollment, 'enrollment', self.enrollment.agreed_amount)
+        invoice = create_invoice(self.enrollment, 'enrollment', self.enrollment.agreed_amount)
         invoice.refresh_from_db()
         expected = self.enrollment.agreed_amount - Decimal('10000.50') - Decimal('1000.25')
         self.assertEqual(invoice.remaining_balance, expected)
@@ -322,21 +325,9 @@ class CreateInvoiceMoneyTests(InvoiceTestBase):
             enrollment=self.enrollment, kind='discount',
             amount=self.enrollment.agreed_amount + 500, reason='Waived', created_by=self.admin,
         )
-        invoice, _ = create_invoice(self.enrollment, 'enrollment', self.enrollment.agreed_amount)
+        invoice = create_invoice(self.enrollment, 'enrollment', self.enrollment.agreed_amount)
         invoice.refresh_from_db()
         self.assertEqual(invoice.remaining_balance, Decimal('0'))
-
-    @mock.patch('apps.invoices.tasks.send_invoice_email_task.delay')
-    def test_email_is_queued_only_after_commit(self, mock_delay):
-        self.enrollment.lead.email = 'student@example.com'
-        self.enrollment.lead.save(update_fields=['email'])
-        with self.captureOnCommitCallbacks(execute=False) as callbacks:
-            invoice, queued = create_invoice(self.enrollment, 'enrollment', 1000)
-            self.assertTrue(queued)
-            mock_delay.assert_not_called()
-        self.assertEqual(len(callbacks), 1)
-        callbacks[0]()
-        mock_delay.assert_called_once_with(invoice.id)
 
 
 class ReadOnlyMoneyAdminTests(InvoiceTestBase):

@@ -644,10 +644,13 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         )
 
     def perform_create(self, serializer):
-        serializer.save(
+        from apps.lead.emails import enrollment_received
+
+        enrollment = serializer.save(
             lead_id=self.kwargs['lead_pk'],
             created_by=self.request.user,
         )
+        enrollment_received(enrollment, user=self.request.user)
 
     def perform_update(self, serializer):
         serializer.save(updated_by=self.request.user)

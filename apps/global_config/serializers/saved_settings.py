@@ -91,3 +91,14 @@ class StorageTestSerializer(StorageSettingsSerializer):
         for name in ('account_id', 'access_key_id', 'bucket_name'):
             self.fields[name].required = False
             self.fields[name].allow_blank = True
+
+
+class OrganisationSettingsSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=255)
+    address = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    phone = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    website = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    pan_number = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    logo_url = serializers.URLField(max_length=500, required=False, allow_blank=True)
+    receipt_note = serializers.CharField(max_length=2000, required=False, allow_blank=True)

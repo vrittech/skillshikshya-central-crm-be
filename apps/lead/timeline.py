@@ -2,8 +2,8 @@
 
 Read-only: it is built from the records the other steps already keep
 (enquiries and their stage changes, calls, notes, follow-ups, enrollment
-history, payments, invoices, reminders, documents and voice notes). Nothing
-is stored for it.
+history, payments, invoices, reminders, documents, voice notes and emails).
+Nothing is stored for it.
 
 Each item: id, kind, at, title, detail, by, course, enrollment, enquiry,
 voice_note, amount, duration_seconds, before, after. `kind` is one of KINDS,
@@ -12,6 +12,7 @@ so the screen can show one kind at a time.
 A person may enquire at several branches. A branch user sees only their
 branch's records here, as in every list: no other branch's students or money.
 """
+from apps.global_config.models import EmailLog
 from apps.invoices.models import Invoice
 from apps.lead.models import (
     EnquiryStageChange, EnrollmentHistory, FollowUp, LeadActivity, LeadCall, LeadChange,
@@ -20,8 +21,15 @@ from apps.lead.models import (
 
 KINDS = [
     'lead', 'enquiry', 'call', 'note', 'follow_up', 'voice_note', 'enrollment', 'batch',
-    'money', 'teams', 'reminder', 'document',
+    'money', 'teams', 'reminder', 'document', 'email',
 ]
+
+EMAIL_TITLE = {
+    EmailLog.Status.QUEUED: 'Email queued',
+    EmailLog.Status.SENT: 'Email sent',
+    EmailLog.Status.FAILED: 'Email failed',
+    EmailLog.Status.SKIPPED: 'Email not sent',
+}
 
 Action = EnrollmentHistory.Action
 HISTORY_KIND = {
@@ -199,6 +207,14 @@ def lead_timeline(lead, *, branch_id=None):
     for d in mine(LeadDocument.objects.filter(lead=lead).select_related('uploaded_by')):
         items.append(_item(
             'document', d.pk, d.uploaded_at, d.document_type, by=_name(d.uploaded_by),
+        ))
+
+    for e in mine(EmailLog.objects.filter(lead=lead).select_related('created_by', 'enrollment__course')):
+        items.append(_item(
+            'email', e.pk, e.created_at, f'{EMAIL_TITLE[e.status]}: {e.get_kind_display()}',
+            detail=_join(e.to_email and f'To {e.to_email}', e.error), by=_name(e.created_by),
+            course=_course(e.enrollment.course) if e.enrollment_id else None,
+            enrollment=e.enrollment_id,
         ))
 
     items.sort(key=lambda i: i['at'], reverse=True)

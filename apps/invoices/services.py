@@ -1,44 +1,24 @@
-import logging
 from decimal import Decimal
 
-from django.conf import settings
-from django.core.mail import EmailMessage
 from django.db import transaction
 from django.utils import timezone
 
 from apps.invoices.models import Invoice, InvoiceEmailConfig
 
-logger = logging.getLogger(__name__)
-
-DEFAULT_LOGO_URL = (
-    'https://pub-3a712783614d44db9c5b349676a4cff8.r2.dev/uploads/converted_image.png'
-)
-
-
-def _recipient_for(student, enrollment):
-    if student and student.email:
-        return student.email
-    lead = enrollment.lead if enrollment else None
-    if lead and lead.email:
-        return lead.email
-    return None
-
 
 def create_invoice(enrollment, invoice_type, amount, payment=None, created_by=None):
-    """
-    Create an Invoice for an enrollment and queue the email task.
-    Returns (invoice, queued_email: bool).
+    """Make an invoice (course fee) or a receipt (payment) for an enrollment.
 
-    Never raises on email failures — the invoice is still persisted.
+    The numbers are kept as they are now, so the invoice reads the same later.
+    No email is sent here: the caller sends the email it goes with (see
+    apps.lead.emails).
     """
-    from apps.invoices.tasks import send_invoice_email_task
-
     # Decimal, not float, and the same math as the enrollment card: money
     # entries count, and refunds are taken off what was paid.
     paid_so_far = Decimal(enrollment.total_paid) - enrollment.refunds_total
     remaining = max(enrollment.remaining_amount, Decimal('0'))
 
-    invoice = Invoice.objects.create(
+    return Invoice.objects.create(
         enrollment=enrollment,
         student=enrollment.student,
         payment=payment,
@@ -51,25 +31,9 @@ def create_invoice(enrollment, invoice_type, amount, payment=None, created_by=No
         created_by=created_by,
     )
 
-    recipient = _recipient_for(invoice.student, enrollment)
-    if recipient:
-        # Queue after commit, so the worker never looks for an invoice that is
-        # not saved yet (or was rolled back).
-        invoice_id = invoice.id
-        transaction.on_commit(lambda: send_invoice_email_task.delay(invoice_id))
-        queued = True
-    else:
-        logger.warning(
-            'Invoice %s not emailed: student/lead has no email address.',
-            invoice.invoice_number,
-        )
-        queued = False
 
-    return invoice, queued
-
-
-def build_email_recipients(invoice):
-    """Returns (to_email, cc_list)."""
+def invoice_cc():
+    """Addresses copied on every invoice and receipt email, when turned on."""
     config = InvoiceEmailConfig.load()
     cc = []
     if config.is_active:
@@ -79,46 +43,12 @@ def build_email_recipients(invoice):
             if email and email not in seen:
                 seen.add(email)
                 cc.append(email)
-    return invoice.emailed_to, cc
+    return cc
 
 
-def send_invoice_email(invoice):
-    """Send the invoice email. Returns recipient or None."""
-    from django.template.loader import render_to_string
-
-    recipient = invoice.emailed_to or _recipient_for(invoice.student, invoice.enrollment)
-    if not recipient:
-        logger.warning('No recipient for invoice %s', invoice.invoice_number)
-        return None
-
-    config = InvoiceEmailConfig.load()
-    _, cc_list = build_email_recipients(invoice)
-
-    html = render_to_string('invoices/emails/invoice_email.html', {
-        'invoice': invoice,
-        'subject_prefix': config.subject_prefix,
-        'logo_url': getattr(settings, 'INVOICE_LOGO_URL', DEFAULT_LOGO_URL),
-    })
-
-    subject = f'{config.subject_prefix} Invoice {invoice.invoice_number}'
-    if invoice.type == Invoice.Type.PAYMENT:
-        subject = f'{config.subject_prefix} Payment Receipt {invoice.invoice_number}'
-
-    email = EmailMessage(
-        subject=subject,
-        body=html,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        to=[recipient],
-        cc=cc_list,
-    )
-    email.content_subtype = 'html'
-    email.send(fail_silently=False)
-
-    invoice.emailed_to = recipient
-    invoice.cc_emails = cc_list
-    invoice.sent_at = timezone.now()
-    invoice.save(update_fields=['emailed_to', 'cc_emails', 'sent_at'])
-    return recipient
+def build_email_recipients(invoice):
+    """Returns (to_email, cc_list)."""
+    return invoice.emailed_to, invoice_cc()
 
 
 @transaction.atomic

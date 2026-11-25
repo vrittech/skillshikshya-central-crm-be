@@ -3048,7 +3048,7 @@ class LeadTimelineTests(SeatTestBase):
         self.assertEqual(times, sorted(times, reverse=True))
         self.assertEqual(
             {i['kind'] for i in items},
-            {'lead', 'enquiry', 'call', 'voice_note', 'enrollment', 'batch', 'money'},
+            {'lead', 'enquiry', 'call', 'voice_note', 'enrollment', 'batch', 'money', 'email'},
         )
         titles = {i['title'] for i in items}
         for title in ['Lead added', 'Enquiry added', 'Enquiry won', 'Outbound call', 'Voice note',
@@ -3341,3 +3341,173 @@ class BranchHistoryTests(APITestCase):
         listed = self.client.get(url).data['results']
         self.assertEqual([n['id'] for n in listed], [self.pkr_note.id])
         self.assertEqual(self.client.get(f'{url}{self.ktm_note.id}/audio/').status_code, 404)
+
+
+class EmailTests(SeatTestBase):
+    """Real emails: who gets each one, what goes with it, and the log on the lead."""
+
+    def setUp(self):
+        from django.test import override_settings
+
+        super().setUp()
+        # No logo, so making a PDF never goes to the network.
+        no_logo = override_settings(INVOICE_LOGO_URL='')
+        no_logo.enable()
+        self.addCleanup(no_logo.disable)
+        self.counselor = User.objects.create_user(email='counselor@test.com', name='Gita', password='x')
+
+    def _logs(self, kind):
+        from apps.global_config.models import EmailLog
+
+        return list(EmailLog.objects.filter(kind=kind).order_by('id'))
+
+    def _send(self, log):
+        from apps.global_config.tasks import send_email_task
+
+        send_email_task.apply(args=(log.id,))
+        log.refresh_from_db()
+        return log
+
+    def _student_lead(self):
+        lead = self._lead()
+        lead.email = 'ram@student.com'
+        lead.save(update_fields=['email'])
+        return lead
+
+    def test_new_lead_assigned_emails_the_counselor_not_on_self_assign(self):
+        from django.core import mail
+
+        response = self.client.post('/api/leads/', {
+            'full_name': 'Hari', 'phone': '9800077001', 'assigned_counselor': self.counselor.id,
+        }, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        [log] = self._logs('lead_assigned')
+        self.assertEqual((log.to_email, log.lead_id, log.created_by), ('counselor@test.com', response.data['id'], self.admin))
+        self.assertIn('Hari', log.body_html)
+        self.assertIn(f"/leads/{response.data['id']}", log.body_text)
+
+        self._send(log)
+        self.assertEqual(log.status, 'sent')
+        self.assertEqual(mail.outbox[0].to, ['counselor@test.com'])
+        self.assertEqual(mail.outbox[0].subject, 'New lead assigned: Hari')
+
+        self.client.force_authenticate(self.counselor)
+        self.counselor.is_staff = True
+        self.counselor.save()
+        self.client.post('/api/leads/', {
+            'full_name': 'Own lead', 'phone': '9800077002', 'assigned_counselor': self.counselor.id,
+        }, format='json')
+        self.assertEqual(len(self._logs('lead_assigned')), 1)
+
+    def test_pending_email_is_dropped_when_confirmed_first(self):
+        lead = self._student_lead()
+        enrollment = self._enroll(self.batch, lead=lead)
+        [pending] = self._logs('enrollment_pending')
+        self.assertEqual(pending.to_email, 'ram@student.com')
+        self.assertIn('Python Nov', pending.body_html)
+
+        self._confirm(enrollment)
+        self.assertEqual(self._send(pending).status, 'skipped')
+        [confirmed] = self._logs('enrollment_confirmed')
+        self.assertEqual(confirmed.invoice.type, 'enrollment')
+
+    def test_confirmed_email_carries_the_invoice_pdf(self):
+        from django.core import mail
+
+        lead = self._student_lead()
+        enrollment = self._enroll(self.batch, lead=lead)
+        self._confirm(enrollment)
+        [log] = self._logs('enrollment_confirmed')
+        self._send(log)
+        self.assertEqual(log.status, 'sent')
+        message = mail.outbox[-1]
+        [(name, content, kind)] = message.attachments
+        self.assertEqual((name, kind), (f'{log.invoice.invoice_number}.pdf', 'application/pdf'))
+        self.assertTrue(content.startswith(b'%PDF'))
+        log.invoice.refresh_from_db()
+        self.assertEqual(log.invoice.emailed_to, 'ram@student.com')
+        self.assertIsNotNone(log.invoice.sent_at)
+        # No separate invoice email on confirm.
+        self.assertEqual(self._logs('invoice'), [])
+
+    def test_payment_email_carries_the_receipt_and_copies_accounts(self):
+        from django.core import mail
+
+        from apps.invoices.models import InvoiceEmailConfig
+
+        InvoiceEmailConfig.objects.create(pk=1, cc_emails=['accounts@test.com'], is_active=True)
+        lead = self._student_lead()
+        enrollment = self._enroll(self.batch, lead=lead)
+        self._confirm(enrollment)
+        self.client.post(self._url(enrollment, 'payments/'), {
+            'amount': '10000', 'payment_date': timezone.now().isoformat(),
+            'payment_method': 'esewa', 'transaction_reference': 'ES-1', 'status': 'successful',
+        }, format='json')
+        [log] = self._logs('payment_received')
+        self.assertEqual((log.to_email, log.cc, log.invoice.type), ('ram@student.com', ['accounts@test.com'], 'payment'))
+        self.assertIn('NPR 10,000', log.subject)
+        self.assertIn('NPR 20,000', log.body_text)  # balance
+        self._send(log)
+        self.assertEqual(mail.outbox[-1].cc, ['accounts@test.com'])
+
+    def test_no_address_keeps_a_not_sent_row_on_the_history(self):
+        enrollment = self._enroll(self.batch)
+        [log] = self._logs('enrollment_pending')
+        self.assertEqual((log.status, log.error), ('skipped', 'No email address.'))
+        items = self.client.get(f'/api/leads/{enrollment.lead_id}/timeline/', {'kind': 'email'}).data['results']
+        self.assertEqual([i['title'] for i in items], ['Email not sent: Enrollment received'])
+
+    def test_a_refused_send_is_kept_with_the_reason(self):
+        import smtplib
+        from unittest import mock
+
+        from apps.global_config.mailer import send_now
+
+        lead = self._student_lead()
+        with mock.patch('django.core.mail.EmailMultiAlternatives.send',
+                        side_effect=smtplib.SMTPRecipientsRefused({})):
+            log = send_now(
+                'teams_account', to='ram@student.com', subject='Sign in', lead=lead,
+                template='lead/emails/invoice.html',
+                context={'label': 'Invoice', 'invoice': {'invoice_number': 'X'}, 'name': 'Ram', 'rows': []},
+                hidden_context={},
+            )
+        self.assertEqual((log.status, log.error), ('failed', 'The server refused the To address.'))
+
+    def test_invoice_pdf_endpoint(self):
+        enrollment = self._enroll(self.batch)
+        self._confirm(enrollment)
+        invoice = Invoice.objects.get(enrollment=enrollment)
+        response = self.client.get(f'/api/invoices/{invoice.id}/pdf/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'application/pdf')
+        self.assertTrue(response.content.startswith(b'%PDF'))
+
+    def test_organisation_details_are_used(self):
+        saved = self.client.put('/api/settings/organisation/', {
+            'name': 'Skill Shikshya Pvt. Ltd.', 'address': 'Sankhamul, Kathmandu',
+            'phone': '01-5199999', 'pan_number': '609876543',
+        }, format='json')
+        self.assertEqual(saved.status_code, 200, saved.data)
+        self.assertEqual(saved.data['pan_number'], '609876543')
+
+        from apps.invoices.pdf import document_html
+
+        enrollment = self._enroll(self.batch)
+        self._confirm(enrollment)
+        html = document_html(Invoice.objects.get(enrollment=enrollment))
+        self.assertIn('PAN/VAT No: 609876543', html)
+        self.assertIn('Rupees Thirty Thousand Only', html)
+
+        self.client.force_authenticate(self.counselor)
+        self.assertEqual(self.client.get('/api/settings/organisation/').status_code, 403)
+
+
+class AmountInWordsTests(APITestCase):
+    def test_nepali_grouping_and_paisa(self):
+        from apps.invoices.pdf import amount_in_words
+
+        self.assertEqual(amount_in_words(125000), 'Rupees One Lakh Twenty-Five Thousand Only')
+        self.assertEqual(amount_in_words(Decimal('20000.50')), 'Rupees Twenty Thousand and Fifty Paisa Only')
+        self.assertEqual(amount_in_words(12500000), 'Rupees One Crore Twenty-Five Lakh Only')
+        self.assertEqual(amount_in_words(999), 'Rupees Nine Hundred Ninety-Nine Only')

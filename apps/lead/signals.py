@@ -1,10 +1,8 @@
-from django.conf import settings
 from django.db.models.signals import post_save, pre_delete
 from django.dispatch import receiver
 from django.db.models import ProtectedError
 
 from apps.lead.models import Lead, LeadSource, Notification
-from apps.lead.tasks import send_counselor_assignment_email_task
 
 
 @receiver(pre_delete, sender=LeadSource)
@@ -27,32 +25,23 @@ def block_restricted_source_deletion(sender, instance, **kwargs):
 
 @receiver(post_save, sender=Lead)
 def notify_counselor_assignment(sender, instance, created, **kwargs):
-    if created:
-        return
+    """Tell the counselor a lead is theirs: a notification in the CRM and an email.
 
-    old_id = instance._original_assigned_counselor_id
+    Also when the lead is created with a counselor. Not when the counselor
+    assigned the lead to themselves.
+    """
+    from apps.lead.emails import lead_assigned
+
     new_id = instance.assigned_counselor_id
-
-    if new_id and old_id != new_id:
-        counselor = instance.assigned_counselor
-        lead_url = f'{instance.pk}'
-        title = 'New Lead Assigned'
-        message = f'Lead {instance.reference_number} ({instance.full_name}) has been assigned to you.'
-
-        Notification.objects.create(
-            recipient=counselor,
-            title=title,
-            message=message,
-            link=f'/leads/{instance.pk}',
-        )
-
-        if counselor.email:
-            send_counselor_assignment_email_task.delay(
-                counselor_name=counselor.name or counselor.email,
-                counselor_email=counselor.email,
-                reference_number=instance.reference_number,
-                full_name=instance.full_name,
-                phone=instance.phone,
-                email=instance.email,
-                lead_url=f'{settings.FRONTEND_URL or ""}/leads/{instance.pk}',
-            )
+    if not new_id or (not created and instance._original_assigned_counselor_id == new_id):
+        return
+    user = instance._changed_by or (instance.created_by if created else None)
+    if user is not None and user.pk == new_id:
+        return
+    Notification.objects.create(
+        recipient=instance.assigned_counselor,
+        title='New Lead Assigned',
+        message=f'Lead {instance.reference_number} ({instance.full_name}) has been assigned to you.',
+        link=f'/leads/{instance.pk}',
+    )
+    lead_assigned(instance, user=user)

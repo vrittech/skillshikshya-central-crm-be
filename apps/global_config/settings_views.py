@@ -1,4 +1,4 @@
-"""Settings page: Cloud storage (R2) and Email (SMTP). Admins only.
+"""Settings page: Cloud storage (R2), Email (SMTP) and Organisation. Admins only.
 
 GET shows the values in use now (saved on this page, else from .env). Secrets
 are never sent back, only whether one is set. PUT saves the whole form; a blank
@@ -15,10 +15,10 @@ from rest_framework.response import Response
 from apps.global_config.integrations import (
     email_config, r2_config, run_r2_test, send_test_email,
 )
-from apps.global_config.models import EmailSettings, StorageSettings
+from apps.global_config.models import EmailSettings, OrganisationSettings, StorageSettings
 from apps.global_config.serializers.saved_settings import (
-    EmailSettingsSerializer, EmailTestSerializer, StorageSettingsSerializer,
-    StorageTestSerializer,
+    EmailSettingsSerializer, EmailTestSerializer, OrganisationSettingsSerializer,
+    StorageSettingsSerializer, StorageTestSerializer,
 )
 
 
@@ -155,3 +155,27 @@ def test_email(request):
     if not cfg.host:
         return Response({'detail': 'Fill in the SMTP server.'}, status=status.HTTP_400_BAD_REQUEST)
     return Response(send_test_email(cfg, data['to'], sent_by=_person(request.user)))
+
+
+def _organisation_payload():
+    from dataclasses import asdict
+
+    from apps.global_config.mailer import organisation
+
+    return {**asdict(organisation()), **_saved_meta(OrganisationSettings)}
+
+
+@api_view(['GET', 'PUT'])
+@permission_classes([IsAdminUser])
+def organisation_settings(request):
+    """Who emails, invoices and receipts come from."""
+    if request.method == 'GET':
+        return Response(_organisation_payload())
+    serializer = OrganisationSettingsSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    row = OrganisationSettings.load() or OrganisationSettings()
+    for field, value in serializer.validated_data.items():
+        setattr(row, field, value.strip() if isinstance(value, str) else value)
+    row.updated_by = request.user
+    row.save()
+    return Response(_organisation_payload())

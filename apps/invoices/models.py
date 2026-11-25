@@ -60,8 +60,9 @@ class Invoice(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.invoice_number:
+            # Invoices and receipts are numbered apart: INV-2026-000001, RCT-2026-000001.
             year = datetime.now().year
-            prefix = f'INV-{year}'
+            prefix = f"{'RCT' if self.type == self.Type.PAYMENT else 'INV'}-{year}"
             last = Invoice.objects.filter(
                 invoice_number__startswith=prefix,
             ).order_by('invoice_number').last()
