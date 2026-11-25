@@ -260,6 +260,8 @@ class EnrollmentSerializer(serializers.ModelSerializer):
             'lead', 'student', 'current_batch',
             'created_by', 'updated_by', 'created_at', 'updated_at',
             'total_paid', 'remaining_amount', 'is_full_paid',
+            # The listed fee is the price set on the course. It follows the course.
+            'listed_fee',
         ]
 
     def _price_is_open(self):
@@ -304,6 +306,24 @@ class EnrollmentSerializer(serializers.ModelSerializer):
     def _changed(self, attrs, field):
         return field in attrs and attrs[field] != getattr(self.instance, field)
 
+    def _listed_fee_from_course(self, attrs):
+        """A new enrollment, or a new course, takes the price set on the course."""
+        if self.instance is not None and not self._changed(attrs, 'course'):
+            return
+        course = attrs.get('course')
+        if course is None:
+            return
+        if self.instance is not None and not self._price_is_open():
+            raise serializers.ValidationError({'course': (
+                'Something is paid on this enrollment, so its course and price are fixed. '
+                'Cancel it with a reason and add a new one.'
+            )})
+        if course.full_amount is None:
+            raise serializers.ValidationError(
+                {'course': 'This course has no price. Set its full amount on the course first.'}
+            )
+        attrs['listed_fee'] = course.full_amount
+
     def validate(self, attrs):
         # Once confirmed or paid, the price is fixed. Later changes are money
         # entries with a reason.
@@ -332,6 +352,8 @@ class EnrollmentSerializer(serializers.ModelSerializer):
                 )
             if errors:
                 raise serializers.ValidationError(errors)
+
+        self._listed_fee_from_course(attrs)
 
         if 'batch' in attrs or 'course' in attrs:
             course = attrs.get('course', getattr(self.instance, 'course', None))

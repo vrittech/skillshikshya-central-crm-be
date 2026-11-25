@@ -885,7 +885,7 @@ class ConfirmEnrollmentTests(APITestCase):
     def test_price_is_fixed_once_confirmed(self):
         self._confirm(self.enrollment)
         response = self.client.patch(
-            f'{self.enrollments_url}{self.enrollment.id}/', {'listed_fee': '1'}, format='json',
+            f'{self.enrollments_url}{self.enrollment.id}/', {'standard_discount': '1'}, format='json',
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
@@ -992,6 +992,32 @@ class SeatTestBase(APITestCase):
 class SeatTests(SeatTestBase):
     """Confirm takes a seat in the batch, cancel frees it, and full or closed batches refuse."""
 
+
+    def test_listed_fee_is_the_course_price(self):
+        lead = self._lead()
+        body = {
+            'course': self.course.id, 'enrollment_date': str(date.today()),
+            'listed_fee': '1', 'agreed_amount': '30000',
+        }
+        created = self.client.post(f'/api/leads/{lead.id}/enrollments/', body, format='json')
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(created.data['listed_fee'], '30000.00')
+        enrollment = Enrollment.objects.get(id=created.data['id'])
+
+        typed = self.client.patch(self._url(enrollment), {'listed_fee': '5'}, format='json')
+        self.assertEqual(typed.data['listed_fee'], '30000.00')
+
+        moved = self.client.patch(
+            self._url(enrollment), {'course': self.other_course.id, 'agreed_amount': '20000'}, format='json',
+        )
+        self.assertEqual(moved.data['listed_fee'], '20000.00')
+
+        unpriced = Course.objects.create(name='Go', full_amount=None)
+        refused = self.client.post(
+            f'/api/leads/{lead.id}/enrollments/', {**body, 'course': unpriced.id}, format='json',
+        )
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn('no price', str(refused.data['course']))
     def test_confirm_takes_a_seat_in_the_chosen_batch(self):
         enrollment = self._enroll(self.batch)
         response = self._confirm(enrollment)
