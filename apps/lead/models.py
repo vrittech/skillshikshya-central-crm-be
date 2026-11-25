@@ -530,9 +530,15 @@ class LeadCourseInterest(models.Model):
             ),
         ]
 
+    @property
+    def label(self):
+        """The course name, or what the enquiry is about when it has no course."""
+        if self.course:
+            return self.course.name
+        return self.course_name or self.about or ''
+
     def __str__(self):
-        name = self.course.name if self.course else self.course_name
-        return f'{self.lead.full_name} → {name or "?"}'
+        return f'{self.lead.full_name} → {self.label or "?"}'
 
 
 class EnquiryStageChange(models.Model):

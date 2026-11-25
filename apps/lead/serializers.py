@@ -655,7 +655,7 @@ class VoiceNoteSerializer(serializers.ModelSerializer):
         enquiry = obj.enquiry
         if enquiry is None:
             return None
-        return enquiry.course.name if enquiry.course else enquiry.course_name
+        return enquiry.label or None
 
     def validate_file(self, file):
         from apps.lead import voice_notes
@@ -799,7 +799,7 @@ class PhoneMatchEnquirySerializer(serializers.ModelSerializer):
         fields = ['id', 'course', 'course_name', 'stage', 'stage_display', 'branch_name']
 
     def get_course_name(self, obj):
-        return obj.course.name if obj.course else obj.course_name
+        return obj.label or None
 
 
 class PhoneMatchSerializer(serializers.ModelSerializer):

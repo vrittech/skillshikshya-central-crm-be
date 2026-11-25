@@ -97,7 +97,7 @@ def lead_timeline(lead, *, branch_id=None):
         items.append(_item(
             'enquiry', e.pk, e.created_at, 'Enquiry added',
             detail=e.source.name if e.source else '', by=_name(e.created_by),
-            course=_course(e.course, e.course_name), enquiry=e.pk,
+            course=e.label or None, enquiry=e.pk,
         ))
     changes = mine(EnquiryStageChange.objects.filter(enquiry__lead=lead).select_related(
         'enquiry__course', 'changed_by',
@@ -107,7 +107,7 @@ def lead_timeline(lead, *, branch_id=None):
             'enquiry', f'stage-{c.pk}', c.created_at,
             f'Enquiry {c.get_to_stage_display().lower()}',
             detail=c.note, by=_name(c.changed_by),
-            course=_course(c.enquiry.course, c.enquiry.course_name), enquiry=c.enquiry_id,
+            course=c.enquiry.label or None, enquiry=c.enquiry_id,
         ))
 
     for c in mine(LeadCall.objects.filter(lead=lead).select_related('created_by')):
@@ -145,7 +145,7 @@ def lead_timeline(lead, *, branch_id=None):
         items.append(_item(
             'voice_note', v.pk, v.created_at, 'Voice note',
             detail=v.note, by=_name(v.created_by),
-            course=_course(v.enquiry.course, v.enquiry.course_name) if v.enquiry_id else None,
+            course=(v.enquiry.label or None) if v.enquiry_id else None,
             enquiry=v.enquiry_id, voice_note=v.pk, duration_seconds=v.duration_seconds,
         ))
 

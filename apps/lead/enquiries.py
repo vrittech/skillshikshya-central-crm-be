@@ -14,7 +14,7 @@ Stage = LeadCourseInterest.Stage
 
 
 def _name(enquiry):
-    return enquiry.course.name if enquiry.course else (enquiry.course_name or 'this course')
+    return enquiry.label or 'this enquiry'
 
 
 def _lock(enquiry):

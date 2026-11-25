@@ -2894,6 +2894,22 @@ class EnquiryDetailsTests(APITestCase):
         data = self._post({'course': self.course.id})
         self.assertEqual((data['about'], data['description']), ('', ''))
 
+    def test_enquiry_without_a_course_goes_by_what_it_is_about(self):
+        first = self._post({'about': 'Weekend batch', 'description': 'Asked the fee.'})
+        self._post({'about': 'Scholarship', 'description': 'Asked about discounts.'})
+        self.assertEqual((first['course'], first['course_name']), (None, None))
+        self.assertEqual(LeadCourseInterest.objects.filter(lead=self.lead, course=None).count(), 2)
+
+        self._post(
+            {'about': 'Job help', 'recording': self._audio(), 'recording_seconds': 4}, fmt='multipart',
+        )
+        notes = self.client.get(f'/api/leads/{self.lead.id}/voice-notes/').data['results']
+        self.assertEqual([n['course_name'] for n in notes], ['Job help'])
+
+        timeline = self.client.get(f'/api/leads/{self.lead.id}/timeline/').data['results']
+        added = {i['course'] for i in timeline if i['title'] == 'Enquiry added'}
+        self.assertEqual(added, {'Weekend batch', 'Scholarship', 'Job help'})
+
     def test_typed_description(self):
         data = self._post({'course': self.course.id, 'about': '  Weekend batch ', 'description': ' Asked the fee. '})
         self.assertEqual((data['about'], data['description']), ('Weekend batch', 'Asked the fee.'))
