@@ -95,3 +95,24 @@ def send_payment_reminders_task():
     if not config.is_active:
         return 0
     return len(send_payment_reminders(config=config))
+
+
+@shared_task(
+    autoretry_for=(Exception,),
+    retry_backoff=30,        # wait 30s, then 60s, 120s, ... between tries
+    retry_backoff_max=3600,  # never wait more than an hour
+    retry_jitter=True,       # spread the waits so retries don't all land at once
+    max_retries=8,           # about 2 hours of trying in all
+    acks_late=True,          # if the worker dies mid-job, Redis hands the job out again
+    ignore_result=True,      # nothing to read back, so don't store a result in Redis
+)
+def delete_voice_note_file_task(key):
+    """Remove a deleted voice note's recording from R2 (or the local media folder).
+
+    Queued by apps.lead.voice_notes once the delete is saved. Deleting a file
+    that is already gone is not an error, so running this twice is harmless:
+    that is what makes the retries and acks_late safe.
+    """
+    from apps.lead.voice_notes import delete_file
+
+    delete_file(key)

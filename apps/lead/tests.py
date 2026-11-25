@@ -2303,6 +2303,18 @@ class VoiceNoteTests(APITestCase):
         settings_override.enable()
         self.addCleanup(settings_override.disable)
 
+        # The file delete is a Celery job; run it here instead of sending it to Redis.
+        from unittest import mock
+
+        from apps.lead.tasks import delete_voice_note_file_task
+
+        run_now = mock.patch.object(
+            delete_voice_note_file_task, 'delay',
+            side_effect=lambda key: delete_voice_note_file_task.apply(args=[key]),
+        )
+        run_now.start()
+        self.addCleanup(run_now.stop)
+
         self.ktm = Branch.objects.create(name='Kathmandu', code='KTM')
         self.pkr = Branch.objects.create(name='Pokhara', code='PKR')
         self.counselor = User.objects.create_user(
@@ -2398,6 +2410,116 @@ class VoiceNoteTests(APITestCase):
         self.assertFalse(VoiceNote.objects.exists())
         self.assertFalse(default_storage.exists(key))
 
+
+
+class VoiceNoteFileDeleteJobTests(APITestCase):
+    """The recording is deleted by the Celery worker, after the row delete is saved."""
+
+    def setUp(self):
+        from unittest import mock
+
+        from apps.lead.tasks import delete_voice_note_file_task
+
+        self.mock = mock
+        self.task = delete_voice_note_file_task
+        self.admin = User.objects.create_user(
+            email='admin@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+        self.lead = Lead.objects.create(full_name='Ram Thapa', phone='9800000950')
+        self.notes = [
+            VoiceNote.objects.create(
+                lead=self.lead, file_key=f'voice-notes/{self.lead.id}/{name}.webm',
+                content_type='audio/webm', size_bytes=10, created_by=self.admin,
+            )
+            for name in ('one', 'two')
+        ]
+        queue = mock.patch.object(delete_voice_note_file_task, 'delay')
+        self.delay = queue.start()
+        self.addCleanup(queue.stop)
+
+    def keys(self):
+        return sorted(n.file_key for n in self.notes)
+
+    def queued(self):
+        return sorted(c.args[0] for c in self.delay.call_args_list)
+
+    def test_deleting_a_note_queues_one_job_after_the_delete_is_saved(self):
+        with self.captureOnCommitCallbacks(execute=False) as waiting:
+            res = self.client.delete(f'/api/leads/{self.lead.id}/voice-notes/{self.notes[0].id}/')
+            self.assertEqual(res.status_code, 204)
+            self.delay.assert_not_called()  # nothing is queued before the commit
+        for callback in waiting:
+            callback()
+        self.delay.assert_called_once_with(self.notes[0].file_key)
+
+    def test_deleting_the_lead_forever_queues_one_job_per_note(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.post(f'/api/leads/{self.lead.id}/purge/')
+        self.assertEqual(res.status_code, 204)
+        self.assertFalse(VoiceNote.objects.exists())
+        self.assertEqual(self.queued(), self.keys())
+
+    def test_recycle_bin_keeps_the_recordings(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.delete(f'/api/leads/{self.lead.id}/')
+        self.assertEqual(res.status_code, 204)
+        self.assertEqual(VoiceNote.objects.count(), 2)
+        self.delay.assert_not_called()
+
+    def test_a_rolled_back_delete_queues_nothing(self):
+        from django.db import transaction
+
+        note_id = self.notes[0].pk  # delete() clears pk on the instance
+        with self.captureOnCommitCallbacks(execute=True):
+            try:
+                with transaction.atomic():
+                    self.notes[0].delete()
+                    raise RuntimeError('something else failed')
+            except RuntimeError:
+                pass
+        self.assertTrue(VoiceNote.objects.filter(pk=note_id).exists())
+        self.delay.assert_not_called()
+
+    def test_redis_down_deletes_the_file_now(self):
+        self.delay.side_effect = ConnectionError('Redis is down')
+        key = self.notes[0].file_key
+        with self.mock.patch('apps.lead.voice_notes.delete_file') as delete_file, \
+                self.assertLogs('apps.lead.voice_notes', level='WARNING') as logs, \
+                self.captureOnCommitCallbacks(execute=True):
+            res = self.client.delete(f'/api/leads/{self.lead.id}/voice-notes/{self.notes[0].id}/')
+        self.assertEqual(res.status_code, 204)
+        delete_file.assert_called_once_with(key)
+        self.assertIn('deleting it now', logs.output[0])
+
+    def test_the_job_retries_until_r2_answers(self):
+        with self.mock.patch('apps.lead.voice_notes.delete_file',
+                             side_effect=[ConnectionError('R2 down'), TimeoutError('slow'), None]) as delete_file:
+            result = self.task.apply(args=['voice-notes/1/x.webm'])
+        self.assertTrue(result.successful())
+        self.assertEqual(delete_file.call_count, 3)
+
+    def test_the_job_gives_up_after_its_last_try(self):
+        with self.mock.patch('apps.lead.voice_notes.delete_file', side_effect=ConnectionError('R2 down')) as delete_file:
+            result = self.task.apply(args=['voice-notes/1/x.webm'])
+        self.assertTrue(result.failed())
+        self.assertEqual(delete_file.call_count, 1 + self.task.max_retries)
+
+    def test_running_the_job_twice_is_harmless(self):
+        import shutil
+        import tempfile
+
+        from django.core.files.base import ContentFile
+        from django.core.files.storage import default_storage
+        from django.test import override_settings
+
+        media = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, media, ignore_errors=True)
+        with override_settings(MEDIA_ROOT=media, R2_BUCKET_NAME='', R2_ACCESS_KEY_ID=''):
+            key = default_storage.save('voice-notes/1/twice.webm', ContentFile(b'abc'))
+            self.assertTrue(self.task.apply(args=[key]).successful())
+            self.assertTrue(self.task.apply(args=[key]).successful())
+            self.assertFalse(default_storage.exists(key))
 
 class LeadTimelineTests(SeatTestBase):
     """One list with everything about the person, newest first."""

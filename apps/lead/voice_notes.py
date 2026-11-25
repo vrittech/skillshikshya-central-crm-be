@@ -3,7 +3,12 @@
 Recordings go to R2 when it is set up. Without R2 (a laptop running the CRM)
 they go to the local media folder, so the feature still works. Files are
 never public: VoiceNoteViewSet.audio streams them to users who can see the lead.
+
+Deleting a voice note (or deleting a lead forever) removes the row at once and
+hands the file to the Celery worker, which deletes it from storage and retries
+if R2 is slow or down. Moving a lead to the recycle bin keeps its recordings.
 """
+import logging
 import uuid
 
 from django.core.files.storage import default_storage
@@ -14,6 +19,9 @@ from django.dispatch import receiver
 from apps.global_config.integrations import r2_config
 from apps.global_config.utilities.r2_storage import get_r2_client
 from apps.lead.models import VoiceNote
+from apps.lead.tasks import delete_voice_note_file_task
+
+logger = logging.getLogger(__name__)
 
 MAX_BYTES = 10 * 1024 * 1024
 MAX_SECONDS = 10 * 60
@@ -70,9 +78,30 @@ def delete_file(key):
         default_storage.delete(key)
 
 
+def queue_file_delete(key):
+    """Put "delete this file" on the Redis queue for the worker.
+
+    If Redis can't be reached, delete it now instead. If that fails too,
+    the file stays in storage and the error is logged.
+    """
+    try:
+        delete_voice_note_file_task.delay(key)
+    except Exception:  # noqa: BLE001 - the row is already gone; don't fail the request
+        logger.warning('Could not queue the delete of %s; deleting it now.', key, exc_info=True)
+        try:
+            delete_file(key)
+        except Exception:  # noqa: BLE001
+            logger.exception('Could not delete voice note file %s.', key)
+
+
 @receiver(post_delete, sender=VoiceNote)
 def remove_recording(sender, instance, **kwargs):
-    """The file goes once the delete is saved (also when the whole lead is deleted)."""
+    """Queue the file's removal once the delete is saved.
+
+    Runs for each voice note, also when the whole lead is deleted forever
+    (the notes go with it by CASCADE). on_commit waits for the delete to be
+    saved: if it is rolled back, the row comes back and so must the file.
+    """
     key = instance.file_key
     if key:
-        transaction.on_commit(lambda: delete_file(key))
+        transaction.on_commit(lambda: queue_file_delete(key))
