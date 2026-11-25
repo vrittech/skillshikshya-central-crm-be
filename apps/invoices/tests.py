@@ -48,9 +48,10 @@ class FeeInvoiceOnConfirmTests(InvoiceTestBase):
         super().setUp()
         Enrollment.objects.filter(id=self.enrollment.id).update(status='pending')
         self.confirm_url = f'/api/leads/{self.lead.id}/enrollments/{self.enrollment.id}/confirm/'
+        self.first_payment = {'first_payment': {'amount': '5000', 'payment_method': 'cash'}}
 
     def test_confirm_generates_enrollment_invoice(self):
-        response = self.client.post(self.confirm_url)
+        response = self.client.post(self.confirm_url, self.first_payment, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
         invoice = Invoice.objects.get(type='enrollment')
@@ -71,8 +72,8 @@ class FeeInvoiceOnConfirmTests(InvoiceTestBase):
         self.assertEqual(Invoice.objects.count(), 0)
 
     def test_no_duplicate_fee_invoice(self):
-        self.client.post(self.confirm_url)
-        self.client.post(self.confirm_url)
+        self.client.post(self.confirm_url, self.first_payment, format='json')
+        self.client.post(self.confirm_url, self.first_payment, format='json')
         self.assertEqual(Invoice.objects.filter(type='enrollment').count(), 1)
 
 

@@ -676,13 +676,16 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     def confirm(self, request, *args, **kwargs):
         """Confirm a pending enrollment. This makes the lead a student.
 
-        Optional body: {"due_dates": [{"due_on", "amount"}, ...]}.
+        Something must be paid first. Optional body: {"due_dates": [{"due_on",
+        "amount"}, ...], "first_payment": {"amount", "payment_method",
+        "payment_date", "transaction_reference", "notes"}}.
         """
         enrollment = self.get_object()
         body = DueDatesSerializer(data=request.data, for_confirm=True)
         body.is_valid(raise_exception=True)
         enrollment = services.confirm_enrollment(
             enrollment, user=request.user, due_dates=body.validated_data.get('due_dates'),
+            first_payment=body.validated_data.get('first_payment'),
         )
         return self._fresh_reply(enrollment)
 

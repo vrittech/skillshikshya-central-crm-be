@@ -203,6 +203,21 @@ class DuePartSerializer(serializers.Serializer):
     )
 
 
+class FirstPaymentSerializer(serializers.Serializer):
+    """The payment taken with Confirm, when nothing is paid yet."""
+
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    payment_method = serializers.ChoiceField(choices=Payment.Method.choices)
+    payment_date = serializers.DateTimeField(required=False)
+    transaction_reference = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError('Amount must be more than 0.')
+        return value
+
+
 class DueDatesSerializer(serializers.Serializer):
     """Body of Change due dates (reason needed) and of Confirm (all optional)."""
 
@@ -214,6 +229,7 @@ class DueDatesSerializer(serializers.Serializer):
         if for_confirm:
             self.fields.pop('reason')
             self.fields['due_dates'] = DuePartSerializer(many=True, required=False)
+            self.fields['first_payment'] = FirstPaymentSerializer(required=False)
 
 
 class DueRowSerializer(serializers.Serializer):

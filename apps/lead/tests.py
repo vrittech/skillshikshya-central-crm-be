@@ -792,8 +792,9 @@ class ConfirmEnrollmentTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         return Enrollment.objects.get(id=response.data['id'])
 
-    def _confirm(self, enrollment):
-        return self.client.post(f'{self.enrollments_url}{enrollment.id}/confirm/')
+    def _confirm(self, enrollment, paid='5000'):
+        body = {'first_payment': {'amount': paid, 'payment_method': 'cash'}} if paid else {}
+        return self.client.post(f'{self.enrollments_url}{enrollment.id}/confirm/', body, format='json')
 
     def test_new_enrollment_is_pending_and_not_a_student(self):
         self.assertEqual(self.enrollment.status, 'pending')
@@ -881,6 +882,54 @@ class ConfirmEnrollmentTests(APITestCase):
         paid = self.client.patch(url, {'agreed_amount': '31000'}, format='json')
         self.assertEqual(paid.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('agreed_amount', paid.data)
+
+    def test_confirm_needs_a_payment(self):
+        response = self._confirm(self.enrollment, paid=None)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data['detail'], 'Record a payment first. An enrollment is confirmed once something is paid.',
+        )
+        self.enrollment.refresh_from_db()
+        self.assertEqual(self.enrollment.status, 'pending')
+        self.assertFalse(Student.objects.exists())
+        # A pending payment is not money yet.
+        Payment.objects.create(
+            enrollment=self.enrollment, amount=5000, payment_date=timezone.now(),
+            payment_method='cash', status='pending',
+        )
+        self.assertEqual(self._confirm(self.enrollment, paid=None).status_code, 400)
+
+    def test_confirm_takes_the_first_payment(self):
+        response = self.client.post(f'{self.enrollments_url}{self.enrollment.id}/confirm/', {'first_payment': {
+            'amount': '5000', 'payment_method': 'esewa', 'transaction_reference': 'ES-77',
+        }}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data['status'], 'confirmed')
+        self.assertEqual(response.data['total_paid'], '5000.00')
+        payment = Payment.objects.get(enrollment=self.enrollment)
+        self.assertEqual(
+            (payment.status, payment.payment_method, payment.transaction_reference, payment.received_by),
+            ('successful', 'esewa', 'ES-77', self.admin),
+        )
+        receipt = payment.invoices.get()
+        self.assertTrue(receipt.invoice_number.startswith('RCT-'))
+        self.assertEqual(receipt.student, Student.objects.get())
+        bad = self._enroll(course=Course.objects.create(name='Java', full_amount=1000).id)
+        response = self._confirm(bad, paid='0')
+        self.assertEqual(response.data['first_payment']['amount'], ['Amount must be more than 0.'])
+
+    def test_a_payment_made_while_pending_counts(self):
+        response = self.client.post(f'{self.enrollments_url}{self.enrollment.id}/payments/', {
+            'amount': '3000', 'payment_date': timezone.now().isoformat(),
+            'payment_method': 'cash', 'status': 'successful',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(self._confirm(self.enrollment, paid=None).status_code, 200)
+        self.assertEqual(Payment.objects.filter(enrollment=self.enrollment).count(), 1)
+
+    def test_a_free_enrollment_needs_no_payment(self):
+        free = self._enroll(standard_discount='30000', agreed_amount='0')
+        self.assertEqual(self._confirm(free, paid=None).status_code, 200)
 
     def test_price_is_fixed_once_confirmed(self):
         self._confirm(self.enrollment)
@@ -982,8 +1031,10 @@ class SeatTestBase(APITestCase):
             return response
         return Enrollment.objects.get(id=response.data['id'])
 
-    def _confirm(self, enrollment):
-        return self.client.post(self._url(enrollment, 'confirm/'))
+    def _confirm(self, enrollment, paid='5000'):
+        """Confirm with a first payment (something must be paid before confirming)."""
+        body = {'first_payment': {'amount': paid, 'payment_method': 'cash'}} if paid else {}
+        return self.client.post(self._url(enrollment, 'confirm/'), body, format='json')
 
     def _seats(self, batch):
         return self.client.get(f'/api/course-batches/{batch.id}/').data
@@ -1052,7 +1103,9 @@ class SeatTests(SeatTestBase):
         self.assertFalse(late.placements.exists())
         self.assertFalse(late.history.exists())
         self.assertEqual(Student.objects.count(), 2)
-        self.assertEqual(Invoice.objects.count(), 2)
+        # A fee invoice and a receipt for each of the two; the refused one keeps no payment.
+        self.assertEqual(Invoice.objects.count(), 4)
+        self.assertFalse(late.payments.exists())
 
     def test_a_full_batch_cannot_be_picked_for_a_new_enrollment(self):
         for _ in range(2):
@@ -1447,9 +1500,11 @@ class DueDateTests(SeatTestBase):
     def _day(self, days):
         return str(date.today() + timedelta(days=days))
 
-    def _confirmed(self, due_dates=None):
+    def _confirmed(self, due_dates=None, paid='1000'):
         enrollment = self._enroll()
-        body = {'due_dates': due_dates} if due_dates is not None else {}
+        body = {'first_payment': {'amount': paid, 'payment_method': 'cash'}}
+        if due_dates is not None:
+            body['due_dates'] = due_dates
         response = self.client.post(self._url(enrollment, 'confirm/'), body, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
         return enrollment
@@ -1482,7 +1537,7 @@ class DueDateTests(SeatTestBase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['due_on'], str(date.today()))
         self.assertEqual(rows[0]['amount'], '30000.00')
-        self.assertEqual(rows[0]['status'], 'due')
+        self.assertEqual((rows[0]['status'], rows[0]['left']), ('part_paid', '29000.00'))
         plan = PaymentPlan.objects.get(enrollment=enrollment)
         self.assertEqual(plan.reason, 'Set when the enrollment was confirmed.')
         confirm = enrollment.history.get(action='confirm')
@@ -1496,13 +1551,14 @@ class DueDateTests(SeatTestBase):
         self.assertEqual(
             [r['due_on'] for r in rows], [self._day(0), self._day(30), self._day(60)],
         )
-        self.assertEqual({r['status'] for r in rows}, {'due'})
+        self.assertEqual([r['status'] for r in rows], ['part_paid', 'due', 'due'])
 
     def test_parts_must_add_up_to_the_agreed_amount(self):
         enrollment = self._enroll()
         response = self.client.post(
             self._url(enrollment, 'confirm/'),
-            {'due_dates': [{'due_on': self._day(0), 'amount': '20000'}]}, format='json',
+            {'due_dates': [{'due_on': self._day(0), 'amount': '20000'}],
+             'first_payment': {'amount': '1000', 'payment_method': 'cash'}}, format='json',
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('add up to 20000', response.data['detail'])
@@ -1512,18 +1568,16 @@ class DueDateTests(SeatTestBase):
         self.assertFalse(Student.objects.exists())
 
     def test_payments_fill_the_oldest_part_first(self):
-        enrollment = self._confirmed(self._three_parts())
-        self._pay(enrollment, 15000)
+        enrollment = self._confirmed(self._three_parts(), paid='15000')
         self._pay(enrollment, 5000, pay_status='pending')  # not money yet
         rows = self._rows(enrollment)
         self.assertEqual([r['status'] for r in rows], ['paid', 'part_paid', 'due'])
         self.assertEqual([r['left'] for r in rows], ['0.00', '5000.00', '10000.00'])
 
     def test_an_unpaid_part_past_its_due_date_is_late(self):
-        enrollment = self._confirmed()
+        enrollment = self._confirmed(paid='10000')
         response = self._change(enrollment, self._three_parts(first=-40))
         self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
-        self._pay(enrollment, 10000)
         rows = self._rows(enrollment)
         self.assertEqual([r['status'] for r in rows], ['paid', 'late', 'due'])
         self.assertEqual(rows[1]['days_late'], 10)
@@ -1561,9 +1615,8 @@ class DueDateTests(SeatTestBase):
         self.assertIn('confirmed enrollment', response.data['detail'])
 
     def test_discounts_and_write_offs_fill_parts_and_refunds_take_back(self):
-        enrollment = self._confirmed(self._three_parts())
+        enrollment = self._confirmed(self._three_parts(), paid='10000')
         url = self._url(enrollment, 'adjustments/')
-        self._pay(enrollment, 10000)
         self.client.post(url, {'kind': 'discount', 'amount': '4000', 'reason': 'Promo'}, format='json')
         self.client.post(url, {'kind': 'write_off', 'amount': '1000', 'reason': 'Approved'}, format='json')
         rows = self._rows(enrollment)
@@ -1580,7 +1633,7 @@ class DueDateTests(SeatTestBase):
             f'/api/leads/{enrollment.lead_id}/enrollments/{enrollment.id}/payments/{payment.id}/void/',
             {'reason': 'Wrong amount'}, format='json',
         )
-        self.assertEqual(self._rows(enrollment)[0]['status'], 'due')
+        self.assertEqual(self._rows(enrollment)[0]['status'], 'part_paid')
 
     def test_an_extra_charge_is_due_on_the_day_it_is_added(self):
         enrollment = self._confirmed([{'due_on': self._day(30), 'amount': '30000'}])
@@ -3575,11 +3628,12 @@ class EmailTests(SeatTestBase):
         InvoiceEmailConfig.objects.create(pk=1, cc_emails=['accounts@test.com'], is_active=True)
         lead = self._student_lead()
         enrollment = self._enroll(self.batch, lead=lead)
-        self._confirm(enrollment)
-        self.client.post(self._url(enrollment, 'payments/'), {
-            'amount': '10000', 'payment_date': timezone.now().isoformat(),
-            'payment_method': 'esewa', 'transaction_reference': 'ES-1', 'status': 'successful',
-        }, format='json')
+        # The first payment is taken with Confirm: the receipt email goes with the confirmation.
+        response = self.client.post(self._url(enrollment, 'confirm/'), {'first_payment': {
+            'amount': '10000', 'payment_method': 'esewa', 'transaction_reference': 'ES-1',
+        }}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(len(self._logs('enrollment_confirmed')), 1)
         [log] = self._logs('payment_received')
         self.assertEqual((log.to_email, log.cc, log.invoice.type), ('ram@student.com', ['accounts@test.com'], 'payment'))
         self.assertIn('NPR 10,000', log.subject)
@@ -3614,7 +3668,7 @@ class EmailTests(SeatTestBase):
     def test_invoice_pdf_endpoint(self):
         enrollment = self._enroll(self.batch)
         self._confirm(enrollment)
-        invoice = Invoice.objects.get(enrollment=enrollment)
+        invoice = Invoice.objects.get(enrollment=enrollment, type='enrollment')
         response = self.client.get(f'/api/invoices/{invoice.id}/pdf/')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response['Content-Type'], 'application/pdf')
@@ -3632,7 +3686,7 @@ class EmailTests(SeatTestBase):
 
         enrollment = self._enroll(self.batch)
         self._confirm(enrollment)
-        html = document_html(Invoice.objects.get(enrollment=enrollment))
+        html = document_html(Invoice.objects.get(enrollment=enrollment, type='enrollment'))
         self.assertIn('PAN/VAT No: 609876543', html)
         self.assertIn('Rupees Thirty Thousand Only', html)
 
