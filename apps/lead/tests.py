@@ -2521,6 +2521,169 @@ class VoiceNoteFileDeleteJobTests(APITestCase):
             self.assertTrue(self.task.apply(args=[key]).successful())
             self.assertFalse(default_storage.exists(key))
 
+
+class VoiceNoteSweepTests(APITestCase):
+    """Nightly clean-up of recordings that no voice note points to."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+
+        from django.test import override_settings
+
+        media = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, media, ignore_errors=True)
+        local = override_settings(
+            MEDIA_ROOT=media, R2_ACCOUNT_ID='', R2_ACCESS_KEY_ID='', R2_SECRET_ACCESS_KEY='', R2_BUCKET_NAME='',
+        )
+        local.enable()
+        self.addCleanup(local.disable)
+        self.lead = Lead.objects.create(full_name='Ram Thapa', phone='9800000960')
+
+    def _file(self, key, hours_old):
+        import os
+        from datetime import timedelta
+
+        from django.core.files.base import ContentFile
+        from django.core.files.storage import default_storage
+
+        name = default_storage.save(key, ContentFile(b'audio'))
+        stamp = (timezone.now() - timedelta(hours=hours_old)).timestamp()
+        os.utime(default_storage.path(name), (stamp, stamp))
+        return name
+
+    def _note(self, key, lead=None):
+        return VoiceNote.objects.create(lead=lead or self.lead, file_key=key, content_type='audio/webm', size_bytes=5)
+
+    def _exists(self, key):
+        from django.core.files.storage import default_storage
+
+        return default_storage.exists(key)
+
+    def _sweep(self, **kwargs):
+        from apps.lead.voice_sweep import sweep_orphan_files
+
+        return sweep_orphan_files(**kwargs)
+
+    def test_only_old_files_with_no_voice_note_go(self):
+        in_use = self._file('voice-notes/1/in-use.webm', 48)
+        self._note(in_use)
+        binned_lead = Lead.objects.create(full_name='In the bin', phone='9800000961', is_deleted=True)
+        in_bin = self._file('voice-notes/2/in-bin.webm', 48)
+        self._note(in_bin, lead=binned_lead)
+        orphan = self._file('voice-notes/1/orphan.webm', 48)
+        fresh = self._file('voice-notes/3/fresh.webm', 2)
+        other_folder = self._file('uploads/old.pdf', 48)
+
+        result = self._sweep()
+
+        self.assertEqual(
+            (result.checked, result.kept, result.too_new, result.deleted, result.stopped),
+            (4, 2, 1, 1, False),
+        )
+        self.assertEqual([k for k, _ in result.orphans], [orphan])
+        self.assertFalse(self._exists(orphan))
+        for key in (in_use, in_bin, fresh, other_folder):
+            self.assertTrue(self._exists(key), key)
+        self.assertIn('Local media folder: checked 4 files', result.summary())
+
+    def test_dry_run_deletes_nothing(self):
+        orphan = self._file('voice-notes/1/orphan.webm', 48)
+        result = self._sweep(dry_run=True)
+        self.assertEqual((len(result.orphans), result.deleted), (1, 0))
+        self.assertTrue(self._exists(orphan))
+
+    def test_safety_stop_when_most_files_look_orphaned(self):
+        for i in range(3):
+            self._note(self._file(f'voice-notes/1/kept-{i}.webm', 48))
+        orphans = [self._file(f'voice-notes/9/orphan-{i}.webm', 48) for i in range(7)]
+
+        with self.assertLogs('apps.lead.voice_sweep', level='ERROR'):
+            result = self._sweep()
+        self.assertTrue(result.stopped)
+        self.assertEqual(result.deleted, 0)
+        self.assertTrue(all(self._exists(k) for k in orphans))
+
+        result = self._sweep(force=True)
+        self.assertEqual(result.deleted, 7)
+        self.assertFalse(any(self._exists(k) for k in orphans))
+
+    def test_r2_bucket_is_listed_page_by_page(self):
+        from datetime import timedelta
+        from unittest import mock
+
+        from django.test import override_settings
+
+        old = timezone.now() - timedelta(days=3)
+        new = timezone.now() - timedelta(hours=1)
+
+        class FakeBucket:
+            def __init__(self, objects):
+                self.objects = dict(objects)
+                self.deleted = []
+
+            def get_paginator(self, name):
+                bucket = self
+
+                class Pages:
+                    def paginate(self, Bucket, Prefix):
+                        keys = sorted(k for k in bucket.objects if k.startswith(Prefix))
+                        for i in range(0, len(keys), 2):
+                            yield {'Contents': [{'Key': k, 'LastModified': bucket.objects[k]} for k in keys[i:i + 2]]}
+                        if not keys:
+                            yield {}
+
+                return Pages()
+
+            def delete_object(self, Bucket, Key):
+                self.deleted.append((Bucket, Key))
+                self.objects.pop(Key, None)
+
+        bucket = FakeBucket({
+            'voice-notes/1/a.webm': old, 'voice-notes/1/b.webm': old,
+            'voice-notes/1/c.webm': old, 'voice-notes/2/d.webm': new,
+            'uploads/x.pdf': old,
+        })
+        self._note('voice-notes/1/b.webm')
+        r2 = override_settings(
+            R2_ACCOUNT_ID='a' * 32, R2_ACCESS_KEY_ID='k', R2_SECRET_ACCESS_KEY='s', R2_BUCKET_NAME='crm-files',
+        )
+        with r2, mock.patch('apps.lead.voice_sweep.get_r2_client', return_value=bucket), \
+                mock.patch('apps.lead.voice_notes.get_r2_client', return_value=bucket), \
+                mock.patch('apps.lead.voice_sweep.PAGE', 2):
+            result = self._sweep()
+        self.assertEqual(result.storage, 'R2 bucket crm-files')
+        self.assertEqual((result.checked, result.kept, result.too_new), (4, 1, 1))
+        self.assertEqual(sorted(bucket.deleted),
+                         [('crm-files', 'voice-notes/1/a.webm'), ('crm-files', 'voice-notes/1/c.webm')])
+        self.assertIn('uploads/x.pdf', bucket.objects)
+
+    def test_command_dry_run_lists_the_files(self):
+        orphan = self._file('voice-notes/1/orphan.webm', 48)
+        out = StringIO()
+        call_command('sweep_voice_note_files', '--dry-run', stdout=out)
+        text = out.getvalue()
+        self.assertIn(f'no voice note: {orphan}', text)
+        self.assertIn('Dry run: nothing deleted.', text)
+        self.assertTrue(self._exists(orphan))
+
+    def test_beat_runs_it_every_night(self):
+        from django.conf import settings
+
+        from skillshikshyacrm.celery import app
+
+        entry = settings.CELERY_BEAT_SCHEDULE['sweep-voice-note-files-nightly']
+        self.assertIn(entry['task'], app.tasks)
+        self.assertEqual((entry['schedule'].hour, entry['schedule'].minute), ({20}, {15}))  # 02:00 NPT
+
+    def test_nightly_job_logs_what_it_did(self):
+        from apps.lead.tasks import sweep_voice_note_files_task
+
+        self._file('voice-notes/1/orphan.webm', 48)
+        with self.assertLogs('apps.lead.tasks', level='INFO') as logs:
+            sweep_voice_note_files_task.apply()
+        self.assertIn('1 deleted', logs.output[0])
+
 class LeadTimelineTests(SeatTestBase):
     """One list with everything about the person, newest first."""
 

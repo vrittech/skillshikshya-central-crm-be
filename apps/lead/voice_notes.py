@@ -43,7 +43,7 @@ def base_type(content_type):
     return (content_type or '').split(';')[0].strip().lower()
 
 
-def _r2():
+def r2_in_use():
     """The R2 account in use, or None to keep files in the local media folder."""
     cfg = r2_config()
     return cfg if cfg.ready else None
@@ -52,7 +52,7 @@ def _r2():
 def save_file(file, *, lead_id, content_type):
     """Store the recording and return its key."""
     key = f'voice-notes/{lead_id}/{uuid.uuid4().hex}.{AUDIO_TYPES[content_type]}'
-    cfg = _r2()
+    cfg = r2_in_use()
     if cfg:
         get_r2_client(cfg).put_object(
             Bucket=cfg.bucket_name, Key=key, Body=file.read(), ContentType=content_type,
@@ -62,7 +62,7 @@ def save_file(file, *, lead_id, content_type):
 
 
 def read_file(key):
-    cfg = _r2()
+    cfg = r2_in_use()
     if cfg:
         obj = get_r2_client(cfg).get_object(Bucket=cfg.bucket_name, Key=key)
         return obj['Body'].read()
@@ -71,7 +71,7 @@ def read_file(key):
 
 
 def delete_file(key):
-    cfg = _r2()
+    cfg = r2_in_use()
     if cfg:
         get_r2_client(cfg).delete_object(Bucket=cfg.bucket_name, Key=key)
     elif default_storage.exists(key):

@@ -1,3 +1,4 @@
+import logging
 from datetime import timedelta
 from zoneinfo import ZoneInfo
 
@@ -8,6 +9,7 @@ from django.template.loader import render_to_string
 from django.utils import timezone
 
 NEPAL_TZ = ZoneInfo('Asia/Kathmandu')
+logger = logging.getLogger(__name__)
 
 
 @shared_task
@@ -116,3 +118,16 @@ def delete_voice_note_file_task(key):
     from apps.lead.voice_notes import delete_file
 
     delete_file(key)
+
+
+@shared_task(ignore_result=True)
+def sweep_voice_note_files_task():
+    """Nightly (beat): delete recordings no voice note points to. See apps.lead.voice_sweep.
+
+    No retries: if storage is down tonight, tomorrow night's run picks it up.
+    """
+    from apps.lead.voice_sweep import sweep_orphan_files
+
+    result = sweep_orphan_files()
+    logger.info('Voice note sweep: %s', result.summary())
+    return result.summary()

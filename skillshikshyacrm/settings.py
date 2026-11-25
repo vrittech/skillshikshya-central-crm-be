@@ -42,6 +42,12 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.orbitchat.tasks.poll_orbitchat_leads_task',
         'schedule': crontab(minute=15),  # UTC 07:15 == NPT 13:00
     },
+    # Voice note recordings that no voice note points to: nightly at
+    # UTC 20:15 == NPT 02:00, when nobody is recording. See apps/lead/voice_sweep.py.
+    'sweep-voice-note-files-nightly': {
+        'task': 'apps.lead.tasks.sweep_voice_note_files_task',
+        'schedule': crontab(hour=20, minute=15),
+    },
 }
 
 
