@@ -1,8 +1,11 @@
 import csv
-from datetime import datetime
+from datetime import datetime, time, timedelta
 
 from django.http import HttpResponse
+from django.db.models import Count, Sum, Avg, Q
+from django.db.models.functions import TruncDate
 from django.utils import timezone
+from zoneinfo import ZoneInfo
 
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -293,14 +296,95 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
     ordering = ['-call_timestamp']
 
     def get_queryset(self):
-        return LeadCall.objects.select_related(
+        qs = LeadCall.objects.select_related(
             'lead', 'created_by', 'branch',
         )
+        user = self.request.user
+        if not (user.is_staff or user.is_superuser):
+            if not user.branch_id:
+                return qs.none()
+            qs = qs.filter(lead__branch_id=user.branch_id).filter(Q(branch_id=user.branch_id) | Q(branch__isnull=True))
+        return qs
+
+    def filter_queryset(self, queryset):
+        # Date-only query params represent whole local calendar days in Nepal.
+        original = self.request._request.GET
+        params = self.request.query_params
+        tz = ZoneInfo('Asia/Kathmandu')
+        start = params.get('call_timestamp__gte')
+        end = params.get('call_timestamp__lte')
+        replacements = {}
+        if start and len(start) == 10:
+            try:
+                start_day = datetime.fromisoformat(start).date()
+            except ValueError:
+                start_day = None
+            if not start_day:
+                return queryset.none()
+            queryset = queryset.filter(call_timestamp__gte=timezone.make_aware(datetime.combine(start_day, time.min), tz))
+            replacements['call_timestamp__gte'] = None
+        if end and len(end) == 10:
+            try:
+                end_day = datetime.fromisoformat(end).date()
+            except ValueError:
+                end_day = None
+            if not end_day:
+                return queryset.none()
+            queryset = queryset.filter(call_timestamp__lt=timezone.make_aware(datetime.combine(end_day + timedelta(days=1), time.min), tz))
+            replacements['call_timestamp__lte'] = None
+        if replacements:
+            mutable = original.copy()
+            for key in replacements:
+                mutable.pop(key, None)
+            self.request._request.GET = mutable
+        try:
+            return super().filter_queryset(queryset)
+        finally:
+            self.request._request.GET = original
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        calls = self.filter_queryset(self.get_queryset())
+        totals = calls.aggregate(
+            total=Count('id'), talk_seconds=Sum('duration_seconds'),
+            connected=Count('id', filter=Q(duration_seconds__gt=0)),
+            average=Avg('duration_seconds'),
+        )
+        callers = list(calls.values('caller').annotate(total=Count('id')).order_by('-total', 'caller')[:10])
+        per_day = list(calls.annotate(day=TruncDate('call_timestamp', tzinfo=ZoneInfo('Asia/Kathmandu')))
+                       .values('day').annotate(total=Count('id')).order_by('day'))
+        return Response({
+            'total_calls': totals['total'] or 0,
+            'inbound_calls': calls.filter(direction='inbound').count(),
+            'outbound_calls': calls.filter(direction='outbound').count(),
+            'talk_seconds': totals['talk_seconds'] or 0,
+            'average_duration_seconds': round(totals['average'] or 0),
+            'connect_rate': round((totals['connected'] or 0) * 100 / totals['total'], 1) if totals['total'] else 0,
+            'top_callers': callers,
+            'calls_per_day': [{'date': row['day'].isoformat(), 'count': row['total']} for row in per_day],
+        })
+
+    @action(detail=False, methods=['get'])
+    def export_csv(self, request):
+        calls = self.filter_queryset(self.get_queryset()).select_related('lead', 'created_by').order_by('-call_timestamp')
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        response.write('\ufeff')
+        response['Content-Disposition'] = f'attachment; filename="calls-{timezone.localdate():%Y-%m-%d}.csv"'
+        writer = csv.writer(response)
+        writer.writerow(['Date & time (NPT)', 'Direction', 'Lead', 'Reference', 'Phone', 'Caller', 'Logged by', 'Duration (MM:SS)', 'Seconds', 'Outcome', 'Notes', 'Recording'])
+        def safe_cell(value):
+            value = '' if value is None else str(value)
+            return "'" + value if value.startswith(('=', '+', '-', '@')) else value
+        for call in calls.iterator(chunk_size=1000):
+            local_time = timezone.localtime(call.call_timestamp, ZoneInfo('Asia/Kathmandu'))
+            minutes, seconds = divmod(call.duration_seconds or 0, 60)
+            writer.writerow([local_time.strftime('%Y-%m-%d %H:%M:%S'), call.direction, safe_cell(call.lead.full_name), safe_cell(call.lead.reference_number), safe_cell(call.phone_number), safe_cell(call.caller), safe_cell(call.created_by.name if call.created_by else ''), f'{minutes:02d}:{seconds:02d}', call.duration_seconds or 0, safe_cell(call.outcome), safe_cell(call.notes), safe_cell(call.recording_url)])
+        return response
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
