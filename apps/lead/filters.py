@@ -277,6 +277,7 @@ class TeamsLicenceFilter(django_filters.FilterSet):
     # open=true: licences in use now; false: freed ones.
     open = django_filters.BooleanFilter(field_name='released_at', lookup_expr='isnull')
     batch = django_filters.NumberFilter(field_name='enrollment__current_batch')
+    student = django_filters.NumberFilter(field_name='enrollment__student')
 
     class Meta:
         model = TeamsLicence
