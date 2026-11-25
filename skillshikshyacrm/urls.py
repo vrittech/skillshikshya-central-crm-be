@@ -24,6 +24,7 @@ urlpatterns = [
     path('api/', include('apps.account.urls')),
     path('api/', include('apps.callminutes.urls')),
     path('api/', include('apps.course.urls')),
+    path('api/', include('apps.global_config.urls')),
     path('api/', include('apps.branch.urls')),
     path('api/', include('apps.invoices.urls')),
     path('api/', include('apps.lead.urls')),

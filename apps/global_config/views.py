@@ -8,8 +8,8 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from apps.global_config.integrations import r2_config
 from apps.global_config.utilities.r2_storage import upload_file_to_r2, get_r2_client
-from django.conf import settings
 
 
 @api_view(['POST'])
@@ -46,8 +46,8 @@ def upload_file(request):
 
 def serve_file(request, key):
     try:
-        client = get_r2_client()
-        obj = client.get_object(Bucket=settings.R2_BUCKET_NAME, Key=key)
+        cfg = r2_config()
+        obj = get_r2_client(cfg).get_object(Bucket=cfg.bucket_name, Key=key)
         content_type = obj['ContentType']
         body = obj['Body'].read()
         response = StreamingHttpResponse(
