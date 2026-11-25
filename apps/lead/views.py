@@ -1,5 +1,9 @@
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
+
+from django.db.models import Sum, Avg, Count, Q
+from django.db.models.functions import TruncDate
+from zoneinfo import ZoneInfo
 
 from django.http import HttpResponse
 from django.utils import timezone
@@ -39,7 +43,7 @@ from apps.lead.filters import (
     NotificationFilter,
     GlobalEnrollmentFilter, GlobalPaymentFilter, GlobalCallFilter,
 )
-from apps.global_config.pagination import CustomPagination
+from apps.global_config.pagination import CustomPagination, CallsPagination
 from apps.global_config.permissions import IsStaffOrHasPermission
 from apps.global_config.filters import BranchFilterBackend
 
@@ -186,17 +190,24 @@ class LeadViewSet(viewsets.ModelViewSet):
             return LeadMinSerializer
         return LeadSerializer
 
+
     def get_queryset(self):
-        qs = super().get_queryset()
-        if self.action == 'recycle_bin':
-            return qs.filter(is_deleted=True)
-        if self.action == 'export_csv':
-            return qs.filter(is_deleted=False).select_related('source', 'status', 'priority', 'assigned_counselor')
-        qs = qs.filter(is_deleted=False)
-        include_archived = self.request.query_params.get('include_archived', '').lower() in ('true', '1')
-        if not include_archived:
-            qs = qs.filter(is_archived=False)
-        return qs
+        user = self.request.user
+
+        queryset = LeadCall.objects.select_related(
+            'lead', 'created_by', 'branch',
+        )
+
+        if user.is_staff or user.is_superuser:
+            return queryset
+
+        user_branch = getattr(user, 'branch', None)
+
+        if user_branch is None:
+            return queryset.none()
+
+        return queryset.filter(branch=user_branch)
+
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -278,29 +289,196 @@ class GlobalPaymentViewSet(viewsets.ReadOnlyModelViewSet):
         return [IsAuthenticated(), IsStaffOrHasPermission()]
 
 
+
 class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
     """Flat, cross-lead call log. Newest calls first by default."""
+
     queryset = LeadCall.objects.none()
     serializer_class = GlobalCallSerializer
-    pagination_class = CustomPagination
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, BranchFilterBackend]
+    pagination_class = CallsPagination
+    filter_backends = [
+        DjangoFilterBackend,
+        SearchFilter,
+        OrderingFilter,
+        BranchFilterBackend,
+    ]
     filterset_class = GlobalCallFilter
+
     search_fields = [
-        'caller', 'phone_number', 'outcome', 'notes', 'lead__full_name',
+        'caller',
+        'phone_number',
+        'outcome',
+        'notes',
+        'lead__full_name',
         'lead__reference_number',
     ]
-    ordering_fields = ['call_timestamp', 'duration_seconds', 'created_at']
+
+    ordering_fields = [
+        'call_timestamp',
+        'duration_seconds',
+        'created_at',
+    ]
     ordering = ['-call_timestamp']
 
     def get_queryset(self):
-        return LeadCall.objects.select_related(
-            'lead', 'created_by', 'branch',
+        user = self.request.user
+
+        queryset = LeadCall.objects.select_related(
+            'lead',
+            'created_by',
+            'branch',
         )
 
+        # Staff and superusers can access calls from all branches.
+        if user.is_staff or user.is_superuser:
+            return queryset
+
+        # Regular users can access only their assigned branch.
+        user_branch = getattr(user, 'branch', None)
+
+        if user_branch is None:
+            return queryset.none()
+
+        return queryset.filter(branch=user_branch)
+
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
-            return [IsAuthenticated()]
-        return [IsAuthenticated(), IsStaffOrHasPermission()]
+        return [IsAuthenticated()]
+
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        stats = queryset.aggregate(
+            total_calls=Count('id'),
+            inbound_calls=Count('id', filter=Q(direction='inbound')),
+            outbound_calls=Count('id', filter=Q(direction='outbound')),
+            total_talk_time=Sum('duration_seconds'),
+            average_duration=Avg('duration_seconds'),
+            connected_calls=Count(
+                'id',
+                filter=Q(duration_seconds__gt=0),
+            ),
+        )
+
+        total_calls = stats['total_calls']
+        connected_calls = stats['connected_calls']
+
+        connect_rate = (
+            round((connected_calls / total_calls) * 100, 2)
+            if total_calls else 0
+        )
+
+        # Group daily calls using Nepal timezone.
+        nepal_timezone = ZoneInfo('Asia/Kathmandu')
+
+        daily_calls = (
+            queryset
+            .annotate(
+                day=TruncDate(
+                    'call_timestamp',
+                    tzinfo=nepal_timezone,
+                )
+            )
+            .values('day')
+            .annotate(total=Count('id'))
+            .order_by('day')
+        )
+
+        # Get the top 10 callers.
+        top_callers = (
+            queryset
+            .values('caller')
+            .annotate(
+                total_calls=Count('id'),
+                total_talk_time=Sum('duration_seconds'),
+            )
+            .order_by('-total_calls')[:10]
+        )
+
+        return Response({
+            'total_calls': total_calls,
+            'inbound_calls': stats['inbound_calls'],
+            'outbound_calls': stats['outbound_calls'],
+            'total_talk_time': stats['total_talk_time'] or 0,
+            'average_duration': round(
+                stats['average_duration'] or 0,
+                2,
+            ),
+            'connected_calls': connected_calls,
+            'connect_rate': connect_rate,
+            'daily_calls': [
+                {
+                    'date': item['day'].isoformat(),
+                    'total_calls': item['total'],
+                }
+                for item in daily_calls
+            ],
+            'top_callers': list(top_callers),
+        })
+
+    @action(detail=False, methods=['get'], url_path='export')
+    def export_csv(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = (
+            'attachment; filename="calls.csv"'
+        )
+
+        writer = csv.writer(response)
+
+        writer.writerow([
+            'Call ID',
+            'Lead Name',
+            'Lead Reference',
+            'Call Date/Time',
+            'Direction',
+            'Caller',
+            'Phone Number',
+            'Duration (Seconds)',
+            'Outcome',
+            'Notes',
+            'Logged By',
+            'Branch',
+        ])
+
+        nepal_timezone = ZoneInfo('Asia/Kathmandu')
+
+        def safe_csv_value(value):
+            if value is None:
+                return ''
+
+            value = str(value)
+
+            if value.startswith(('=', '+', '-', '@', '\t', '\r')):
+                return "'" + value
+
+            return value
+
+        for call in queryset.iterator(chunk_size=500):
+            call_time = call.call_timestamp.astimezone(nepal_timezone)
+
+            writer.writerow([
+                call.id,
+                safe_csv_value(call.lead.full_name),
+                safe_csv_value(call.lead.reference_number),
+                call_time.strftime('%Y-%m-%d %H:%M:%S'),
+                safe_csv_value(call.direction),
+                safe_csv_value(call.caller),
+                safe_csv_value(call.phone_number),
+                call.duration_seconds,
+                safe_csv_value(call.outcome),
+                safe_csv_value(call.notes),
+                safe_csv_value(
+                    call.created_by.name if call.created_by else ''
+                ),
+                safe_csv_value(
+                    call.branch.name if call.branch else ''
+                ),
+            ])
+
+        return response
+
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
