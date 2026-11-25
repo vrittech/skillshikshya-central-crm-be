@@ -873,8 +873,8 @@ class ConfirmEnrollmentTests(APITestCase):
 
     def test_price_can_change_only_while_pending_and_unpaid(self):
         url = f'{self.enrollments_url}{self.enrollment.id}/'
-        ok = self.client.patch(url, {'listed_fee': '32000', 'agreed_amount': '32000'}, format='json')
-        self.assertEqual(ok.status_code, status.HTTP_200_OK)
+        ok = self.client.patch(url, {'standard_discount': '2000', 'agreed_amount': '28000'}, format='json')
+        self.assertEqual(ok.status_code, status.HTTP_200_OK, ok.data)
         Payment.objects.create(
             enrollment=self.enrollment, amount=1000, payment_date=timezone.now(),
             payment_method='cash', status='successful',
@@ -914,7 +914,7 @@ class ConfirmEnrollmentTests(APITestCase):
         receipt = payment.invoices.get()
         self.assertTrue(receipt.invoice_number.startswith('RCT-'))
         self.assertEqual(receipt.student, Student.objects.get())
-        bad = self._enroll(course=Course.objects.create(name='Java', full_amount=1000).id)
+        bad = self._enroll(course=Course.objects.create(name='Java', full_amount=1000).id, agreed_amount='1000')
         response = self._confirm(bad, paid='0')
         self.assertEqual(response.data['first_payment']['amount'], ['Amount must be more than 0.'])
 
@@ -950,6 +950,106 @@ class ConfirmEnrollmentTests(APITestCase):
         counselor = User.objects.create_user(email='c9@t.com', name='C9', password='x')
         self.client.force_authenticate(counselor)
         self.assertEqual(self._confirm(self.enrollment).status_code, status.HTTP_403_FORBIDDEN)
+
+
+class AmountTypoTests(APITestCase):
+    """A typo (100000 for a 10000 course) is refused before an invoice or receipt is made."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email='typo@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+        self.course = Course.objects.create(name='Excel', full_amount=10000)
+        self.lead = Lead.objects.create(full_name='Hari KC', phone='9800000950')
+        self.url = f'/api/leads/{self.lead.id}/enrollments/'
+
+    def _enroll(self, **extra):
+        return self.client.post(self.url, {
+            'course': self.course.id, 'enrollment_date': str(date.today()), 'agreed_amount': '10000', **extra,
+        }, format='json')
+
+    def _pay(self, enrollment_id, amount, pay_status='successful'):
+        return self.client.post(f'{self.url}{enrollment_id}/payments/', {
+            'amount': amount, 'payment_date': timezone.now().isoformat(),
+            'payment_method': 'cash', 'status': pay_status,
+        }, format='json')
+
+    def test_agreed_amount_and_discounts_stay_within_the_listed_fee(self):
+        response = self._enroll(agreed_amount='100000')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['agreed_amount'], [
+            "The agreed amount can't be more than NPR 10,000 (the listed fee). Add an extra charge for anything more.",
+        ])
+        response = self._enroll(standard_discount='100000', agreed_amount='0')
+        self.assertEqual(response.data['standard_discount'], ['The discounts add up to more than the listed fee (NPR 10,000).'])
+        response = self._enroll(standard_discount='2000', agreed_amount='9000')
+        self.assertIn('NPR 8,000 (the listed fee less discounts)', response.data['agreed_amount'][0])
+        self.assertEqual(self._enroll(agreed_amount='-1').data['agreed_amount'], ["The agreed amount can't be below 0."])
+        self.assertEqual(self._enroll(standard_discount='2000', agreed_amount='8000').status_code, 201)
+        self.assertEqual(Enrollment.objects.count(), 1)
+
+    def test_a_payment_cannot_be_more_than_what_is_left(self):
+        enrollment_id = self._enroll().data['id']
+        response = self._pay(enrollment_id, '100000')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['amount'], ['This is more than what is left to pay (NPR 10,000). Check the amount.'])
+        self.assertFalse(Payment.objects.exists())
+        self.assertFalse(Invoice.objects.exists())
+        self.assertEqual(self._pay(enrollment_id, '6000').status_code, 201)
+        self.assertEqual(self._pay(enrollment_id, '4000.01').data['amount'][0][:30], 'This is more than what is left')
+        self.assertEqual(self._pay(enrollment_id, '4000').status_code, 201)
+        self.assertEqual(self._pay(enrollment_id, '1').data['amount'], ['Nothing is left to pay on this enrollment.'])
+
+    def test_pending_payments_count_as_on_their_way(self):
+        enrollment_id = self._enroll().data['id']
+        pending_id = self._pay(enrollment_id, '8000', pay_status='pending').data['id']
+        self.assertIn('(NPR 2,000)', self._pay(enrollment_id, '5000').data['amount'][0])
+        self.assertEqual(self._pay(enrollment_id, '2000').status_code, 201)
+        # Confirming the pending one still fits: 8000 + 2000 = 10000.
+        response = self.client.post(f'{self.url}{enrollment_id}/payments/{pending_id}/confirm/')
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_confirming_a_pending_payment_over_what_is_left_is_refused(self):
+        enrollment = Enrollment.objects.get(pk=self._enroll().data['id'])
+        stale = Payment.objects.create(
+            enrollment=enrollment, amount=9000, payment_date=timezone.now(),
+            payment_method='cash', status='pending',
+        )
+        self.assertEqual(self._pay(enrollment.id, '1000').status_code, 201)
+        Payment.objects.create(  # recorded outside the checks, e.g. old data
+            enrollment=enrollment, amount=5000, payment_date=timezone.now(),
+            payment_method='cash', status='successful',
+        )
+        response = self.client.post(f'{self.url}{enrollment.id}/payments/{stale.id}/confirm/')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['detail'], 'This is more than what is left to pay (NPR 4,000). Check the amount.')
+        stale.refresh_from_db()
+        self.assertEqual(stale.status, 'pending')
+
+    def test_a_first_payment_over_the_fee_stops_the_confirm(self):
+        enrollment_id = self._enroll().data['id']
+        response = self.client.post(f'{self.url}{enrollment_id}/confirm/', {
+            'first_payment': {'amount': '100000', 'payment_method': 'cash'},
+        }, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['detail'], 'This is more than what is left to pay (NPR 10,000). Check the amount.')
+        self.assertEqual(Enrollment.objects.get(pk=enrollment_id).status, 'pending')
+        self.assertFalse(Payment.objects.exists())
+        self.assertFalse(Student.objects.exists())
+
+    def test_a_discount_entry_cannot_be_more_than_the_fee(self):
+        enrollment_id = self._enroll().data['id']
+        url = f'{self.url}{enrollment_id}/adjustments/'
+        response = self.client.post(url, {'kind': 'discount', 'amount': '100000', 'reason': 'Typo'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.data['detail'],
+            "A discount can't be more than the fee (NPR 10,000 after earlier discounts and write-offs).",
+        )
+        self.assertEqual(self.client.post(url, {'kind': 'discount', 'amount': '3000', 'reason': 'Promo'}, format='json').status_code, 201)
+        response = self.client.post(url, {'kind': 'discount', 'amount': '7001', 'reason': 'Again'}, format='json')
+        self.assertIn('NPR 7,000', response.data['detail'])
 
 
 class MakeStudentsForOldDataTests(APITestCase):

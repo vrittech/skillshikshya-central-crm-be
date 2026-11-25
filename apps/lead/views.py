@@ -795,9 +795,17 @@ class PaymentViewSet(viewsets.ModelViewSet):
             enrollment__lead_id=self.kwargs['lead_pk'],
         ).select_related('received_by', 'voided_by')
 
+    @transaction.atomic
     def perform_create(self, serializer):
+        enrollment = get_object_or_404(
+            Enrollment.objects.select_for_update(),
+            pk=self.kwargs['enrollment_pk'], lead_id=self.kwargs['lead_pk'],
+        )
+        refusal = services.payment_refusal(enrollment, serializer.validated_data['amount'])
+        if refusal:
+            raise ValidationError({'amount': [refusal]})
         payment = serializer.save(
-            enrollment_id=self.kwargs['enrollment_pk'],
+            enrollment=enrollment,
             received_by=self.request.user,
         )
         services.issue_receipt(payment, user=self.request.user)

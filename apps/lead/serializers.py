@@ -346,6 +346,44 @@ class EnrollmentSerializer(serializers.ModelSerializer):
             )
         attrs['listed_fee'] = course.full_amount
 
+    def _check_price(self, attrs):
+        """Discounts and the agreed amount stay within the listed fee.
+
+        Catches a typo (100000 for 10000) before an invoice is made. Anything
+        above the listed fee is an extra charge, added later with a reason.
+        """
+        if self.instance is not None and not any(f in attrs for f in (*self.PRICE_FIELDS, 'course')):
+            return
+        from apps.lead.emails import npr
+
+        def value(field):
+            if field in attrs:
+                return Decimal(attrs[field] if attrs[field] is not None else 0)
+            return Decimal(getattr(self.instance, field, 0) or 0)
+
+        listed = value('listed_fee')
+        standard, additional = value('standard_discount'), value('additional_discount')
+        agreed = value('agreed_amount')
+        errors = {}
+        for field, amount in (('standard_discount', standard), ('additional_discount', additional)):
+            if amount < 0:
+                errors[field] = "A discount can't be below 0."
+        if not errors and standard + additional > listed:
+            errors['additional_discount' if additional else 'standard_discount'] = (
+                f'The discounts add up to more than the listed fee ({npr(listed)}).'
+            )
+        top = listed - standard - additional
+        if agreed < 0:
+            errors['agreed_amount'] = "The agreed amount can't be below 0."
+        elif not errors and agreed > top:
+            errors['agreed_amount'] = (
+                f"The agreed amount can't be more than {npr(top)} "
+                f'(the listed fee{" less discounts" if top != listed else ""}). '
+                'Add an extra charge for anything more.'
+            )
+        if errors:
+            raise serializers.ValidationError(errors)
+
     def validate(self, attrs):
         # Once confirmed or paid, the price is fixed. Later changes are money
         # entries with a reason.
@@ -376,6 +414,7 @@ class EnrollmentSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(errors)
 
         self._listed_fee_from_course(attrs)
+        self._check_price(attrs)
 
         if 'batch' in attrs or 'course' in attrs:
             course = attrs.get('course', getattr(self.instance, 'course', None))

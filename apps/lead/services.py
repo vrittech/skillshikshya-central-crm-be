@@ -7,6 +7,7 @@ check the request and call these functions.
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework.exceptions import APIException
 
@@ -229,7 +230,7 @@ def batch_students(batch):
     Each row says how the student got there. A student whose money batch is
     another batch moved in, so this batch's revenue leaves them out.
     """
-    from django.db.models import OuterRef, Subquery
+    from django.db.models import OuterRef, Subquery, Sum
 
     latest = Placement.objects.filter(enrollment=OuterRef('pk')).order_by('-created_at', '-id')
     enrollments = Enrollment.objects.filter(status__in=Enrollment.SEAT_STATUSES).annotate(
@@ -403,6 +404,33 @@ def net_paid(enrollment):
     return Decimal(enrollment.total_paid) - enrollment.refunds_total
 
 
+def _npr(amount):
+    from apps.lead.emails import npr
+
+    return npr(amount)
+
+
+def payment_refusal(enrollment, amount, *, pending_too=True, leave_out=None):
+    """Why a payment of `amount` can't be taken, or None.
+
+    A payment can't be more than what is left to pay, so a typo (100000 for
+    10000) is caught before a receipt goes to the student. With pending_too,
+    payments still pending count as on their way; leave_out is a pending
+    payment being confirmed now.
+    """
+    left = Decimal(enrollment.remaining_amount)
+    if pending_too:
+        pending = enrollment.payments.filter(status=Payment.Status.PENDING)
+        if leave_out is not None:
+            pending = pending.exclude(pk=leave_out.pk)
+        left -= pending.aggregate(total=Sum('amount'))['total'] or 0
+    if left <= 0:
+        return 'Nothing is left to pay on this enrollment.'
+    if Decimal(amount) > left:
+        return f'This is more than what is left to pay ({_npr(left)}). Check the amount.'
+    return None
+
+
 @transaction.atomic
 def confirm_enrollment(enrollment, *, user, due_dates=None, first_payment=None):
     """Confirm a pending enrollment: the moment a lead becomes a student.
@@ -424,6 +452,9 @@ def confirm_enrollment(enrollment, *, user, due_dates=None, first_payment=None):
         raise ActionRefused('Only a pending enrollment can be confirmed.')
     payment = None
     if first_payment:
+        refusal = payment_refusal(enrollment, first_payment['amount'])
+        if refusal:
+            raise ActionRefused(refusal)
         payment = Payment.objects.create(
             enrollment=enrollment, status=Payment.Status.SUCCESSFUL, received_by=user,
             branch=enrollment.branch,
@@ -517,6 +548,9 @@ def confirm_payment(payment, *, user):
     payment = _lock(payment)
     if payment.status != Payment.Status.PENDING:
         raise ActionRefused('Only a pending payment can be confirmed.')
+    refusal = payment_refusal(_lock(payment.enrollment), payment.amount, leave_out=payment)
+    if refusal:
+        raise ActionRefused(refusal)
     payment.status = Payment.Status.SUCCESSFUL
     payment.save(update_fields=['status'])
     issue_receipt(payment, user=user)
@@ -558,11 +592,23 @@ def add_adjustment(enrollment, *, kind, amount, reason, user):
     """Add an extra charge, discount, write-off or refund, with a history row.
 
     A refund can't be more than what was paid and not yet refunded. A write-off
-    can't be more than what is owed. Discounts may go below 0 (a credit we owe
-    the student, e.g. after a switch to a cheaper course), to be refunded.
+    can't be more than what is owed. A discount can't be more than the fee
+    (after earlier discounts and write-offs); when the student already paid,
+    it may leave a credit we owe them, to be refunded.
     """
     enrollment = _lock(enrollment)
     balance_before = enrollment.remaining_amount
+    if kind == Adjustment.Kind.DISCOUNT:
+        t = enrollment.adjustment_totals()
+        fee = (
+            enrollment.agreed_amount + t[Adjustment.Kind.EXTRA_CHARGE]
+            - t[Adjustment.Kind.DISCOUNT] - t[Adjustment.Kind.WRITE_OFF]
+        )
+        if amount > fee:
+            raise ActionRefused(
+                f"A discount can't be more than the fee ({_npr(max(fee, 0))} "
+                'after earlier discounts and write-offs).'
+            )
     if kind == Adjustment.Kind.REFUND:
         refundable = enrollment.total_paid - enrollment.refunds_total
         if amount > refundable:
