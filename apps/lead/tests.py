@@ -1680,6 +1680,51 @@ class MovePauseResumeTests(SeatTestBase):
         self.assertEqual(data['summary']['students'], 1)
 
 
+class EnrollmentListTests(SeatTestBase):
+    """GET /api/enrollments/ searches, filters and pages on the server, past 100 rows."""
+
+    def _list(self, **params):
+        response = self.client.get('/api/enrollments/', params)
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        return response.data
+
+    def test_search_finds_by_name_phone_course_and_batch(self):
+        mina = self._enroll(self.batch, lead=Lead.objects.create(full_name='Mina Rai', phone='9811111111'))
+        java = Enrollment.objects.create(
+            lead=self._lead(), course=self.other_course, batch=self.java_batch,
+            listed_fee=20000, agreed_amount=20000, enrollment_date=date.today(),
+        )
+
+        def ids(search):
+            return [r['id'] for r in self._list(search=search)['results']]
+
+        self.assertEqual(ids('mina'), [mina.id])
+        self.assertEqual(ids('9811111111'), [mina.id])
+        self.assertEqual(ids('Java'), [java.id])
+        self.assertEqual(sorted(ids('Python Nov')), [mina.id])
+
+    def test_search_works_with_status_and_seat(self):
+        confirmed = self._enroll(self.batch)
+        self._confirm(confirmed)
+        self._enroll(self.batch)
+        data = self._list(search='Python', status='confirmed', seat='seated')
+        self.assertEqual([r['id'] for r in data['results']], [confirmed.id])
+
+    def test_more_than_100_enrollments_page_through(self):
+        for n in range(105):
+            lead = Lead.objects.create(full_name=f'Bulk {n}', phone=f'97{n:08d}')
+            Enrollment.objects.create(
+                lead=lead, course=self.course, listed_fee=30000, agreed_amount=30000,
+                enrollment_date=date.today(),
+            )
+        first = self._list(page_size=100, ordering='-created_at')
+        self.assertEqual((first['count'], len(first['results']), first['total_pages']), (105, 100, 2))
+        second = self._list(page_size=100, page=2, ordering='-created_at')
+        self.assertEqual(len(second['results']), 5)
+        seen = {r['id'] for r in first['results']} | {r['id'] for r in second['results']}
+        self.assertEqual(len(seen), 105)
+
+
 class DueDateTests(SeatTestBase):
     """Due dates: set at confirm, changed with a reason, filled oldest first."""
 

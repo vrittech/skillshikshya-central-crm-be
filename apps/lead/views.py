@@ -444,8 +444,12 @@ class GlobalEnrollmentViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Enrollment.objects.none()
     serializer_class = GlobalEnrollmentSerializer
     pagination_class = CustomPagination
-    filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, BranchFilterBackend]
     filterset_class = GlobalEnrollmentFilter
+    search_fields = [
+        'lead__full_name', 'lead__phone', 'student__full_name', 'student__student_id',
+        'course__name', 'batch__name', 'current_batch__name',
+    ]
     ordering_fields = ['enrollment_date', 'agreed_amount', 'created_at']
     ordering = ['-enrollment_date']
 
