@@ -6,12 +6,13 @@ from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 
 from django_filters.rest_framework import DjangoFilterBackend
 
 from apps.account.models import User
 from apps.account.filters import UserFilter
-from apps.account.serializers.user_serializer import UserSerializer
+from apps.account.serializers.user_serializer import UserMiniSerializer, UserSerializer
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission
 from apps.global_config.filters import BranchFilterBackend
@@ -41,6 +42,11 @@ class UserViewSet(viewsets.ModelViewSet):
         else:
             permission_classes = [IsAuthenticated]
         return [p() for p in permission_classes]
+
+    @action(detail=False, methods=['get'])
+    def me(self, request):
+        """The signed-in user with their current permissions, including those from groups."""
+        return Response(UserMiniSerializer(request.user).data)
 
     @action(detail=False, methods=['get'])
     def export_csv(self, request):

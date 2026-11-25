@@ -272,6 +272,8 @@ class LeadViewSet(viewsets.ModelViewSet):
         instance.save(update_fields=['is_deleted', 'deleted_at', 'deleted_by'])
 
     def get_permissions(self):
+        if self.action in ['archive', 'restore']:
+            return [IsAuthenticated(), needs('lead.change_lead')()]
         if self.action in [
             'create', 'update', 'partial_update', 'destroy', 'import_preview', 'import_leads',
         ]:

@@ -754,6 +754,19 @@ class LeadActionRoutingTests(APITestCase):
         self.assertIn(self.lead.id, listed)
         self.assertEqual(self.client.get('/api/leads/recycle_bin/').data['results'], [])
 
+    def test_archive_and_restore_need_change_lead(self):
+        from django.contrib.auth.models import Permission
+
+        clerk = User.objects.create_user(email='clerk@test.com', name='Clerk', password='pass')
+        self.client.force_authenticate(clerk)
+        self.assertEqual(self.client.post(f'/api/leads/{self.lead.id}/archive/').status_code, 403)
+        self.assertEqual(self.client.post(f'/api/leads/{self.lead.id}/restore/').status_code, 403)
+        clerk.user_permissions.add(Permission.objects.get(codename='change_lead'))
+        clerk = User.objects.get(pk=clerk.pk)
+        self.client.force_authenticate(clerk)
+        self.assertEqual(self.client.post(f'/api/leads/{self.lead.id}/archive/').status_code, 200)
+        self.assertEqual(self.client.post(f'/api/leads/{self.lead.id}/restore/').status_code, 200)
+
     def test_restore_of_a_missing_lead_is_404(self):
         response = self.client.post('/api/leads/999999/restore/')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
