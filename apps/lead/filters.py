@@ -241,6 +241,16 @@ class LeadDocumentFilter(django_filters.FilterSet):
 class GlobalEnrollmentFilter(django_filters.FilterSet):
     enrollment_date__gte = django_filters.DateFilter(field_name='enrollment_date', lookup_expr='gte')
     enrollment_date__lte = django_filters.DateFilter(field_name='enrollment_date', lookup_expr='lte')
+    # seated = in a batch now, paused = paused out of one, none = never placed or left.
+    seat = django_filters.ChoiceFilter(
+        choices=[('seated', 'Seated'), ('paused', 'Paused'), ('none', 'No seat')],
+        method='filter_seat',
+    )
+
+    def filter_seat(self, queryset, name, value):
+        from apps.lead.services import filter_seat
+
+        return filter_seat(queryset, value)
 
     class Meta:
         model = Enrollment

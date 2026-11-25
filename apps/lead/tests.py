@@ -1605,6 +1605,79 @@ class MovePauseResumeTests(SeatTestBase):
         self.assertEqual([r['enrollment'] for r in first['seated']], [stayer.id])
         self.assertEqual((first['seated'][0]['how'], first['seated'][0]['moved_in']), ('join', False))
         self.assertEqual(first['paused'], [])
+        self.assertEqual([r['enrollment'] for r in first['moved_out']], [mover.id])
+
+    def test_old_batch_lists_who_moved_out_and_where_they_are_now(self):
+        self._act('move', batch=self.next_batch.id, reason='Evening')
+        old = self.client.get(f'/api/course-batches/{self.batch.id}/students/').data
+        self.assertEqual(old['seated'], [])
+        row = old['moved_out'][0]
+        self.assertEqual(
+            (row['enrollment'], row['how'], row['to_batch_name'], row['seat_state'],
+             row['now_batch_name'], row['money_batch_name'], row['since']),
+            (self.enrollment.id, 'move', 'Python Dec', 'seated', 'Python Dec', 'Python Nov', date.today()),
+        )
+        new = self.client.get(f'/api/course-batches/{self.next_batch.id}/students/').data
+        self.assertEqual(new['moved_out'], [])
+
+        # Paused out of the new batch: still listed on the old one, now paused.
+        self._act('pause', reason='Exams')
+        old = self.client.get(f'/api/course-batches/{self.batch.id}/students/').data
+        self.assertEqual(
+            [(r['seat_state'], r['now_batch_name']) for r in old['moved_out']], [('paused', None)],
+        )
+        self.assertEqual(old['paused'], [])
+
+        # Back in the old batch: seated there, no longer moved out.
+        self._act('resume', batch=self.batch.id, reason='Back')
+        old = self.client.get(f'/api/course-batches/{self.batch.id}/students/').data
+        self.assertEqual([r['enrollment'] for r in old['seated']], [self.enrollment.id])
+        self.assertEqual(old['moved_out'], [])
+
+    def test_enrollment_list_filters_by_seat(self):
+        paused = self._enroll(self.batch)
+        self._confirm(paused)
+        self._act('pause', paused, reason='Exams')
+        pending = self._enroll(self.batch)
+
+        def ids(**params):
+            data = self.client.get('/api/enrollments/', params).data
+            return {r['id']: r for r in data['results']}
+
+        rows = ids(seat='paused')
+        self.assertEqual(list(rows), [paused.id])
+        self.assertEqual(
+            (rows[paused.id]['seat_state'], rows[paused.id]['paused_on'],
+             rows[paused.id]['paused_from_name']),
+            ('paused', str(date.today()), 'Python Nov'),
+        )
+        self.assertEqual(list(ids(seat='seated')), [self.enrollment.id])
+        self.assertEqual(list(ids(seat='none')), [pending.id])
+        everyone = ids()
+        self.assertEqual(
+            {k: v['seat_state'] for k, v in everyone.items()},
+            {self.enrollment.id: 'seated', paused.id: 'paused', pending.id: 'none'},
+        )
+        self.assertIsNone(everyone[self.enrollment.id]['paused_on'])
+        self.assertEqual(
+            self.client.get('/api/enrollments/', {'seat': 'gone'}).status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+    def test_who_owes_filters_paused_students(self):
+        paused = self._enroll(self.batch)
+        self._confirm(paused)
+        self._act('pause', paused, reason='Exams')
+
+        everyone = self.client.get('/api/reports/who-owes/').data['results']
+        self.assertEqual(
+            {r['enrollment']: r['seat_state'] for r in everyone},
+            {self.enrollment.id: 'seated', paused.id: 'paused'},
+        )
+        data = self.client.get('/api/reports/who-owes/', {'seat': 'paused'}).data
+        self.assertEqual([r['enrollment'] for r in data['results']], [paused.id])
+        self.assertEqual(data['results'][0]['paused_on'], str(date.today()))
+        self.assertEqual(data['summary']['students'], 1)
 
 
 class DueDateTests(SeatTestBase):

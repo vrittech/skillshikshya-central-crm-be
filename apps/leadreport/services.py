@@ -10,7 +10,9 @@ from apps.lead.models import (
     Enrollment, FollowUp, Lead, LeadActivity, LeadCall,
     LeadCourseInterest, Payment, PaymentPlan,
 )
-from apps.lead.services import due_rows
+from apps.lead.services import (
+    SEAT_STATES, annotated_seat_state, due_rows, filter_seat, with_seat,
+)
 from apps.callminutes.models import CallMinutesTransaction
 from apps.course.models import CourseBatch
 from apps.course.money import MONEY_FIELDS, batch_figures, empty_figures, figures_json
@@ -626,6 +628,10 @@ def _owing_enrollments(request):
         qs = qs.filter(lead__assigned_counselor__isnull=True)
     elif counselor and str(counselor).isdigit():
         qs = qs.filter(lead__assigned_counselor_id=int(counselor))
+    qs = with_seat(qs)
+    seat = _query_param(request, 'seat')
+    if seat in SEAT_STATES:
+        qs = filter_seat(qs, seat)
     return qs.select_related(
         'lead', 'lead__assigned_counselor', 'student', 'course', 'batch', 'branch',
     ).annotate(
@@ -654,6 +660,11 @@ def _who(enrollment):
         'branch_name': enrollment.branch.name if enrollment.branch else None,
         'counselor': counselor.id if counselor else None,
         'counselor_name': counselor.name if counselor else None,
+        'seat_state': annotated_seat_state(enrollment),
+        'paused_on': (
+            enrollment.seat_on.isoformat()
+            if annotated_seat_state(enrollment) == 'paused' and enrollment.seat_on else None
+        ),
     }
 
 
@@ -681,7 +692,8 @@ def who_owes_report(request):
     """Every student who owes money: how much, how much is late, and how late.
 
     Optional filters: course, batch (the money batch), counselor (an id, or
-    'none'), late_only. by_counselor and by_batch add the rows up.
+    'none'), seat (seated, paused or none), late_only. by_counselor and by_batch
+    add the rows up.
     """
     today = timezone.localdate()
     late_only = _to_bool(_query_param(request, 'late_only'))
@@ -757,7 +769,7 @@ def _month_range(value, today):
 def due_in_month_report(request):
     """Every unpaid part due in a month (next month by default), less what is paid on it.
 
-    Optional filters: month (YYYY-MM), course, batch (the money batch).
+    Optional filters: month (YYYY-MM), course, batch (the money batch), seat.
     """
     today = timezone.localdate()
     first, last, error = _month_range(_query_param(request, 'month'), today)

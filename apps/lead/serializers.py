@@ -847,6 +847,9 @@ class GlobalEnrollmentSerializer(serializers.ModelSerializer):
     total_paid = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     remaining_amount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     is_full_paid = serializers.BooleanField(read_only=True)
+    seat_state = serializers.SerializerMethodField()
+    paused_on = serializers.SerializerMethodField()
+    paused_from_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Enrollment
@@ -855,6 +858,7 @@ class GlobalEnrollmentSerializer(serializers.ModelSerializer):
             'student', 'student_name',
             'course', 'course_name',
             'batch', 'batch_name', 'current_batch', 'current_batch_name',
+            'seat_state', 'paused_on', 'paused_from_name',
             'status', 'enrollment_date',
             'listed_fee', 'agreed_amount',
             'total_paid', 'remaining_amount', 'is_full_paid',
@@ -862,6 +866,20 @@ class GlobalEnrollmentSerializer(serializers.ModelSerializer):
             'created_at',
         ]
         read_only_fields = fields
+
+
+    # These read the seat annotations from services.with_seat().
+    def get_seat_state(self, obj):
+        from apps.lead.services import annotated_seat_state
+
+        return annotated_seat_state(obj)
+
+    def get_paused_on(self, obj):
+        paused = self.get_seat_state(obj) == 'paused' and obj.seat_on
+        return obj.seat_on.isoformat() if paused else None
+
+    def get_paused_from_name(self, obj):
+        return obj.seat_from_name if self.get_seat_state(obj) == 'paused' else None
 
 
 class GlobalPaymentSerializer(serializers.ModelSerializer):

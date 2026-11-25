@@ -450,9 +450,11 @@ class GlobalEnrollmentViewSet(viewsets.ReadOnlyModelViewSet):
     ordering = ['-enrollment_date']
 
     def get_queryset(self):
-        return Enrollment.objects.select_related(
+        from apps.lead.services import with_seat
+
+        return with_seat(Enrollment.objects.select_related(
             'lead', 'student', 'course', 'branch', 'batch', 'current_batch',
-        ).prefetch_related('adjustments')
+        ).prefetch_related('adjustments'))
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:

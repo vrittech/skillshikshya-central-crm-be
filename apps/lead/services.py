@@ -7,7 +7,7 @@ check the request and call these functions.
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import OuterRef, Q, Subquery, Sum
 from django.utils import timezone
 from rest_framework.exceptions import APIException
 
@@ -224,34 +224,81 @@ def resume_enrollment(enrollment, batch, *, reason, user, on=None):
     return enrollment
 
 
+def latest_placement(field):
+    """The newest seat-history value of each enrollment, for .annotate()."""
+    return Subquery(
+        Placement.objects.filter(enrollment=OuterRef('pk'))
+        .order_by('-created_at', '-id').values(field)[:1]
+    )
+
+
+def with_seat(queryset):
+    """Adds seat_kind, seat_on and seat_from_name from each enrollment's newest seat-history row."""
+    return queryset.annotate(
+        seat_kind=latest_placement('kind'),
+        seat_on=latest_placement('started_on'),
+        seat_from_name=latest_placement('from_batch__name'),
+    )
+
+
+SEAT_STATES = ('seated', 'paused', 'none')
+
+
+def filter_seat(queryset, state):
+    """Keep 'seated', 'paused' or 'none' enrollments. The queryset must come from with_seat()."""
+    if state == 'seated':
+        return queryset.filter(current_batch__isnull=False)
+    queryset = queryset.filter(current_batch__isnull=True)
+    if state == 'paused':
+        return queryset.filter(seat_kind=Placement.Kind.PAUSE)
+    return queryset.filter(Q(seat_kind__isnull=True) | ~Q(seat_kind=Placement.Kind.PAUSE))
+
+
+def annotated_seat_state(enrollment):
+    """seat_state() for an enrollment from with_seat(), with no extra query."""
+    if enrollment.current_batch_id:
+        return 'seated'
+    return 'paused' if enrollment.seat_kind == Placement.Kind.PAUSE else 'none'
+
+
 def batch_students(batch):
-    """Who sits in a batch now, and who is paused out of it.
+    """Who sits in a batch now, who is paused out of it, and who moved out of it.
 
     Each row says how the student got there. A student whose money batch is
-    another batch moved in, so this batch's revenue leaves them out.
+    another batch moved in, so this batch's revenue leaves them out. A student
+    who moved out keeps their money on their money batch.
     """
-    from django.db.models import OuterRef, Subquery, Sum
-
-    latest = Placement.objects.filter(enrollment=OuterRef('pk')).order_by('-created_at', '-id')
-    enrollments = Enrollment.objects.filter(status__in=Enrollment.SEAT_STATUSES).annotate(
-        last_kind=Subquery(latest.values('kind')[:1]),
-        last_from=Subquery(latest.values('from_batch')[:1]),
-        last_on=Subquery(latest.values('started_on')[:1]),
-    ).select_related('lead', 'student', 'batch').order_by('lead__full_name', 'id')
+    enrollments = with_seat(
+        Enrollment.objects.filter(status__in=Enrollment.SEAT_STATUSES)
+    ).annotate(
+        last_from=latest_placement('from_batch'),
+    ).select_related('lead', 'student', 'batch', 'current_batch').order_by('lead__full_name', 'id')
 
     seated = list(enrollments.filter(current_batch=batch))
     paused = list(enrollments.filter(
-        current_batch__isnull=True, last_kind=Placement.Kind.PAUSE, last_from=batch.pk,
+        current_batch__isnull=True, seat_kind=Placement.Kind.PAUSE, last_from=batch.pk,
     ))
+    moves_out = Placement.objects.filter(from_batch=batch, kind=Placement.Kind.MOVE)
+    last_move_out = moves_out.filter(enrollment=OuterRef('pk')).order_by('-created_at', '-id')
+    paused_ids = {e.id for e in paused}
+    moved_out = [
+        e for e in enrollments.filter(pk__in=moves_out.values('enrollment')).exclude(
+            current_batch=batch,
+        ).annotate(
+            out_on=Subquery(last_move_out.values('started_on')[:1]),
+            out_to=Subquery(last_move_out.values('course_batch')[:1]),
+        )
+        if e.id not in paused_ids
+    ]
     names = dict(
         CourseBatch.objects.filter(
-            pk__in={e.last_from for e in seated if e.last_from}
+            pk__in={e.last_from for e in seated if e.last_from} | {e.out_to for e in moved_out}
         ).values_list('pk', 'name')
     )
     kinds = dict(Placement.Kind.choices)
 
     def row(e, *, paused_row=False):
-        how = e.last_kind
+        how = e.seat_kind
         from_id = None if paused_row else e.last_from
         return {
             'enrollment': e.id,
@@ -260,7 +307,7 @@ def batch_students(batch):
             'phone': e.lead.phone,
             'student_id': e.student.student_id if e.student_id else None,
             'status': e.status,
-            'since': e.last_on,
+            'since': e.seat_on,
             'how': how,
             'how_display': kinds.get(how, ''),
             'from_batch': from_id,
@@ -270,9 +317,27 @@ def batch_students(batch):
             'moved_in': e.batch_id is not None and e.batch_id != batch.pk,
         }
 
+    def moved_out_row(e):
+        return {
+            **row(e),
+            'since': e.out_on,
+            'how': Placement.Kind.MOVE,
+            'how_display': kinds[Placement.Kind.MOVE],
+            'from_batch': batch.pk,
+            'from_batch_name': batch.name,
+            'moved_in': False,
+            'to_batch': e.out_to,
+            'to_batch_name': names.get(e.out_to),
+            # Where they are now: the batch they moved to, a later batch, paused or gone.
+            'seat_state': annotated_seat_state(e),
+            'now_batch': e.current_batch_id,
+            'now_batch_name': e.current_batch.name if e.current_batch_id else None,
+        }
+
     return {
         'seated': [row(e) for e in seated],
         'paused': [row(e, paused_row=True) for e in paused],
+        'moved_out': [moved_out_row(e) for e in moved_out],
     }
 
 
