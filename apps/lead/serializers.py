@@ -4,6 +4,7 @@ from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 from django.core.exceptions import ValidationError as DjangoValidationError
 
+from apps.account.models import User
 from apps.callminutes.utils import format_duration, parse_duration_to_seconds
 from apps.branch.models import Branch
 from apps.course.models import Course, CourseBatch
@@ -562,6 +563,47 @@ class LeadListSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+class LeadImportSerializer(serializers.Serializer):
+    """An import file, what to do with duplicates, and the defaults for blanks."""
+
+    file = serializers.FileField()
+    duplicates = serializers.ChoiceField(choices=['skip', 'import'], default='skip')
+    default_lead_type = serializers.PrimaryKeyRelatedField(
+        queryset=LeadType.objects.all(), required=False, allow_null=True)
+    default_source = serializers.PrimaryKeyRelatedField(
+        queryset=LeadSource.objects.all(), required=False, allow_null=True)
+    default_campaign = serializers.PrimaryKeyRelatedField(
+        queryset=Campaign.objects.all(), required=False, allow_null=True)
+    default_status = serializers.PrimaryKeyRelatedField(
+        queryset=LeadStatus.objects.all(), required=False, allow_null=True)
+    default_priority = serializers.PrimaryKeyRelatedField(
+        queryset=LeadPriority.objects.all(), required=False, allow_null=True)
+    default_course = serializers.PrimaryKeyRelatedField(
+        queryset=Course.objects.all(), required=False, allow_null=True)
+    default_branch = serializers.PrimaryKeyRelatedField(
+        queryset=Branch.objects.all(), required=False, allow_null=True)
+    default_counselor = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(is_active=True), required=False, allow_null=True)
+
+    def validate(self, attrs):
+        user = self.context['request'].user
+        branch_id = walled_branch_id(user)
+        branch = attrs.get('default_branch')
+        if branch_id and branch is not None and branch.pk != branch_id:
+            raise ValidationError({'default_branch': ['You can add leads only to your own branch.']})
+        counselor = attrs.get('default_counselor')
+        branch_for_counselor = branch.pk if branch is not None else branch_id
+        if counselor is not None and counselor.branch_id and branch_for_counselor \
+                and counselor.branch_id != branch_for_counselor:
+            raise ValidationError({'default_counselor': ['This counselor is not in that branch.']})
+        return attrs
+
+    def defaults(self):
+        d = self.validated_data
+        keys = ('lead_type', 'source', 'campaign', 'status', 'priority', 'course', 'branch', 'counselor')
+        return {k: d[f'default_{k}'] for k in keys if d.get(f'default_{k}') is not None}
+
+
 class LeadSerializer(serializers.ModelSerializer):
     status_name = serializers.CharField(source='status.name', read_only=True)
     lead_type_name = serializers.CharField(source='lead_type.name', read_only=True)
@@ -590,6 +632,15 @@ class LeadSerializer(serializers.ModelSerializer):
             'is_converted', 'converted_at', 'is_deleted', 'deleted_at', 'deleted_by',
             'lead_score',
         ]
+
+    def update(self, instance, validated_data):
+        # The form sends only its own custom data: keep the file an import came from.
+        imported = (instance.custom_data or {}).get('import_file')
+        if imported and 'custom_data' in validated_data:
+            validated_data['custom_data'] = {
+                **(validated_data['custom_data'] or {}), 'import_file': imported,
+            }
+        return super().update(instance, validated_data)
 
     def get_call_count(self, obj):
         return obj.calls.count()

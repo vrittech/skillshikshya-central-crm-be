@@ -32,6 +32,8 @@ def notify_counselor_assignment(sender, instance, created, **kwargs):
     """
     from apps.lead.emails import lead_assigned
 
+    if getattr(instance, '_skip_assign_notice', False):
+        return  # An import tells each counselor once, for all their leads.
     new_id = instance.assigned_counselor_id
     if not new_id or (not created and instance._original_assigned_counselor_id == new_id):
         return

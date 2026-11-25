@@ -89,7 +89,11 @@ def lead_timeline(lead, *, branch_id=None):
     items = [
         _item(
             'lead', lead.pk, lead.created_at, 'Lead added',
-            detail=_join(lead.reference_number, lead.source.name if lead.source else None),
+            detail=_join(
+                lead.reference_number, lead.source.name if lead.source else None,
+                f'Imported from {lead.custom_data["import_file"]}'
+                if (lead.custom_data or {}).get('import_file') else None,
+            ),
             by=_name(lead.created_by),
         ),
     ]

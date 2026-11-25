@@ -1,0 +1,25 @@
+{% extends "emails/base.html" %}
+{% block subject %}{{ count }} new leads assigned to you{% endblock %}
+{% block preheader %}{{ count }} leads are now yours.{% endblock %}
+{% block title %}New leads assigned to you{% endblock %}
+{% block content %}
+<p style="margin:0 0 12px;">Dear {{ counselor_name }},</p>
+<p style="margin:0;">{% if assigned_by %}{{ assigned_by }} has imported {{ count }} leads and assigned them to you{% else %}{{ count }} leads have been assigned to you{% endif %}. Please get in touch with them soon.</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%; margin:18px 0; border:1px solid #e3e6e4; border-radius:8px; border-collapse:separate; border-spacing:0;">
+  <tr>
+    <td style="padding:10px 14px; font-size:12px; color:#5f6b66;">Name</td>
+    <td style="padding:10px 14px; font-size:12px; color:#5f6b66;">Phone</td>
+    <td style="padding:10px 14px; font-size:12px; color:#5f6b66;">Course</td>
+  </tr>
+{% for lead in leads %}
+  <tr>
+    <td style="padding:10px 14px; font-size:13px; font-weight:bold; color:#1c2421; border-top:1px solid #eef0ef;">{% if frontend_url %}<a href="{{ lead.url }}" style="color:#1c2421;">{{ lead.name }}</a>{% else %}{{ lead.name }}{% endif %}</td>
+    <td style="padding:10px 14px; font-size:13px; color:#1c2421; border-top:1px solid #eef0ef;">{{ lead.phone }}</td>
+    <td style="padding:10px 14px; font-size:13px; color:#1c2421; border-top:1px solid #eef0ef;">{{ lead.course }}</td>
+  </tr>
+{% endfor %}
+</table>
+{% if more %}<p style="margin:0;">And {{ more }} more in the CRM.</p>{% endif %}
+{% if frontend_url %}{% include "emails/_button.html" with url=leads_url label="Open leads" %}{% endif %}
+{% endblock %}
+{% block signoff %}{{ org.name }} CRM{% endblock %}

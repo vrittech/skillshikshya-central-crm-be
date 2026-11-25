@@ -1,4 +1,3 @@
-import csv
 from datetime import datetime
 
 from django.db import transaction
@@ -27,6 +26,7 @@ from apps.lead.models import (
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, VoiceNote,
 )
 from apps.lead.serializers import (
+    LeadImportSerializer,
     LearningModeSerializer, InstitutionSerializer,
     ProvinceSerializer, CitySerializer,
     LeadSourceSerializer, CampaignSerializer, LeadStatusSerializer,
@@ -204,8 +204,6 @@ class LeadViewSet(viewsets.ModelViewSet):
         qs = super().get_queryset()
         if self.action == 'recycle_bin':
             return qs.filter(is_deleted=True)
-        if self.action == 'export_csv':
-            return qs.filter(is_deleted=False).select_related('source', 'status', 'priority', 'assigned_counselor')
         if self.action == 'restore':
             # Restore has to find the deleted or archived lead it brings back.
             return qs
@@ -274,7 +272,9 @@ class LeadViewSet(viewsets.ModelViewSet):
         instance.save(update_fields=['is_deleted', 'deleted_at', 'deleted_by'])
 
     def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+        if self.action in [
+            'create', 'update', 'partial_update', 'destroy', 'import_preview', 'import_leads',
+        ]:
             permission_classes = [IsAuthenticated, IsStaffOrHasPermission]
         else:
             permission_classes = [IsAuthenticated]
@@ -291,29 +291,72 @@ class LeadViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def export_csv(self, request):
+        """The leads the list shows (same filters), as CSV, or Excel with
+        ?file_type=xlsx. ?ids=1,2,3 exports only those leads."""
+        from apps.lead.imports import export_response
+
         queryset = self.filter_queryset(self.get_queryset())
-        response = HttpResponse(content_type='text/csv')
-        response['Content-Disposition'] = 'attachment; filename="leads.csv"'
-        writer = csv.writer(response)
-        writer.writerow([
-            'Reference', 'Full Name', 'Phone', 'Email', 'Lead Type',
-            'Source', 'Status', 'Priority', 'Assigned Counselor',
-            'Lead Score', 'Expected Revenue', 'Is Converted',
-            'Created At', 'Updated At',
-        ])
-        for lead in queryset.iterator(chunk_size=500):
-            writer.writerow([
-                lead.reference_number, lead.full_name, lead.phone, lead.email,
-                lead.lead_type.name if lead.lead_type else '',
-                lead.source.name if lead.source else '',
-                lead.status.name if lead.status else '',
-                lead.priority.name if lead.priority else '',
-                lead.assigned_counselor.name if lead.assigned_counselor else '',
-                lead.lead_score, lead.expected_revenue,
-                lead.is_converted,
-                lead.created_at, lead.updated_at,
-            ])
-        return response
+        ids = [int(i) for i in request.query_params.get('ids', '').split(',') if i.strip().isdigit()]
+        if ids:
+            queryset = queryset.filter(pk__in=ids)
+        queryset = queryset.select_related('lead_type').prefetch_related(
+            'tags', 'course_interests__course', 'enrollments__course', 'followups',
+        )
+        return export_response(
+            queryset.iterator(chunk_size=500),
+            file_type=request.query_params.get('file_type', 'csv'),
+            branch_id=walled_branch_id(request.user),
+        )
+
+    @action(detail=False, methods=['get'], url_path='import-template')
+    def import_template(self, request):
+        """The columns an import reads, as CSV, or Excel with ?file_type=xlsx
+        (with dropdowns of the CRM's lists)."""
+        from apps.lead.imports import template_response
+
+        return template_response(request.query_params.get('file_type', 'csv'), request.user)
+
+    def _checked_import(self, request):
+        from apps.lead.imports import check_file
+
+        serializer = LeadImportSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        upload = serializer.validated_data['file']
+        rows, columns, ignored = check_file(upload, defaults=serializer.defaults(), user=request.user)
+        return serializer, upload, rows, columns, ignored
+
+    @action(
+        detail=False, methods=['post'], url_path='import/preview',
+        parser_classes=[MultiPartParser, FormParser],
+    )
+    def import_preview(self, request):
+        """Check a file and show what an import would do. Nothing is saved."""
+        from apps.lead.imports import ImportFileError, preview
+
+        try:
+            _, upload, rows, columns, ignored = self._checked_import(request)
+        except ImportFileError as exc:
+            return Response({'file': [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(preview(rows, columns, ignored, upload.name))
+
+    @action(
+        detail=False, methods=['post'], url_path='import',
+        parser_classes=[MultiPartParser, FormParser],
+    )
+    def import_leads(self, request):
+        """Check the file again and save the rows that pass. Duplicates are
+        skipped unless duplicates=import."""
+        from apps.lead.imports import ImportFileError, import_rows
+
+        try:
+            serializer, upload, rows, _, _ = self._checked_import(request)
+        except ImportFileError as exc:
+            return Response({'file': [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+        result = import_rows(
+            rows, user=request.user, file_name=upload.name,
+            include_duplicates=serializer.validated_data['duplicates'] == 'import',
+        )
+        return Response(result)
 
     @action(detail=True, methods=['post'])
     def archive(self, request, pk=None):

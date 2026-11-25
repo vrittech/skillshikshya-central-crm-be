@@ -3802,3 +3802,328 @@ class AmountInWordsTests(APITestCase):
         self.assertEqual(amount_in_words(Decimal('20000.50')), 'Rupees Twenty Thousand and Fifty Paisa Only')
         self.assertEqual(amount_in_words(12500000), 'Rupees One Crore Twenty-Five Lakh Only')
         self.assertEqual(amount_in_words(999), 'Rupees Nine Hundred Ninety-Nine Only')
+
+
+class LeadImportExportTests(APITestCase):
+    """Import checks every row before saving; export gives back what the list shows."""
+
+    def setUp(self):
+        from apps.branch.models import Branch
+        from apps.lead.models import LeadStatus, LeadTag, LeadType
+
+        self.ktm = Branch.objects.create(name='Kathmandu', code='KTM')
+        self.pkr = Branch.objects.create(name='Pokhara', code='PKR')
+        self.admin = User.objects.create_user(
+            email='import@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.client.force_authenticate(self.admin)
+        self.counselor = User.objects.create_user(
+            email='sita@test.com', name='Sita Rai', password='pass', branch=self.ktm,
+        )
+        self.walk_in = LeadType.objects.create(name='Walk-in')
+        self.online = LeadType.objects.create(name='Online')
+        self.facebook = LeadSource.objects.create(name='Facebook')
+        self.new = LeadStatus.objects.create(name='New')
+        self.hot = LeadTag.objects.create(name='Hot')
+        self.python = Course.objects.create(name='Python', full_amount=30000)
+        self.existing = Lead.objects.create(
+            full_name='Old Lead', phone='+977 980-111-2222', branch=self.ktm,
+        )
+
+    # ---------------------------------------------------------- helpers
+
+    def _csv(self, text, name='leads.csv'):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        return SimpleUploadedFile(name, text.encode('utf-8'), content_type='text/csv')
+
+    def _xlsx(self, rows, name='leads.xlsx'):
+        from io import BytesIO
+
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from openpyxl import Workbook
+
+        book = Workbook()
+        for row in rows:
+            book.active.append(row)
+        buffer = BytesIO()
+        book.save(buffer)
+        return SimpleUploadedFile(name, buffer.getvalue())
+
+    def _post(self, url, upload, **fields):
+        return self.client.post(url, {'file': upload, **fields}, format='multipart')
+
+    def _preview(self, upload, **fields):
+        return self._post('/api/leads/import/preview/', upload, **fields)
+
+    def _import(self, upload, **fields):
+        return self._post('/api/leads/import/', upload, **fields)
+
+    def _rows(self, response):
+        return {r['row']: r for r in response.data['rows']}
+
+    # ---------------------------------------------------------- preview
+
+    def test_preview_matches_columns_and_checks_each_row(self):
+        upload = self._csv(
+            'Name,Mobile,E-mail,Lead Type,Lead Source,Interested Course,Favourite colour\n'
+            'Ram Thapa,9801234567,ram@test.com,walk-in,FACEBOOK,python,blue\n'
+            ',9801234568,,Walk-in,,,\n'
+            'Hari,98012,hari@,Walk-in,Tiktok,,\n'
+            'Gita,9801112222,,Walk-in,,,\n'
+            'Ram Again,+977-9801234567,,Walk-in,,,\n'
+            'Excel Lost,9.80123E+09,,Walk-in,,,\n'
+        )
+        response = self._preview(upload)
+        self.assertEqual(response.status_code, 200, response.data)
+        data = response.data
+        self.assertEqual([c['column'] for c in data['columns']], [
+            'Full name', 'Phone', 'Email', 'Lead type', 'Source', 'Course',
+        ])
+        self.assertEqual(data['ignored'], ['Favourite colour'])
+        self.assertEqual((data['total'], data['ready'], data['duplicates'], data['errors']), (6, 1, 2, 3))
+
+        rows = self._rows(response)
+        self.assertEqual(rows[2]['status'], 'ready')
+        self.assertEqual(rows[2]['course'], 'Python')
+        self.assertEqual(rows[3]['errors'], ['Full name is missing.'])
+        self.assertEqual(rows[4]['errors'], [
+            'Phone “98012” is not a phone number.',
+            'Email “hari@” is not a valid email address.',
+            'Source “Tiktok” is not in the CRM.',
+        ])
+        # Same number as a lead already in the CRM, typed another way.
+        self.assertEqual(rows[5]['status'], 'duplicate')
+        self.assertEqual(rows[5]['matches'][0]['reference_number'], self.existing.reference_number)
+        # Same number as an earlier row of the file.
+        self.assertEqual(rows[6]['status'], 'duplicate')
+        self.assertEqual(rows[6]['same_as_row'], 2)
+        self.assertIn('lost its digits in Excel', rows[7]['errors'][0])
+        self.assertEqual(Lead.objects.count(), 1, 'A preview saves nothing.')
+
+    def test_defaults_fill_blanks_and_lead_type_is_needed(self):
+        upload = 'Full name,Phone\nAsha,9802000001\n'
+        response = self._preview(self._csv(upload))
+        self.assertEqual(
+            self._rows(response)[2]['errors'],
+            ['Lead type is missing. Add it to the file or pick a default.'],
+        )
+        response = self._preview(
+            self._csv(upload), default_lead_type=self.walk_in.pk, default_course=self.python.pk,
+            default_counselor=self.counselor.pk,
+        )
+        row = self._rows(response)[2]
+        self.assertEqual(row['status'], 'ready')
+        self.assertEqual((row['course'], row['counselor'], row['branch']), ('Python', 'Sita Rai', 'Kathmandu'))
+
+    def test_file_problems_are_refused(self):
+        response = self._preview(self._csv('a,b\n1,2\n', name='leads.xls'))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('.xls', response.data['file'][0])
+        response = self._preview(self._csv('Full name,Email\nAsha,a@test.com\n'))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.data['file'][0],
+            'No Phone column was found. Download the template to see the column names.',
+        )
+        response = self._preview(self._csv('Full name,Phone\n'))
+        self.assertEqual(response.data['file'][0], 'The file has column names but no leads.')
+
+    def test_counselor_must_be_in_the_lead_branch(self):
+        upload = self._csv(
+            'Full name,Phone,Lead type,Branch,Counselor\n'
+            'Asha,9802000001,Walk-in,Pokhara,sita@test.com\n'
+            'Bina,9802000002,Walk-in,,Nobody Here\n'
+        )
+        rows = self._rows(self._preview(upload))
+        self.assertEqual(rows[2]['errors'], ['Sita Rai is not in Pokhara.'])
+        self.assertEqual(rows[3]['errors'], ['Counselor “Nobody Here” is not an active user.'])
+
+    # ----------------------------------------------------------- import
+
+    def test_import_saves_ready_rows_and_skips_duplicates(self):
+        upload = (
+            'Full name,Phone,Email,Lead type,Course,Tags,Expected revenue,Notes\n'
+            'Ram Thapa,9801234567,RAM@test.com,Walk-in,Python,"Hot, Cold","NPR 30,000",Call after 5\n'
+            'Old Again,9801112222,,Walk-in,,,,\n'
+            'No Phone,,,Walk-in,,,,\n'
+        )
+        response = self._import(self._csv(upload))
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual((response.data['created'], response.data['skipped'], response.data['failed']), (1, 1, 1))
+        rows = self._rows(response)
+        self.assertEqual(rows[3]['message'], f'Phone is already on {self.existing.reference_number} (Old Lead).')
+        self.assertEqual(rows[4]['message'], 'Phone is missing.')
+
+        lead = Lead.objects.get(pk=rows[2]['lead_id'])
+        self.assertEqual(lead.reference_number, rows[2]['reference_number'])
+        self.assertEqual((lead.email, lead.lead_type, lead.primary_course), ('ram@test.com', self.walk_in, self.python))
+        self.assertEqual(lead.expected_revenue, Decimal('30000.00'))
+        self.assertEqual(lead.notes, 'Call after 5')
+        self.assertEqual(list(lead.tags.all()), [self.hot])
+        self.assertEqual(lead.created_by, self.admin)
+        self.assertEqual(lead.custom_data, {'import_file': 'leads.csv'})
+        # The course becomes the lead's primary enquiry, as with the Add lead form.
+        self.assertTrue(lead.course_interests.filter(course=self.python, is_primary=True).exists())
+
+        response = self._import(self._csv(upload), duplicates='import')
+        self.assertEqual(response.data['created'], 2)
+
+    def test_excel_file_with_numeric_phones(self):
+        upload = self._xlsx([
+            ['Full Name', 'Phone', 'Lead Type'],
+            ['Asha', 9802000001, 'Online'],
+            [None, None, None],
+            ['Bina', 9802000002.0, 'Online'],
+        ])
+        response = self._import(upload)
+        self.assertEqual(response.data['created'], 2, response.data)
+        self.assertEqual(
+            sorted(Lead.objects.filter(lead_type=self.online).values_list('phone', flat=True)),
+            ['9802000001', '9802000002'],
+        )
+
+    def test_counselor_hears_once_for_many_leads(self):
+        from apps.global_config.models import EmailLog
+        from apps.lead.models import Notification
+
+        upload = self._csv(
+            'Full name,Phone,Lead type,Counselor\n'
+            'Asha,9802000001,Walk-in,Sita Rai\n'
+            'Bina,9802000002,Walk-in,Sita Rai\n'
+            'Chandra,9802000003,Walk-in,sita@test.com\n'
+        )
+        response = self._import(upload)
+        self.assertEqual(response.data['created'], 3)
+        logs = EmailLog.objects.filter(kind=EmailLog.Kind.LEAD_ASSIGNED)
+        self.assertEqual([log.subject for log in logs], ['3 new leads assigned to you'])
+        self.assertEqual(logs[0].to_email, 'sita@test.com')
+        self.assertIn('Chandra', logs[0].body_html)
+        notes = Notification.objects.filter(recipient=self.counselor)
+        self.assertEqual([n.message for n in notes], ['3 imported leads have been assigned to you.'])
+        # The leads went to the counselor's branch.
+        self.assertEqual(set(Lead.objects.filter(assigned_counselor=self.counselor).values_list('branch', flat=True)), {self.ktm.pk})
+
+    def test_one_lead_gets_the_usual_email(self):
+        from apps.global_config.models import EmailLog
+
+        self._import(self._csv('Full name,Phone,Lead type,Counselor\nAsha,9802000001,Walk-in,Sita Rai\n'))
+        logs = EmailLog.objects.filter(kind=EmailLog.Kind.LEAD_ASSIGNED)
+        self.assertEqual([log.subject for log in logs], ['New lead assigned: Asha'])
+
+    def test_branch_user_imports_into_their_branch_only(self):
+        from django.contrib.auth.models import Permission
+
+        user = User.objects.create_user(email='ktm@test.com', name='KTM', password='pass', branch=self.ktm)
+        self.client.force_authenticate(user)
+        upload = 'Full name,Phone,Lead type,Branch\nAsha,9802000001,Walk-in,\nBina,9802000002,Walk-in,Pokhara\n'
+        self.assertEqual(self._preview(self._csv(upload)).status_code, 403)
+
+        user.user_permissions.add(Permission.objects.get(codename='add_lead'))
+        user = User.objects.get(pk=user.pk)
+        self.client.force_authenticate(user)
+        response = self._import(self._csv(upload))
+        self.assertEqual(response.data['created'], 1, response.data)
+        rows = self._rows(response)
+        self.assertEqual(rows[3]['message'], 'You can add leads only to Kathmandu.')
+        self.assertEqual(Lead.objects.get(pk=rows[2]['lead_id']).branch, self.ktm)
+
+        response = self._preview(self._csv(upload), default_branch=self.pkr.pk)
+        self.assertEqual(response.status_code, 400)
+
+    def test_editing_keeps_the_import_file(self):
+        self._import(self._csv('Full name,Phone,Lead type\nAsha,9802000001,Walk-in\n'))
+        lead = Lead.objects.get(full_name='Asha')
+        response = self.client.patch(
+            f'/api/leads/{lead.pk}/', {'custom_data': {'has_laptop': True}}, format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        lead.refresh_from_db()
+        self.assertEqual(lead.custom_data, {'has_laptop': True, 'import_file': 'leads.csv'})
+
+    # --------------------------------------------------------- template
+
+    def test_templates(self):
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+
+        response = self.client.get('/api/leads/import-template/')
+        self.assertEqual(response.status_code, 200)
+        text = response.content.decode('utf-8-sig')
+        self.assertTrue(text.startswith('Full name,Phone,Second phone,Email,Lead type'))
+
+        response = self.client.get('/api/leads/import-template/', {'file_type': 'xlsx'})
+        self.assertEqual(response.status_code, 200)
+        book = load_workbook(BytesIO(response.content))
+        self.assertEqual(book.sheetnames, ['Leads', 'Lists'])
+        self.assertEqual(book['Leads']['A1'].value, 'Full name')
+        lists = {book['Lists'].cell(row=1, column=c).value: c for c in range(1, 10)}
+        types = [book['Lists'].cell(row=r, column=lists['Lead type']).value for r in range(2, 20)]
+        self.assertIn('Online', types)
+        self.assertTrue(book['Leads'].data_validations.dataValidation)
+
+    # ----------------------------------------------------------- export
+
+    def test_export_csv_has_every_column_and_reads_back(self):
+        lead = Lead.objects.create(
+            full_name='राम थापा', phone='9801234567', email='ram@test.com', lead_type=self.walk_in,
+            source=self.facebook, status=self.new, primary_course=self.python, branch=self.ktm,
+            assigned_counselor=self.counselor, notes='Hello', expected_revenue=Decimal('30000'),
+        )
+        lead.tags.add(self.hot)
+        response = self.client.get('/api/leads/export_csv/', {'ordering': 'id'})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response['Content-Disposition'].startswith('attachment; filename="leads-'))
+        self.assertTrue(response.content.startswith('﻿'.encode('utf-8')), 'Excel needs the BOM')
+        import csv as _csv
+        rows = list(_csv.DictReader(StringIO(response.content.decode('utf-8-sig'))))
+        self.assertEqual(len(rows), 2)
+        row = rows[1]
+        self.assertEqual(row['Full name'], 'राम थापा')
+        self.assertEqual(row['Lead type'], 'Walk-in')
+        self.assertEqual((row['Course'], row['Branch'], row['Counselor']), ('Python', 'Kathmandu', 'Sita Rai'))
+        self.assertEqual((row['Tags'], row['Status'], row['Notes']), ('Hot', 'New', 'Hello'))
+
+        # The same file reads back: the names match and the phone makes it a duplicate.
+        # Old Lead has no lead type, so it needs a default.
+        response = self._preview(
+            self._csv(response.content.decode('utf-8-sig'), name='leads-back.csv'),
+            default_lead_type=self.online.pk,
+        )
+        self.assertEqual(response.data['duplicates'], 2, response.data)
+        self.assertEqual(self._rows(response)[3]['counselor'], 'Sita Rai')
+        self.assertIn('Reference', response.data['ignored'])
+
+    def test_export_follows_filters_ids_and_branch(self):
+        other = Lead.objects.create(full_name='Pokhara Lead', phone='9805550000', branch=self.pkr)
+        archived = Lead.objects.create(full_name='Archived', phone='9805550001', is_archived=True)
+
+        def names(**params):
+            import csv as _csv
+            response = self.client.get('/api/leads/export_csv/', params)
+            return sorted(r['Full name'] for r in _csv.DictReader(StringIO(response.content.decode('utf-8-sig'))))
+
+        self.assertEqual(names(), ['Old Lead', 'Pokhara Lead'])
+        self.assertEqual(names(include_archived='true'), ['Archived', 'Old Lead', 'Pokhara Lead'])
+        self.assertEqual(names(ids=f'{other.pk},{archived.pk}'), ['Pokhara Lead'])
+        self.assertEqual(names(search='Pokhara'), ['Pokhara Lead'])
+
+        self.client.force_authenticate(self.counselor)
+        self.assertEqual(names(), ['Old Lead'])
+
+    def test_export_excel(self):
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+
+        response = self.client.get('/api/leads/export_csv/', {'file_type': 'xlsx'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response['Content-Type'],
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        sheet = load_workbook(BytesIO(response.content)).active
+        self.assertEqual(sheet['A1'].value, 'Reference')
+        self.assertEqual(sheet['B2'].value, 'Old Lead')
+        self.assertEqual(sheet['C2'].value, '+977 980-111-2222')

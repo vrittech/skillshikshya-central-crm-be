@@ -1,6 +1,7 @@
 """The emails sent about leads and students, and who gets each one.
 
-- Lead assigned: to the counselor the lead is given to.
+- Lead assigned: to the counselor the lead is given to. An import sends
+  one email per counselor listing all the leads they got.
 - Enrollment received: to the lead, when an enrollment is saved as pending.
 - Enrollment confirmed: to the student, with the fee invoice attached.
 - Payment received: to the student, with the receipt attached.
@@ -131,6 +132,36 @@ def lead_assigned(lead, *, user=None):
         lead=lead, branch=lead.branch, user=user,
     )
 
+
+
+def leads_assigned(counselor, leads, *, user=None):
+    """To a counselor given several leads at once (an import): one email for all."""
+    if user is not None and user.pk == counselor.pk:
+        return None
+    shown = leads[:50]
+    return queue_email(
+        EmailLog.Kind.LEAD_ASSIGNED,
+        to=counselor.email,
+        subject=f'{len(leads)} new leads assigned to you',
+        template='lead/emails/leads_assigned.html',
+        context={
+            'counselor_name': counselor.name or counselor.email,
+            'count': len(leads),
+            'leads': [
+                {
+                    'name': lead.full_name,
+                    'phone': lead.phone or '',
+                    'course': lead.primary_course.name if lead.primary_course_id else '',
+                    'url': f'{_frontend()}/leads/{lead.pk}',
+                }
+                for lead in shown
+            ],
+            'more': len(leads) - len(shown),
+            'leads_url': f'{_frontend()}/leads',
+            'assigned_by': (user.name or user.email) if user else '',
+        },
+        user=user,
+    )
 
 def enrollment_received(enrollment, *, user=None):
     """To the lead, when an enrollment is saved as pending."""
