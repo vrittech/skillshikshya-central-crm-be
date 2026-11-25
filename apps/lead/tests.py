@@ -178,6 +178,28 @@ class GlobalCallListTests(APITestCase):
             [r['id'] for r in response.data['results']], [self.recent_call.id],
         )
 
+    def test_date_only_end_includes_final_npt_second(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from django.utils import timezone as tz
+        from apps.lead.models import LeadCall
+        end_of_day = LeadCall.objects.create(
+            lead=self.lead,
+            call_timestamp=tz.make_aware(datetime(2026, 7, 1, 23, 59, 59, 999999), ZoneInfo('Asia/Kathmandu')),
+            direction='outbound', caller='End of day', phone_number='9811111111',
+            duration_seconds=10, branch=self.branch,
+        )
+        next_day = LeadCall.objects.create(
+            lead=self.lead,
+            call_timestamp=tz.make_aware(datetime(2026, 7, 2, 0, 0), ZoneInfo('Asia/Kathmandu')),
+            direction='outbound', caller='Next day', phone_number='9811111111',
+            duration_seconds=10, branch=self.branch,
+        )
+        response = self.client.get('/api/calls/?call_timestamp__lte=2026-07-01')
+        ids = [row['id'] for row in response.data['results']]
+        self.assertIn(end_of_day.id, ids)
+        self.assertNotIn(next_day.id, ids)
+
     def test_search(self):
         response = self.client.get('/api/calls/?search=Counselor Nine')
         self.assertEqual(response.data['count'], 1)
@@ -192,7 +214,63 @@ class GlobalCallListTests(APITestCase):
             email='br@test.com', name='BR User', password='x',
             branch=other_branch,
         )
-        LeadCall.objects.filter(id=self.recent_call.id).update(branch=None)
+        LeadCall.objects.filter(id=self.recent_call.id).update(branch=other_branch)
         self.client.force_authenticate(other_admin)
         response = self.client.get('/api/calls/')
         self.assertNotIn(self.recent_call.id, [r['id'] for r in response.data['results']])
+
+    def test_unassigned_non_staff_user_sees_no_calls(self):
+        unassigned = User.objects.create_user(
+            email='unassigned@test.com', name='Unassigned', password='x',
+        )
+        self.client.force_authenticate(unassigned)
+        response = self.client.get('/api/calls/')
+        self.assertEqual(response.data['count'], 0)
+
+    def test_summary_and_export_share_branch_scope_and_filters(self):
+        from apps.lead.models import LeadCall
+        LeadCall.objects.create(
+            lead=self.lead, call_timestamp=self.recent_call.call_timestamp,
+            direction='outbound', caller='Unconnected', phone_number='9811111111',
+            duration_seconds=0, created_by=self.admin, branch=self.branch,
+        )
+        summary = self.client.get(f'/api/calls/summary/?branch_id={self.branch.id}')
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(summary.data['total_calls'], 3)
+        self.assertEqual(summary.data['talk_seconds'], 330)
+        self.assertEqual(summary.data['connect_rate'], 66.7)
+        listing = self.client.get(f'/api/calls/?branch_id={self.branch.id}&page_size=100')
+        self.assertEqual(summary.data['total_calls'], listing.data['count'])
+        export = self.client.get(f'/api/calls/export_csv/?branch_id={self.branch.id}')
+        self.assertEqual(export.status_code, 200)
+        self.assertIn('Date & time (NPT)', export.content.decode('utf-8-sig'))
+        self.assertIn('Call Person', export.content.decode('utf-8-sig'))
+
+    def test_query_count_is_constant_as_call_rows_grow(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from apps.lead.models import LeadCall
+
+        def measured(url):
+            with CaptureQueriesContext(connection) as queries:
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 200)
+            return len(queries)
+
+        endpoints = [
+            '/api/calls/?page_size=100',
+            '/api/calls/summary/',
+            '/api/calls/export_csv/',
+        ]
+        small_counts = [measured(url) for url in endpoints]
+        LeadCall.objects.bulk_create([
+            LeadCall(
+                lead=self.lead, call_timestamp=self.recent_call.call_timestamp,
+                direction='outbound', caller=f'Caller {index}',
+                phone_number='9811111111', duration_seconds=index,
+                created_by=self.counselor, branch=self.branch,
+            )
+            for index in range(30)
+        ])
+        large_counts = [measured(url) for url in endpoints]
+        self.assertEqual(small_counts, large_counts)

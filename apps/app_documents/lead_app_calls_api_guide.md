@@ -9,6 +9,8 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | Method | Endpoint | Description | Access |
 |--------|----------|-------------|--------|
 | GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated |
+| GET | `/api/calls/summary/` | Filtered call totals, talk time, connect rate, daily counts and top callers | Authenticated |
+| GET | `/api/calls/export_csv/` | CSV export of all calls matching the supplied filters | Authenticated |
 | GET | `/api/leads/{lead_id}/calls/` | List calls for one lead (paginated) | Authenticated |
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
@@ -32,6 +34,10 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 | `search` | Matches caller, phone number, outcome, notes, lead name & reference number |
 | `ordering` | `call_timestamp`, `duration_seconds`, `created_at` (prefix `-` for desc) |
 | `page` / `page_size` | Standard pagination |
+
+### Summary and export
+
+`GET /api/calls/summary/` accepts the same search, direction, caller, branch, and date filters as the list. `GET /api/calls/export_csv/` uses those filters as well, but exports every matching result rather than the current page. Date-only timestamp bounds (`YYYY-MM-DD`) are interpreted as inclusive Nepal calendar days. Nonstaff users are restricted to calls whose call and lead both belong to their assigned branch; users without an assigned branch receive no calls.
 
 **Example response row:**
 ```json
