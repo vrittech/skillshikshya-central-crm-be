@@ -120,14 +120,27 @@ def delete_voice_note_file_task(key):
     delete_file(key)
 
 
+@shared_task(autoretry_for=(Exception,), retry_backoff=30, retry_backoff_max=3600, retry_jitter=True, max_retries=8, acks_late=True, ignore_result=True)
+def upload_voice_note_file_task(key, content_type):
+    """Move a just-saved recording from the local media folder to R2."""
+    from apps.lead.voice_notes import upload_file
+
+    result = upload_file(key, content_type)
+    logger.info('Voice note %s: %s', key, result)
+    return result
+
+
 @shared_task(ignore_result=True)
 def sweep_voice_note_files_task():
     """Nightly (beat): delete recordings no voice note points to. See apps.lead.voice_sweep.
 
     No retries: if storage is down tonight, tomorrow night's run picks it up.
     """
-    from apps.lead.voice_sweep import sweep_orphan_files
+    from apps.lead.voice_sweep import queue_waiting_uploads, sweep_orphan_files
 
     result = sweep_orphan_files()
     logger.info('Voice note sweep: %s', result.summary())
+    queued = queue_waiting_uploads()
+    if queued:
+        logger.info('Voice note sweep: queued %s local recordings to move to R2', queued)
     return result.summary()

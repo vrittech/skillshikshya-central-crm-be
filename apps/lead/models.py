@@ -474,6 +474,10 @@ class LeadCourseInterest(models.Model):
         null=True, blank=True, related_name='lead_interests',
     )
     course_name = models.CharField(max_length=255, null=True, blank=True)
+    # What the person asked about, and the counselor's notes on it. The notes
+    # can also be a recording: a VoiceNote on this enquiry.
+    about = models.CharField(max_length=255, blank=True, default='')
+    description = models.TextField(blank=True, default='')
     is_primary = models.BooleanField(default=False)
     interest_level = models.CharField(
         max_length=10, choices=InterestLevel.choices, default=InterestLevel.MEDIUM,

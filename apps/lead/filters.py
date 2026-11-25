@@ -1,4 +1,6 @@
 import django_filters
+from django.db.models import Exists, OuterRef
+
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment,
@@ -86,6 +88,24 @@ class LeadTypeFilter(django_filters.FilterSet):
         fields = ['name', 'is_active']
 
 
+def has_enrollment_in(status, request=None):
+    """Condition for leads with an enrollment in `status`.
+
+    A branch user counts only enrollments taken at their branch; staff count
+    every branch, or the one picked with ?branch_id.
+    """
+    enrollments = Enrollment.objects.filter(lead=OuterRef('pk'), status=status)
+    user = getattr(request, 'user', None)
+    if user is not None and user.is_authenticated:
+        if user.is_staff or user.is_superuser:
+            branch_id = request.query_params.get('branch_id')
+        else:
+            branch_id = getattr(user, 'branch_id', None)
+        if branch_id:
+            enrollments = enrollments.filter(branch_id=branch_id)
+    return Exists(enrollments)
+
+
 class LeadFilter(django_filters.FilterSet):
     full_name = django_filters.CharFilter(lookup_expr='icontains')
     phone = django_filters.CharFilter(lookup_expr='icontains')
@@ -102,6 +122,13 @@ class LeadFilter(django_filters.FilterSet):
     created_date = django_filters.DateFilter(field_name='created_at', lookup_expr='date')
     from_date = django_filters.DateFilter(field_name='created_at', lookup_expr='date__gte')
     to_date = django_filters.DateFilter(field_name='created_at', lookup_expr='date__lte')
+    # Leads with at least one enrollment in this status: ?enrollment_status=pending.
+    enrollment_status = django_filters.ChoiceFilter(
+        choices=Enrollment.Status.choices, method='filter_enrollment_status',
+    )
+
+    def filter_enrollment_status(self, queryset, name, value):
+        return queryset.filter(has_enrollment_in(value, self.request))
 
     class Meta:
         model = Lead

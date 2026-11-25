@@ -16,6 +16,10 @@ orphaned, nothing is deleted. That pattern means the CRM is looking at the
 wrong database or the wrong bucket (for example a laptop saved with the live
 R2 keys), not a few failed deletes. --force overrides it.
 
+The same run also queues again any recording still waiting in the local
+media folder to move to R2 (Redis was down when it was saved, or the upload
+job gave up). Those files are never deleted here: they may be the only copy.
+
 Runs from Celery beat every night (settings.CELERY_BEAT_SCHEDULE) and by hand
 with `python manage.py sweep_voice_note_files --dry-run`.
 """
@@ -27,7 +31,7 @@ from django.core.files.storage import default_storage
 from django.utils import timezone
 
 from apps.lead.models import VoiceNote
-from apps.lead.voice_notes import delete_file, r2_in_use
+from apps.lead.voice_notes import delete_file, queue_upload, r2_in_use
 from apps.global_config.utilities.r2_storage import get_r2_client
 
 logger = logging.getLogger(__name__)
@@ -141,3 +145,25 @@ def sweep_orphan_files(*, dry_run=False, force=False, min_age=MIN_AGE, now=None)
         else:
             result.deleted += 1
     return result
+
+
+def queue_waiting_uploads(*, min_age=timedelta(hours=1), now=None):
+    """With R2 in use, queue the move again for local recordings that have a voice note.
+
+    Files younger than `min_age` are left to the job queued when they were
+    saved. Returns how many were queued.
+    """
+    if not r2_in_use():
+        return 0
+    cutoff = (now or timezone.now()) - min_age
+    queued = 0
+    for page in _pages(_local_files(PREFIX.rstrip('/'))):
+        types = dict(
+            VoiceNote.objects.filter(file_key__in=[key for key, _ in page])
+            .values_list('file_key', 'content_type')
+        )
+        for key, modified in page:
+            if key in types and modified <= cutoff:
+                queue_upload(key, types[key])
+                queued += 1
+    return queued

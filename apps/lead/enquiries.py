@@ -42,7 +42,7 @@ def open_enquiry_for(lead, course):
 
 @transaction.atomic
 def add_enquiry(lead, *, course=None, course_name=None, user=None, source=None, counselor=None,
-                is_primary=False, interest_level=None, branch=None):
+                is_primary=False, interest_level=None, branch=None, about='', description=''):
     """A new enquiry, at New. One open enquiry per course per lead.
 
     The source and counselor default to the lead's; the branch to the branch
@@ -54,6 +54,8 @@ def add_enquiry(lead, *, course=None, course_name=None, user=None, source=None, 
         lead=lead,
         course=course,
         course_name=course_name if course is None else None,
+        about=(about or '').strip(),
+        description=(description or '').strip(),
         is_primary=is_primary,
         interest_level=interest_level or LeadCourseInterest.InterestLevel.MEDIUM,
         source=source or lead.source,

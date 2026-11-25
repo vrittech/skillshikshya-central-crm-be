@@ -2684,6 +2684,293 @@ class VoiceNoteSweepTests(APITestCase):
             sweep_voice_note_files_task.apply()
         self.assertIn('1 deleted', logs.output[0])
 
+
+class FakeBucket:
+    """Just enough of an R2 client for the voice note tests."""
+
+    def __init__(self):
+        self.objects = {}
+
+    def put_object(self, Bucket, Key, Body, ContentType):
+        self.objects[Key] = (Body, ContentType)
+
+    def get_object(self, Bucket, Key):
+        from io import BytesIO
+
+        return {'Body': BytesIO(self.objects[Key][0])}
+
+    def delete_object(self, Bucket, Key):
+        self.objects.pop(Key, None)
+
+
+class VoiceNoteUploadJobTests(APITestCase):
+    """A recording is saved locally at once; the worker then moves it to R2."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        from unittest import mock
+
+        from django.test import override_settings
+
+        from apps.lead.tasks import upload_voice_note_file_task
+
+        media = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, media, ignore_errors=True)
+        r2 = override_settings(
+            MEDIA_ROOT=media, R2_ACCOUNT_ID='a' * 32, R2_ACCESS_KEY_ID='k',
+            R2_SECRET_ACCESS_KEY='s', R2_BUCKET_NAME='crm-files',
+        )
+        r2.enable()
+        self.addCleanup(r2.disable)
+        self.bucket = FakeBucket()
+        client = mock.patch('apps.lead.voice_notes.get_r2_client', return_value=self.bucket)
+        client.start()
+        self.addCleanup(client.stop)
+        self.queued = []
+        queue = mock.patch.object(
+            upload_voice_note_file_task, 'delay', side_effect=lambda *args: self.queued.append(args),
+        )
+        queue.start()
+        self.addCleanup(queue.stop)
+
+        self.user = User.objects.create_user(email='rec@test.com', name='Sita', password='pass', is_staff=True)
+        self.client.force_authenticate(self.user)
+        self.course = Course.objects.create(name='Python', full_amount=30000)
+        self.lead = Lead.objects.create(full_name='Ram Thapa', phone='9800000970')
+        self.enquiry = LeadCourseInterest.objects.create(lead=self.lead, course=self.course)
+
+    def _record(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                f'/api/leads/{self.lead.id}/voice-notes/',
+                {'file': SimpleUploadedFile('n.webm', b'voice-bytes', content_type='audio/webm'),
+                 'enquiry': self.enquiry.id, 'duration_seconds': 5},
+                format='multipart',
+            )
+        self.assertEqual(response.status_code, 201, response.data)
+        return VoiceNote.objects.get(pk=response.data['id'])
+
+    def _local(self, key):
+        from django.core.files.storage import default_storage
+
+        return default_storage.exists(key)
+
+    def _play(self, note):
+        return self.client.get(f'/api/leads/{self.lead.id}/voice-notes/{note.id}/audio/')
+
+    def _run_queued(self):
+        from apps.lead.tasks import upload_voice_note_file_task
+
+        for args in self.queued:
+            upload_voice_note_file_task.apply(args=args)
+        self.queued.clear()
+
+    def test_saved_locally_then_moved_to_r2_by_the_worker(self):
+        note = self._record()
+        self.assertEqual(self.queued, [(note.file_key, 'audio/webm')])
+        self.assertTrue(self._local(note.file_key))
+        self.assertEqual(self.bucket.objects, {})
+        self.assertEqual(self._play(note).content, b'voice-bytes')
+
+        self._run_queued()
+        self.assertFalse(self._local(note.file_key))
+        self.assertEqual(self.bucket.objects[note.file_key], (b'voice-bytes', 'audio/webm'))
+        self.assertEqual(self._play(note).content, b'voice-bytes')
+
+    def test_running_the_move_twice_is_harmless(self):
+        from apps.lead.voice_notes import upload_file
+
+        note = self._record()
+        self.assertIn('moved to R2', upload_file(note.file_key, 'audio/webm'))
+        self.assertIn('nothing to move', upload_file(note.file_key, 'audio/webm'))
+        self.assertIn(note.file_key, self.bucket.objects)
+
+    def test_note_deleted_before_the_move(self):
+        from apps.lead.voice_notes import upload_file
+
+        note = self._record()
+        key = note.file_key
+        VoiceNote.objects.filter(pk=note.pk).delete()  # no signal: the file is still there
+        self.assertIn('voice note was deleted', upload_file(key, 'audio/webm'))
+        self.assertFalse(self._local(key))
+        self.assertEqual(self.bucket.objects, {})
+
+    def test_r2_down_retries_and_the_file_keeps_playing(self):
+        from unittest import mock
+
+        from apps.lead.tasks import upload_voice_note_file_task
+
+        note = self._record()
+        with mock.patch.object(self.bucket, 'put_object', side_effect=ConnectionError('R2 down')):
+            result = upload_voice_note_file_task.apply(args=[note.file_key, 'audio/webm'])
+        self.assertTrue(result.failed())
+        self.assertTrue(self._local(note.file_key))
+        self.assertEqual(self._play(note).content, b'voice-bytes')
+
+    def test_redis_down_keeps_it_local_until_the_nightly_run(self):
+        from datetime import timedelta
+        from unittest import mock
+
+        from apps.lead.tasks import upload_voice_note_file_task
+        from apps.lead.voice_sweep import queue_waiting_uploads
+
+        with mock.patch.object(upload_voice_note_file_task, 'delay', side_effect=ConnectionError('no redis')), \
+                self.assertLogs('apps.lead.voice_notes', level='WARNING'):
+            note = self._record()
+        self.assertTrue(self._local(note.file_key))
+        self.assertEqual(queue_waiting_uploads(), 0)  # too new: its own job may still run
+        later = timezone.now() + timedelta(hours=2)
+        self.assertEqual(queue_waiting_uploads(now=later), 1)
+        self._run_queued()
+        self.assertIn(note.file_key, self.bucket.objects)
+        self.assertEqual(queue_waiting_uploads(now=later), 0)
+
+    def test_without_r2_it_stays_local_and_nothing_is_queued(self):
+        from django.test import override_settings
+
+        with override_settings(R2_ACCOUNT_ID='', R2_ACCESS_KEY_ID='', R2_SECRET_ACCESS_KEY='', R2_BUCKET_NAME=''):
+            note = self._record()
+            self.assertEqual(self.queued, [])
+            self.assertTrue(self._local(note.file_key))
+            self.assertEqual(self._play(note).content, b'voice-bytes')
+
+    def test_delete_removes_it_from_both_places(self):
+        from apps.lead.voice_notes import delete_file
+
+        waiting = self._record()
+        moved = self._record()
+        self.queued = [q for q in self.queued if q[0] == moved.file_key]
+        self._run_queued()
+        for note in (waiting, moved):
+            delete_file(note.file_key)
+            self.assertFalse(self._local(note.file_key))
+            self.assertNotIn(note.file_key, self.bucket.objects)
+
+
+class EnquiryDetailsTests(APITestCase):
+    """Adding an enquiry: what it is about, and a description typed or recorded."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        from unittest import mock
+
+        from django.test import override_settings
+
+        from apps.lead.tasks import upload_voice_note_file_task
+
+        media = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, media, ignore_errors=True)
+        local = override_settings(
+            MEDIA_ROOT=media, R2_ACCOUNT_ID='', R2_ACCESS_KEY_ID='', R2_SECRET_ACCESS_KEY='', R2_BUCKET_NAME='',
+        )
+        local.enable()
+        self.addCleanup(local.disable)
+        queue = mock.patch.object(upload_voice_note_file_task, 'delay')
+        self.delay = queue.start()
+        self.addCleanup(queue.stop)
+        self.user = User.objects.create_user(email='enq@test.com', name='Sita', password='pass', is_staff=True)
+        self.client.force_authenticate(self.user)
+        self.course = Course.objects.create(name='Python', full_amount=30000)
+        self.lead = Lead.objects.create(full_name='Ram Thapa', phone='9800000980')
+        self.url = f'/api/leads/{self.lead.id}/course-interests/'
+
+    def _post(self, data, fmt='json', expect=201):
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(self.url, data, format=fmt)
+        self.assertEqual(response.status_code, expect, response.data)
+        return response.data
+
+    def _audio(self, content_type='audio/webm'):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        return SimpleUploadedFile('d.webm', b'voice-bytes', content_type=content_type)
+
+    def test_course_only_still_works(self):
+        # The lead form and the phone match box add enquiries with a course only.
+        data = self._post({'course': self.course.id})
+        self.assertEqual((data['about'], data['description']), ('', ''))
+
+    def test_typed_description(self):
+        data = self._post({'course': self.course.id, 'about': '  Weekend batch ', 'description': ' Asked the fee. '})
+        self.assertEqual((data['about'], data['description']), ('Weekend batch', 'Asked the fee.'))
+        self.assertFalse(VoiceNote.objects.exists())
+
+    def test_recorded_description_becomes_a_voice_note_on_the_enquiry(self):
+        data = self._post(
+            {'course': self.course.id, 'about': 'Fees', 'recording': self._audio(), 'recording_seconds': 7},
+            fmt='multipart',
+        )
+        note = VoiceNote.objects.get()
+        self.assertEqual((note.enquiry_id, note.duration_seconds, note.created_by), (data['id'], 7, self.user))
+        self.assertEqual(data['description'], '')
+        audio = self.client.get(f'/api/leads/{self.lead.id}/voice-notes/{note.id}/audio/')
+        self.assertEqual(audio.content, b'voice-bytes')
+
+    def test_bad_recording_saves_nothing(self):
+        refused = self._post(
+            {'course': self.course.id, 'about': 'Fees', 'recording': self._audio('application/pdf')},
+            fmt='multipart', expect=400,
+        )
+        self.assertEqual(refused['recording'], ['Only a sound recording can be saved.'])
+        self.assertFalse(LeadCourseInterest.objects.exists())
+        self.assertFalse(VoiceNote.objects.exists())
+
+    def test_refused_enquiry_keeps_no_recording(self):
+        LeadCourseInterest.objects.create(lead=self.lead, course=self.course)
+        self._post(
+            {'course': self.course.id, 'about': 'Fees', 'recording': self._audio()},
+            fmt='multipart', expect=400,
+        )
+        self.assertFalse(VoiceNote.objects.exists())
+
+
+class PendingEnrollmentTests(SeatTestBase):
+    """The lead list card: leads whose enrollment is pending, not yet confirmed."""
+
+    def setUp(self):
+        super().setUp()
+        from apps.branch.models import Branch
+
+        self.ktm = Branch.objects.create(name='Kathmandu', code='KTM')
+        self.pkr = Branch.objects.create(name='Pokhara', code='PKR')
+
+    def _with_enrollment(self, status_, branch=None):
+        lead = self._lead()
+        lead.branch = branch
+        lead.save()
+        Enrollment.objects.create(
+            lead=lead, course=self.course, enrollment_date=date.today(), status=status_,
+            listed_fee=30000, agreed_amount=30000, branch=branch,
+        )
+        return lead
+
+    def test_card_count_and_list(self):
+        pending = self._with_enrollment('pending', self.ktm)
+        pending_pkr = self._with_enrollment('pending', self.pkr)
+        self._with_enrollment('confirmed', self.ktm)
+        binned = self._with_enrollment('pending', self.ktm)
+        binned.is_deleted = True
+        binned.save()
+        self._lead()
+
+        self.assertEqual(self.client.get('/api/leads/summary/').data, {'pending_enrollment': 2})
+        listed = self.client.get('/api/leads/', {'enrollment_status': 'pending'}).data['results']
+        self.assertEqual(sorted(r['id'] for r in listed), sorted([pending.id, pending_pkr.id]))
+        self.assertEqual(self.client.get('/api/leads/', {'enrollment_status': 'nope'}).status_code, 400)
+
+    def test_branch_counts_its_own(self):
+        pending = self._with_enrollment('pending', self.ktm)
+        self._with_enrollment('pending', self.pkr)
+        clerk = User.objects.create_user(email='ktm@test.com', name='Ktm', password='pass', branch=self.ktm)
+        self.client.force_authenticate(clerk)
+        self.assertEqual(self.client.get('/api/leads/summary/').data, {'pending_enrollment': 1})
+        listed = self.client.get('/api/leads/', {'enrollment_status': 'pending'}).data['results']
+        self.assertEqual([r['id'] for r in listed], [pending.id])
+
 class LeadTimelineTests(SeatTestBase):
     """One list with everything about the person, newest first."""
 

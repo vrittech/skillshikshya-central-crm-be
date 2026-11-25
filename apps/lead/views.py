@@ -1,6 +1,7 @@
 import csv
 from datetime import datetime
 
+from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.db.models.functions import Coalesce
 from django.http import HttpResponse
@@ -9,6 +10,7 @@ from django.utils import timezone
 
 from rest_framework import mixins, viewsets, status
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
@@ -277,6 +279,15 @@ class LeadViewSet(viewsets.ModelViewSet):
         return [p() for p in permission_classes]
 
     @action(detail=False, methods=['get'])
+    def summary(self, request):
+        """Counts for the cards on the lead list, over every lead the user can see."""
+        from apps.lead.filters import has_enrollment_in
+
+        leads = LeadBranchFilterBackend().filter_queryset(request, self.get_queryset(), self)
+        pending = leads.filter(has_enrollment_in(Enrollment.Status.PENDING, request))
+        return Response({'pending_enrollment': pending.count()})
+
+    @action(detail=False, methods=['get'])
     def export_csv(self, request):
         queryset = self.filter_queryset(self.get_queryset())
         response = HttpResponse(content_type='text/csv')
@@ -508,6 +519,7 @@ class LeadCourseInterestViewSet(viewsets.ModelViewSet):
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
     filterset_class = LeadCourseInterestFilter
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
     ordering_fields = ['created_at']
     ordering = ['-is_primary', '-created_at']
 
@@ -530,21 +542,50 @@ class LeadCourseInterestViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         from apps.lead.enquiries import add_enquiry
 
+        from apps.lead import voice_notes
+
         lead = get_object_or_404(Lead, pk=self.kwargs['lead_pk'], is_deleted=False)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        enquiry = add_enquiry(
-            lead,
-            course=data.get('course'),
-            course_name=data.get('course_name'),
-            user=request.user,
-            source=data.get('source'),
-            counselor=data.get('counselor'),
-            is_primary=data.get('is_primary', False),
-            interest_level=data.get('interest_level'),
-        )
+        recording = self._checked_recording(request, lead)
+        with transaction.atomic():
+            enquiry = add_enquiry(
+                lead,
+                course=data.get('course'),
+                course_name=data.get('course_name'),
+                user=request.user,
+                source=data.get('source'),
+                counselor=data.get('counselor'),
+                is_primary=data.get('is_primary', False),
+                interest_level=data.get('interest_level'),
+                about=data.get('about', ''),
+                description=data.get('description', ''),
+            )
+            if recording:
+                voice_notes.record(
+                    recording['file'], lead=lead, enquiry=enquiry,
+                    duration_seconds=recording.get('duration_seconds', 0), user=request.user,
+                )
         return self._reply(enquiry, status.HTTP_201_CREATED)
+
+    def _checked_recording(self, request, lead):
+        """A description recorded instead of typed: multipart `recording` (+ `recording_seconds`).
+
+        It becomes a voice note on the new enquiry. About and description stay
+        optional here: the lead form and the phone match box add enquiries
+        with a course only. The Add enquiry form asks for them.
+        """
+        file = request.FILES.get('recording')
+        if not file:
+            return None
+        check = VoiceNoteSerializer(
+            data={'file': file, 'duration_seconds': request.data.get('recording_seconds') or 0},
+            context={'lead_pk': lead.pk},
+        )
+        if not check.is_valid():
+            raise ValidationError({'recording': [str(e) for errs in check.errors.values() for e in errs]})
+        return check.validated_data
 
     def perform_destroy(self, instance):
         from apps.lead.services import ActionRefused
@@ -1034,16 +1075,11 @@ class VoiceNoteViewSet(
         from apps.lead import voice_notes
 
         lead = visible_lead(self.request, self.kwargs['lead_pk'])
-        file = serializer.validated_data.pop('file')
-        content_type = voice_notes.base_type(file.content_type)
-        key = voice_notes.save_file(file, lead_id=lead.id, content_type=content_type)
-        serializer.save(
-            lead=lead,
-            file_key=key,
-            content_type=content_type,
-            size_bytes=file.size,
-            branch=getattr(self.request.user, 'branch', None) or lead.branch,
-            created_by=self.request.user,
+        data = serializer.validated_data
+        serializer.instance = voice_notes.record(
+            data['file'], lead=lead, enquiry=data.get('enquiry'),
+            duration_seconds=data.get('duration_seconds', 0), note=data.get('note', ''),
+            user=self.request.user,
         )
 
     def destroy(self, request, *args, **kwargs):
