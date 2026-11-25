@@ -255,12 +255,17 @@ class LeadViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         from apps.lead.enquiries import ensure_primary_enquiry
 
+        about = serializer.validated_data.pop('enquiry_about', '')
+        description = serializer.validated_data.pop('enquiry_description', '')
         lead = serializer.save(created_by=self.request.user)
-        ensure_primary_enquiry(lead, user=self.request.user)
+        ensure_primary_enquiry(lead, user=self.request.user, about=about, description=description)
 
     def perform_update(self, serializer):
         from apps.lead.enquiries import ensure_primary_enquiry
 
+        # Enquiry details are set when the lead is made; later, on the enquiry itself.
+        serializer.validated_data.pop('enquiry_about', None)
+        serializer.validated_data.pop('enquiry_description', None)
         serializer.instance._changed_by = self.request.user
         lead = serializer.save(updated_by=self.request.user)
         ensure_primary_enquiry(lead, user=self.request.user)

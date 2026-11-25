@@ -136,8 +136,11 @@ def win_for_enrollment(enrollment, *, user):
     return _change(enquiry, Stage.WON, user=user, note='Enrollment confirmed.', fields=['enrollment'])
 
 
-def ensure_primary_enquiry(lead, *, user):
-    """The lead's main course always has an enquiry, marked primary."""
+def ensure_primary_enquiry(lead, *, user, about='', description=''):
+    """The lead's main course always has an enquiry, marked primary.
+
+    `about` and `description` go on the enquiry only when it is made here.
+    """
     course = lead.primary_course
     if course is None:
         return None
@@ -146,7 +149,9 @@ def ensure_primary_enquiry(lead, *, user):
         .exclude(stage=Stage.LOST).order_by('-created_at').first()
     )
     if enquiry is None:
-        enquiry = add_enquiry(lead, course=course, user=user, is_primary=True)
+        enquiry = add_enquiry(
+            lead, course=course, user=user, is_primary=True, about=about, description=description,
+        )
     lead.course_interests.exclude(pk=enquiry.pk).filter(is_primary=True).update(is_primary=False)
     if not enquiry.is_primary:
         enquiry.is_primary = True

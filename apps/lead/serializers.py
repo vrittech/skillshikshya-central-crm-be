@@ -498,6 +498,11 @@ class LeadSerializer(serializers.ModelSerializer):
     call_count = serializers.SerializerMethodField()
     next_followup = serializers.SerializerMethodField()
     enrollment_summary = serializers.SerializerMethodField()
+    # The enquiry for the primary course. On create, enquiry_about and
+    # enquiry_description go on it (the view takes them out before saving).
+    primary_enquiry = serializers.SerializerMethodField()
+    enquiry_about = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=255)
+    enquiry_description = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     class Meta:
         model = Lead
@@ -507,6 +512,9 @@ class LeadSerializer(serializers.ModelSerializer):
             'is_converted', 'converted_at', 'is_deleted', 'deleted_at', 'deleted_by',
             'lead_score',
         ]
+
+    def get_primary_enquiry(self, obj):
+        return obj.course_interests.filter(is_primary=True).values_list('id', flat=True).first()
 
     def get_call_count(self, obj):
         return obj.calls.count()

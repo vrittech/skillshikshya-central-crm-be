@@ -2928,6 +2928,43 @@ class EnquiryDetailsTests(APITestCase):
         self.assertFalse(VoiceNote.objects.exists())
 
 
+class NewLeadEnquiryTests(APITestCase):
+    """The New Lead form: what the person asked about goes on the primary course's enquiry."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(email='new@test.com', name='Sita', password='pass', is_staff=True)
+        self.client.force_authenticate(self.user)
+        self.course = Course.objects.create(name='Python', full_amount=30000)
+        from apps.lead.models import LeadType
+
+        self.lead_type = LeadType.objects.create(name='Student')
+
+    def _create(self, **extra):
+        body = {'full_name': 'Ram Thapa', 'phone': '9800000990', 'lead_type': self.lead_type.id, **extra}
+        response = self.client.post('/api/leads/', body, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        return response.data
+
+    def test_details_go_on_the_primary_enquiry(self):
+        data = self._create(primary_course=self.course.id, enquiry_about='Weekend batch',
+                            enquiry_description='Asked the fee.')
+        enquiry = LeadCourseInterest.objects.get(lead_id=data['id'])
+        self.assertEqual(data['primary_enquiry'], enquiry.id)
+        self.assertEqual((enquiry.about, enquiry.description, enquiry.is_primary),
+                         ('Weekend batch', 'Asked the fee.', True))
+        self.assertNotIn('enquiry_about', data)
+
+    def test_without_a_course_there_is_no_enquiry(self):
+        data = self._create(enquiry_about='Fees')
+        self.assertIsNone(data['primary_enquiry'])
+        self.assertFalse(LeadCourseInterest.objects.exists())
+
+    def test_editing_the_lead_leaves_the_enquiry_alone(self):
+        data = self._create(primary_course=self.course.id, enquiry_about='Weekend batch')
+        response = self.client.patch(f'/api/leads/{data["id"]}/', {'enquiry_about': 'Changed', 'notes': 'x'}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(LeadCourseInterest.objects.get().about, 'Weekend batch')
+
 class PendingEnrollmentTests(SeatTestBase):
     """The lead list card: leads whose enrollment is pending, not yet confirmed."""
 
