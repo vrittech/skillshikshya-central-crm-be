@@ -3586,7 +3586,7 @@ class LeadTimelineTests(SeatTestBase):
         self.assertEqual(times, sorted(times, reverse=True))
         self.assertEqual(
             {i['kind'] for i in items},
-            {'lead', 'enquiry', 'call', 'voice_note', 'enrollment', 'batch', 'money', 'email'},
+            {'lead', 'enquiry', 'call', 'voice_note', 'enrollment', 'batch', 'money'},
         )
         titles = {i['title'] for i in items}
         for title in ['Lead added', 'Enquiry added', 'Enquiry won', 'Outbound call', 'Voice note',
@@ -3989,12 +3989,12 @@ class EmailTests(SeatTestBase):
         self._send(log)
         self.assertEqual(mail.outbox[-1].cc, ['accounts@test.com'])
 
-    def test_no_address_keeps_a_not_sent_row_on_the_history(self):
+    def test_no_address_keeps_a_not_sent_row_off_the_history(self):
         enrollment = self._enroll(self.batch)
         [log] = self._logs('enrollment_pending')
         self.assertEqual((log.status, log.error), ('skipped', 'No email address.'))
-        items = self.client.get(f'/api/leads/{enrollment.lead_id}/timeline/', {'kind': 'email'}).data['results']
-        self.assertEqual([i['title'] for i in items], ['Email not sent: Enrollment received'])
+        items = self.client.get(f'/api/leads/{enrollment.lead_id}/timeline/').data['results']
+        self.assertFalse([i for i in items if 'mail' in i['title'].lower()])
 
     def test_a_refused_send_is_kept_with_the_reason(self):
         import smtplib
