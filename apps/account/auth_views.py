@@ -7,7 +7,6 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import (
     TokenObtainPairView,
     TokenRefreshView,
@@ -25,28 +24,17 @@ class RegisterView(APIView):
     queryset = User.objects.none()
 
     def post(self, request):
-        serializer = UserSerializer(data=request.data)
+        """Add a user. The person adding stays signed in as themselves."""
+        serializer = UserSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
-
-        refresh = RefreshToken.for_user(user)
-
-        response = Response(
+        return Response(
             {
                 'message': 'Registration successful',
                 'user': UserSerializer(user).data,
             },
             status=status.HTTP_201_CREATED,
         )
-        response.set_cookie(
-            'access_token', str(refresh.access_token),
-            httponly=True, samesite='Lax', path='/',
-        )
-        response.set_cookie(
-            'refresh_token', str(refresh),
-            httponly=True, samesite='Lax', path='/',
-        )
-        return response
 
 
 class CookieTokenObtainPairView(TokenObtainPairView):
