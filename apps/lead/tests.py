@@ -4558,3 +4558,35 @@ class BranchScopeTests(SeatTestBase):
         for row in (enrollment, payment, followup):
             row.refresh_from_db()
             self.assertEqual(row.branch, self.ktm)
+
+
+class ActionPermissionTests(SeatTestBase):
+    """Adding needs add_; changing an enrollment or payment needs change_."""
+
+    def _user(self, *codenames):
+        from django.contrib.auth.models import Permission
+
+        user = User.objects.create_user(email=f'{"-".join(codenames)}@test.com', name='Clerk', password='pass')
+        user.user_permissions.add(*Permission.objects.filter(codename__in=codenames))
+        return user
+
+    def test_add_only_cannot_change_state(self):
+        enrollment = self._enroll(self.batch)
+        self.client.force_authenticate(self._user('add_enrollment', 'add_payment'))
+        self.assertEqual(self._confirm(enrollment).status_code, 403)
+        for action in ('cancel/', 'status/', 'pause/'):
+            response = self.client.post(self._url(enrollment, action), {'reason': 'x'}, format='json')
+            self.assertEqual(response.status_code, 403, action)
+        self.client.force_authenticate(self.admin)
+        self._confirm(enrollment)
+        payment = enrollment.payments.get()
+        self.client.force_authenticate(self._user('add_payment'))
+        response = self.client.post(self._url(enrollment, f'payments/{payment.id}/void/'), {'reason': 'x'}, format='json')
+        self.assertEqual(response.status_code, 403)
+
+    def test_change_permission_can(self):
+        enrollment = self._enroll(self.batch)
+        self.client.force_authenticate(self._user('change_enrollment'))
+        self.assertEqual(self._confirm(enrollment).status_code, 200)
+        response = self.client.post(self._url(enrollment, 'status/'), {'status': 'active', 'reason': 'x'}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)

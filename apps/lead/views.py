@@ -747,15 +747,18 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
             raise ValidationError({'branch': ['Only staff can move an enrollment to another branch.']})
         serializer.save(updated_by=self.request.user)
 
+    # Actions that change an enrollment need change_enrollment, not add_.
+    STATE_ACTIONS = (
+        'confirm', 'cancel', 'reinstate', 'change_status', 'join_batch', 'move', 'pause', 'resume',
+        'due_dates', 'fee_invoice',
+    )
+
     def get_permissions(self):
-        if self.action in [
-            'create', 'update', 'partial_update', 'destroy', 'confirm', 'cancel', 'reinstate',
-            'change_status', 'join_batch', 'move', 'pause', 'resume', 'due_dates', 'fee_invoice',
-        ]:
-            permission_classes = [IsAuthenticated, IsStaffOrHasPermission]
-        else:
-            permission_classes = [IsAuthenticated]
-        return [p() for p in permission_classes]
+        if self.action in self.STATE_ACTIONS:
+            return [IsAuthenticated(), needs('lead.change_enrollment')()]
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAuthenticated(), IsStaffOrHasPermission()]
+        return [IsAuthenticated()]
 
     def _reason(self, request):
         serializer = ReasonSerializer(data=request.data)
@@ -914,11 +917,11 @@ class PaymentViewSet(viewsets.ModelViewSet):
         services.issue_receipt(payment, user=self.request.user)
 
     def get_permissions(self):
-        if self.action in ['create', 'confirm', 'void']:
-            permission_classes = [IsAuthenticated, IsStaffOrHasPermission]
-        else:
-            permission_classes = [IsAuthenticated]
-        return [p() for p in permission_classes]
+        if self.action in ['confirm', 'void']:
+            return [IsAuthenticated(), needs('lead.change_payment')()]
+        if self.action == 'create':
+            return [IsAuthenticated(), IsStaffOrHasPermission()]
+        return [IsAuthenticated()]
 
     @action(detail=True, methods=['post'])
     def confirm(self, request, *args, **kwargs):
