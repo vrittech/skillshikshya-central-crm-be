@@ -253,7 +253,18 @@ REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'apps.global_config.pagination.CustomPagination',
     'PAGE_SIZE': 10,
     'EXCEPTION_HANDLER': 'apps.global_config.exceptions.exception_handler',
+    # Rate limits for sign in, password reset and the lead intake (apps/global_config/throttles.py).
+    'NUM_PROXIES': int(os.environ['NUM_PROXIES']) if os.environ.get('NUM_PROXIES') else None,
+    'DEFAULT_THROTTLE_RATES': {
+        'login': '10/minute',
+        'password_reset': '5/hour',
+        'lead_intake': '120/hour',
+    },
 }
+
+# The public lead intake (POST /api/public/lead-intake/) needs this value in an
+# X-Intake-Token header. Unset: the intake only works while DEBUG is on.
+LEAD_INTAKE_TOKEN = os.environ.get('LEAD_INTAKE_TOKEN', '')
 
 
 # SimpleJWT

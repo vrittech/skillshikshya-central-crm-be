@@ -17,6 +17,7 @@ from apps.account.serializers.auth_serializers import CustomTokenObtainPairSeria
 from apps.account.serializers.user_serializer import UserSerializer, UserMiniSerializer
 from apps.account.tasks import send_password_changed_email_task, send_reset_link_email_task
 from apps.global_config.permissions import IsStaffOrHasPermission
+from apps.global_config.throttles import LoginThrottle, PasswordResetThrottle
 
 
 class RegisterView(APIView):
@@ -39,6 +40,7 @@ class RegisterView(APIView):
 
 class CookieTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+    throttle_classes = [LoginThrottle]
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -155,6 +157,7 @@ class ChangePasswordView(APIView):
 
 class ForgotPasswordView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [PasswordResetThrottle]
 
     def post(self, request):
         email = request.data.get('email')

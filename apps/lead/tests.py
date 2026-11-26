@@ -1,11 +1,13 @@
 from datetime import date, timedelta
 from decimal import Decimal
 from io import StringIO
+from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.exceptions import ValidationError
 from django.db.models import ProtectedError
+from django.test import override_settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -2675,7 +2677,9 @@ class EnquiryTests(SeatTestBase):
             [('Python', False), ('Java', True)],
         )
 
+    @override_settings(LEAD_INTAKE_TOKEN='t')
     def test_intake_adds_one_enquiry_per_course(self):
+        self.client.credentials(HTTP_X_INTAKE_TOKEN='t')
         response = self.client.post('/api/public/lead-intake/', {
             'name': 'Web Lead', 'phone_number': '9800000777', 'source_name': 'facebook',
             'course_interests': 'Python, Java, Python',
@@ -2783,7 +2787,9 @@ class PhoneMatchTests(APITestCase):
         listed = self.client.get('/api/leads/').data['results']
         self.assertEqual([row['id'] for row in listed], [self.lead.id])
 
+    @override_settings(LEAD_INTAKE_TOKEN='t')
     def test_intake_from_a_known_number_adds_to_the_same_lead(self):
+        self.client.credentials(HTTP_X_INTAKE_TOKEN='t')
         response = self.client.post('/api/public/lead-intake/', {
             'name': 'Hari', 'phone_number': '980-000-0800', 'course_interests': 'Python',
         }, format='json')
@@ -2792,6 +2798,7 @@ class PhoneMatchTests(APITestCase):
         self.assertEqual(Lead.objects.count(), 1)
         self.assertEqual(list(self.lead.course_interests.values_list('course__name', 'stage')), [('Python', 'new')])
         # Asking again for the same course does not add a second open enquiry.
+        self.client.credentials(HTTP_X_INTAKE_TOKEN='t')
         self.client.post('/api/public/lead-intake/', {
             'name': 'Hari', 'phone_number': '9800000800', 'course_interests': 'Python',
         }, format='json')
@@ -4324,3 +4331,73 @@ class LeadImportExportTests(APITestCase):
         self.assertEqual(sheet['A1'].value, 'Reference')
         self.assertEqual(sheet['B2'].value, 'Old Lead')
         self.assertEqual(sheet['C2'].value, '+977 980-111-2222')
+
+
+class IntakeGuardTests(APITestCase):
+    """The public intake needs its token, makes no new courses, and is rate limited."""
+
+    URL = '/api/public/lead-intake/'
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        self.addCleanup(cache.clear)
+        Course.objects.create(name='Python', full_amount=30000)
+
+    def _post(self, token=None, **body):
+        if token:
+            self.client.credentials(HTTP_X_INTAKE_TOKEN=token)
+        return self.client.post(self.URL, {'name': 'Web', 'phone_number': '9800000888', **body}, format='json')
+
+    @override_settings(LEAD_INTAKE_TOKEN='secret')
+    def test_needs_the_token(self):
+        self.assertEqual(self._post().status_code, 403)
+        self.assertEqual(self._post(token='wrong').status_code, 403)
+        self.assertEqual(self._post(token='secret').status_code, 201)
+
+    @override_settings(LEAD_INTAKE_TOKEN='')
+    def test_without_a_token_set_it_is_closed_outside_debug(self):
+        self.assertEqual(self._post(token='anything').status_code, 403)
+
+    @override_settings(LEAD_INTAKE_TOKEN='secret')
+    def test_unknown_course_names_stay_text(self):
+        from apps.course.matching import _CACHE
+
+        _CACHE['public'] = []  # no public catalog in tests
+        response = self._post(token='secret', course_interests='Python, Underwater Basket Weaving')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertFalse(Course.objects.filter(name__icontains='basket').exists())
+        lead = Lead.objects.get(id=response.data['id'])
+        rows = {(e.course.name if e.course else None, e.course_name) for e in lead.course_interests.all()}
+        self.assertIn((None, 'Underwater Basket Weaving'), rows)
+        self.assertEqual({name for name, _ in rows if name}, {'Python'})
+
+    @override_settings(LEAD_INTAKE_TOKEN='secret')
+    def test_rate_limited_per_address(self):
+        from rest_framework.throttling import SimpleRateThrottle
+
+        with mock.patch.object(SimpleRateThrottle, 'THROTTLE_RATES', {'lead_intake': '2/hour'}):
+            codes = [self._post(token='secret', phone_number=f'98000009{i:02d}').status_code for i in range(3)]
+        self.assertEqual(codes, [201, 201, 429])
+
+
+class SignInRateLimitTests(APITestCase):
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        self.addCleanup(cache.clear)
+
+    def test_sign_in_is_limited_per_email(self):
+        from rest_framework.throttling import SimpleRateThrottle
+
+        User.objects.create_user(email='a@test.com', name='A', password='right-pass')
+        with mock.patch.object(SimpleRateThrottle, 'THROTTLE_RATES', {'login': '2/minute'}):
+            codes = [
+                self.client.post('/api/auth/login/', {'email': 'a@test.com', 'password': 'wrong'}).status_code
+                for _ in range(3)
+            ]
+            other = self.client.post('/api/auth/login/', {'email': 'b@test.com', 'password': 'x'}).status_code
+        self.assertEqual(codes[2], 429)
+        self.assertNotEqual(other, 429)
