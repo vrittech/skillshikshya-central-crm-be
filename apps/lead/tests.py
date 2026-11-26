@@ -3537,7 +3537,7 @@ class PendingEnrollmentTests(SeatTestBase):
         binned.save()
         self._lead()
 
-        self.assertEqual(self.client.get('/api/leads/summary/').data, {'pending_enrollment': 2})
+        self.assertEqual(self.client.get('/api/leads/summary/').data['pending_enrollment'], 2)
         listed = self.client.get('/api/leads/', {'enrollment_status': 'pending'}).data['results']
         self.assertEqual(sorted(r['id'] for r in listed), sorted([pending.id, pending_pkr.id]))
         self.assertEqual(self.client.get('/api/leads/', {'enrollment_status': 'nope'}).status_code, 400)
@@ -3547,7 +3547,7 @@ class PendingEnrollmentTests(SeatTestBase):
         self._with_enrollment('pending', self.pkr)
         clerk = User.objects.create_user(email='ktm@test.com', name='Ktm', password='pass', branch=self.ktm)
         self.client.force_authenticate(clerk)
-        self.assertEqual(self.client.get('/api/leads/summary/').data, {'pending_enrollment': 1})
+        self.assertEqual(self.client.get('/api/leads/summary/').data['pending_enrollment'], 1)
         listed = self.client.get('/api/leads/', {'enrollment_status': 'pending'}).data['results']
         self.assertEqual([r['id'] for r in listed], [pending.id])
 
@@ -4604,3 +4604,39 @@ class NepalTimeTests(APITestCase):
             lead = Lead.objects.create(full_name='New Year', phone='9800000999')
             self.assertEqual(timezone.localdate().isoformat(), '2027-01-01')
         self.assertTrue(lead.reference_number.startswith('LD-2027-'), lead.reference_number)
+
+
+class LeadSummaryCardTests(APITestCase):
+    """The lead list cards count every lead the user can see, not one page."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(email='cards@test.com', name='Admin', password='pass', is_staff=True)
+        self.client.force_authenticate(self.admin)
+
+    def _lead(self, n, **fields):
+        lead = Lead.objects.create(full_name=f'Card {n}', phone=f'98000050{n:02d}')
+        Lead.objects.filter(pk=lead.pk).update(**fields)
+        return lead
+
+    def test_counts(self):
+        from apps.lead.filters import nepal_today_bounds
+
+        now = timezone.now()
+        today, tomorrow = nepal_today_bounds()
+        month = today.replace(day=1)
+        self._lead(1)  # new this week
+        self._lead(2, created_at=now - timedelta(days=10))  # new last week
+        self._lead(3, next_followup_at=today + timedelta(minutes=1))  # due today
+        self._lead(4, next_followup_at=today - timedelta(minutes=1))  # overdue
+        self._lead(5, next_followup_at=today - timedelta(days=2), is_converted=True)  # enrolled: not overdue
+        self._lead(6, is_converted=True, converted_at=month + timedelta(minutes=1))
+        self._lead(7, is_converted=True, converted_at=month - timedelta(days=3))
+        self._lead(8, next_followup_at=tomorrow)  # upcoming
+
+        data = self.client.get('/api/leads/summary/').data
+        self.assertEqual(data['followups_today'], 1)
+        self.assertEqual(data['followups_overdue'], 1)
+        self.assertEqual(data['enrolled_this_month'], 1)
+        self.assertEqual(data['enrolled_last_month'], 1)
+        self.assertEqual(data['new_last_week'], 1)
+        self.assertEqual(data['new_this_week'], 7)

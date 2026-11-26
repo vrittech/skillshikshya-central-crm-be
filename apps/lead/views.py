@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.db import transaction
@@ -286,12 +286,36 @@ class LeadViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def summary(self, request):
-        """Counts for the cards on the lead list, over every lead the user can see."""
-        from apps.lead.filters import has_enrollment_in
+        """Counts for the cards on the lead list, over every lead the user can see.
 
-        leads = LeadBranchFilterBackend().filter_queryset(request, self.get_queryset(), self)
-        pending = leads.filter(has_enrollment_in(Enrollment.Status.PENDING, request))
-        return Response({'pending_enrollment': pending.count()})
+        Days and months are Nepal days and months. A follow-up is the lead's
+        next pending one.
+        """
+        from apps.lead.filters import has_enrollment_in, nepal_today_bounds
+
+        visible = LeadBranchFilterBackend().filter_queryset(request, self.get_queryset(), self)
+        pending = visible.filter(has_enrollment_in(Enrollment.Status.PENDING, request))
+        # One row per lead: the branch filter can join enquiries.
+        leads = Lead.objects.filter(pk__in=visible.values('pk'))
+        today, tomorrow = nepal_today_bounds()
+        month = today.replace(day=1)
+        last_month = (month - timedelta(days=1)).replace(day=1)
+        week_ago = timezone.now() - timedelta(days=7)
+        counts = leads.aggregate(
+            new_this_week=Count('id', filter=Q(created_at__gte=week_ago)),
+            new_last_week=Count('id', filter=Q(
+                created_at__gte=week_ago - timedelta(days=7), created_at__lt=week_ago,
+            )),
+            followups_today=Count('id', filter=Q(
+                next_followup_at__gte=today, next_followup_at__lt=tomorrow,
+            )),
+            followups_overdue=Count('id', filter=Q(next_followup_at__lt=today, is_converted=False)),
+            enrolled_this_month=Count('id', filter=Q(is_converted=True, converted_at__gte=month)),
+            enrolled_last_month=Count('id', filter=Q(
+                is_converted=True, converted_at__gte=last_month, converted_at__lt=month,
+            )),
+        )
+        return Response({'pending_enrollment': pending.distinct().count(), **counts})
 
     @action(detail=False, methods=['get'])
     def export_csv(self, request):
