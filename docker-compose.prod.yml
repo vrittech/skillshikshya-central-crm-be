@@ -1,0 +1,80 @@
+# Production stack, started on the server by .github/workflows/deploy.yml.
+# The image comes from GitHub Container Registry. Settings come from .env next
+# to this file, which the deploy job writes from the repository secrets.
+name: skillshikshya-backend
+
+x-app: &app
+  image: ${BACKEND_IMAGE:-ghcr.io/vrittech/skillshikshya-crm-backend:latest}
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    DEBUG: "False"
+    DB_ENGINE: django.db.backends.postgresql
+    DB_HOST: db
+    DB_PORT: "5432"
+    CELERY_BROKER_URL: redis://redis:6379/0
+    CELERY_RESULT_BACKEND: redis://redis:6379/0
+    # Requests reach Django through the frontend's nginx.
+    NUM_PROXIES: "1"
+  volumes:
+    - media:/app/mediafiles
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_started
+
+services:
+  db:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
+  web:
+    <<: *app
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             gunicorn skillshikshyacrm.wsgi:application --bind 0.0.0.0:8188
+             --workers ${GUNICORN_WORKERS:-3} --timeout 120 --access-logfile -"
+    # Only this server can reach the API directly; the public goes through the frontend.
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8188}:8188"
+    networks:
+      default:
+      skillshikshya:
+        aliases: [backend]
+
+  celery_worker:
+    <<: *app
+    command: celery -A skillshikshyacrm worker -l info
+
+  celery_beat:
+    <<: *app
+    command: celery -A skillshikshyacrm beat -l info --schedule /tmp/celerybeat-schedule
+
+networks:
+  # Shared with the frontend stack, whose nginx proxies /api to http://backend:8188.
+  skillshikshya:
+    name: skillshikshya
+    external: true
+
+volumes:
+  postgres_data:
+  redis_data:
+  media:
