@@ -304,3 +304,89 @@ class SecretsTests(TestCase):
         with override_settings(SETTINGS_ENCRYPTION_KEY='another-key'):
             self.assertEqual(decrypt(token), '')
         self.assertEqual(encrypt(''), '')
+
+
+class StoredFiles(FakeR2):
+    """FakeR2 whose missing keys raise NoSuchKey, as R2 does."""
+
+    def get_object(self, Bucket, Key):
+        if Key not in self.objects:
+            raise client_error('NoSuchKey')
+        return {'Body': mock.Mock(read=lambda: self.objects[Key]), 'ContentType': 'application/pdf'}
+
+
+class FileAccessTests(APITestCase):
+    """GET /api/files/<key> is for signed-in users, never serves voice notes, and keeps branches apart."""
+
+    def setUp(self):
+        from apps.branch.models import Branch
+
+        self.ktm = Branch.objects.create(name='Kathmandu', code='KTM')
+        self.pkr = Branch.objects.create(name='Pokhara', code='PKR')
+        self.files = StoredFiles()
+        self.files.objects.update({
+            'uploads/ktm.pdf': b'ktm', 'uploads/pkr.pdf': b'pkr', 'uploads/loose.pdf': b'loose',
+            'voice-notes/1/a.webm': b'audio',
+        })
+        for patcher in (
+            mock.patch('apps.global_config.views.get_r2_client', return_value=self.files),
+            mock.patch('apps.global_config.views.r2_config', return_value=mock.Mock(bucket_name='b')),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self._document('uploads/ktm.pdf', self.ktm)
+        self._document('uploads/pkr.pdf', self.pkr)
+
+    def _document(self, key, branch):
+        from apps.lead.models import Lead, LeadDocument
+
+        lead = Lead.objects.create(full_name=f'Doc {key}', phone='9800000100', branch=branch)
+        LeadDocument.objects.create(lead=lead, document_type='ID', file=f'/api/files/{key}', branch=branch)
+
+    def _get(self, key):
+        return self.client.get(f'/api/files/{key}')
+
+    def test_needs_sign_in(self):
+        self.assertIn(self._get('uploads/loose.pdf').status_code, (401, 403))
+
+    def test_branch_user_sees_own_and_loose_files_only(self):
+        user = User.objects.create_user(email='k@test.com', name='K', password='pass', branch=self.ktm)
+        self.client.force_authenticate(user)
+        ok = self._get('uploads/ktm.pdf')
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(ok.content, b'ktm')
+        self.assertEqual(ok['Cache-Control'], 'private, no-store')
+        self.assertEqual(self._get('uploads/loose.pdf').status_code, 200)
+        self.assertEqual(self._get('uploads/pkr.pdf').status_code, 404)
+
+    def test_voice_notes_and_missing_files_are_not_found(self):
+        admin = User.objects.create_user(email='s@test.com', name='S', password='pass', is_staff=True)
+        self.client.force_authenticate(admin)
+        self.assertEqual(self._get('uploads/pkr.pdf').status_code, 200)
+        self.assertEqual(self._get('voice-notes/1/a.webm').status_code, 404)
+        self.assertEqual(self._get('uploads/gone.pdf').status_code, 404)
+
+
+class UploadTests(APITestCase):
+    def setUp(self):
+        user = User.objects.create_user(email='u@test.com', name='U', password='pass')
+        self.client.force_authenticate(user)
+
+    def _upload(self, folder='uploads', content_type='application/pdf'):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        file = SimpleUploadedFile('a.pdf', b'%PDF', content_type=content_type)
+        with mock.patch('apps.global_config.views.upload_file_to_r2', return_value={'key': 'k'}) as up:
+            response = self.client.post('/api/upload/', {'file': file, 'folder': folder}, format='multipart')
+        return response, up
+
+    def test_upload_refuses_private_or_odd_folders_and_unknown_types(self):
+        response, up = self._upload()
+        self.assertEqual(response.status_code, 201)
+        up.assert_called_once()
+        for folder in ('voice-notes', 'voice-notes/9', '../etc', '/abs', ''):
+            response, up = self._upload(folder=folder)
+            self.assertEqual(response.status_code, 400, folder)
+            up.assert_not_called()
+        response, _ = self._upload(content_type='application/x-msdownload')
+        self.assertEqual(response.status_code, 400)
