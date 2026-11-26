@@ -1,7 +1,8 @@
 """Default roles (Django groups), each with a starting set of permissions.
 
-Runs once per database. A role that already exists is left alone, so admins
-can rename, edit or delete these roles and nothing puts them back. Staff
+Runs once per database. A role that already exists (any capitalisation) is
+left alone, so admins can rename, edit or delete these roles and nothing puts
+them back. Staff
 users bypass permissions, so there is no admin role here.
 """
 
@@ -105,9 +106,9 @@ def add_default_roles(apps, schema_editor):
     Group = apps.get_model('auth', 'Group')
     Permission = apps.get_model('auth', 'Permission')
     for name, models in DEFAULT_ROLES.items():
-        group, created = Group.objects.get_or_create(name=name)
-        if not created:
+        if Group.objects.filter(name__iexact=name).exists():
             continue
+        group = Group.objects.create(name=name)
         wanted = Q(pk__in=[])
         for label, actions in models.items():
             app_label, model = label.split('.')

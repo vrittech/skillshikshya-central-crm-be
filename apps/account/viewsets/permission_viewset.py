@@ -7,10 +7,10 @@ from apps.global_config.pagination import CustomPagination
 
 
 class PermissionViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
-    # queryset = Permission.objects.select_related('content_type').all()  # all
-    # queryset = Permission.objects.filter(content_type__app_label__in=['account', 'auth'])  # app wise 
-    queryset = Permission.objects.filter(content_type__model__in=[
-        'user', 'group', 'permission', 'otp',
+    # The rights the role screen offers. Roles themselves are admin-only, so
+    # rights on roles and permissions would do nothing and are left out.
+    queryset = Permission.objects.select_related('content_type').filter(content_type__model__in=[
+        'user',
         'branch',
         'course',
         'leadsource', 'campaign', 'leadstatus', 'leadpriority',
@@ -22,14 +22,7 @@ class PermissionViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         'coursebatch', 'batch', 'batchcost', 'batchclosing',
         'installment', 'paymentplan', 'adjustment', 'invoice',
         'voicenote', 'teamslicence', 'teamsaccount',
-    ]
-    ).exclude(  # exclude by
-        content_type__app_label='auth',
-        codename__in=['add_permission', 'change_permission', 'delete_permission'],
-    )#.exclude(
-    #     codename__startswith='delete_',
-    #     content_type__model__in=['user', 'group', 'branch'],
-    # )
+    ]).exclude(content_type__app_label='auth')
     serializer_class = PermissionSerializer
     permission_classes = [IsAdminUser]
     pagination_class = CustomPagination

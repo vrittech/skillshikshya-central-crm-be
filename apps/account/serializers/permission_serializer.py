@@ -10,4 +10,7 @@ class PermissionSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'codename', 'content_type', 'content_type_name']
 
     def get_content_type_name(self, obj):
-        return f'{obj.content_type.app_label}.{obj.content_type.model}'
+        # The section heading on the role screen, e.g. "Lead call".
+        model = obj.content_type.model_class()
+        name = str(model._meta.verbose_name) if model else obj.content_type.model
+        return name[:1].upper() + name[1:]
