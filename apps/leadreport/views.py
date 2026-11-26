@@ -12,7 +12,7 @@ class ReportViewSet(viewsets.ViewSet):
 
     def list(self, request):
         return Response({'available_reports': [
-            'overview', 'leads-by-status', 'leads-by-source', 'leads-by-type',
+            'overview', 'leads-by-status', 'leads-by-source',
             'leads-by-branch', 'leads-by-campaign', 'leads-by-counselor',
             'lead-trend', 'revenue', 'enrollments', 'conversion',
             'counselor-performance', 'who-owes', 'due-in-month', 'batch-profit',
@@ -30,10 +30,6 @@ class ReportViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='leads-by-source')
     def leads_by_source(self, request):
         return Response(services.leads_by_source_report(request))
-
-    @action(detail=False, methods=['get'], url_path='leads-by-type')
-    def leads_by_type(self, request):
-        return Response(services.leads_by_type_report(request))
 
     @action(detail=False, methods=['get'], url_path='leads-by-branch')
     def leads_by_branch(self, request):

@@ -23,7 +23,7 @@ User = get_user_model()
 DATE_PARSE_ERROR = 'Invalid date. Use YYYY-MM-DD format.'
 
 LEAD_FILTER_PARAMS = [
-    'status', 'source', 'campaign', 'lead_type', 'priority',
+    'status', 'source', 'campaign', 'priority',
     'assigned_counselor', 'primary_course', 'is_converted', 'is_archived',
 ]
 
@@ -127,12 +127,6 @@ def _lead_dimension_breakdown(request, qs, dimension, dimension_label):
     elif dimension == 'campaign':
         rows = (
             qs.values(dimension_label, 'campaign__name')
-            .annotate(count=Count('id'))
-            .order_by('-count')
-        )
-    elif dimension == 'lead_type':
-        rows = (
-            qs.values(dimension_label, 'lead_type__name')
             .annotate(count=Count('id'))
             .order_by('-count')
         )
@@ -264,11 +258,6 @@ def leads_by_status_report(request):
 def leads_by_source_report(request):
     qs, _ = _scoped_leads(request)
     return _lead_dimension_breakdown(request, qs, 'source', 'source')
-
-
-def leads_by_type_report(request):
-    qs, _ = _scoped_leads(request)
-    return _lead_dimension_breakdown(request, qs, 'lead_type', 'lead_type')
 
 
 def leads_by_branch_report(request):

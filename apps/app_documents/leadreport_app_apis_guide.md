@@ -34,7 +34,6 @@ Identical to the rest of the CRM (see [Lead App Overview](lead_app_overview.md#b
 | `status` | lead `status` FK id |
 | `source` | lead `source` FK id |
 | `campaign` | lead `campaign` FK id |
-| `lead_type` | lead `lead_type` FK id |
 | `priority` | lead `priority` FK id |
 | `assigned_counselor` | lead `assigned_counselor` user id |
 | `primary_course` | lead `primary_course` FK id |
@@ -51,7 +50,6 @@ Identical to the rest of the CRM (see [Lead App Overview](lead_app_overview.md#b
 | GET | `/api/reports/overview/` | Dashboard summary snapshot |
 | GET | `/api/reports/leads-by-status/` | Lead counts per status |
 | GET | `/api/reports/leads-by-source/` | Lead counts per source |
-| GET | `/api/reports/leads-by-type/` | Lead counts per lead type |
 | GET | `/api/reports/leads-by-branch/` | Lead counts per branch |
 | GET | `/api/reports/leads-by-campaign/` | Lead counts per campaign |
 | GET | `/api/reports/leads-by-counselor/` | Lead counts per assigned counselor |
@@ -70,7 +68,7 @@ Lists the available report names.
 ```json
 {
   "available_reports": [
-    "overview", "leads-by-status", "leads-by-source", "leads-by-type",
+    "overview", "leads-by-status", "leads-by-source",
     "leads-by-branch", "leads-by-campaign", "leads-by-counselor",
     "lead-trend", "revenue", "enrollments", "conversion",
     "counselor-performance"
@@ -126,7 +124,7 @@ Returns `results` rows `{status: <id>, status__name, status__color, count}`.
 }
 ```
 
-`leads-by-source`, `leads-by-type`, `leads-by-branch`, `leads-by-campaign`, and `leads-by-counselor` return the same shape with their respective dimension fields (`source__name`, `lead_type__name`, `branch__name`, `campaign__name`, `assigned_counselor__name`).
+`leads-by-source`, `leads-by-branch`, `leads-by-campaign`, and `leads-by-counselor` return the same shape with their respective dimension fields (`source__name`, `branch__name`, `campaign__name`, `assigned_counselor__name`).
 
 ---
 

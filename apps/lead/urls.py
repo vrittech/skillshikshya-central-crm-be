@@ -4,7 +4,7 @@ from apps.lead.views import (
     LearningModeViewSet, InstitutionViewSet,
     ProvinceViewSet, CityViewSet,
     LeadSourceViewSet, CampaignViewSet, LeadStatusViewSet,
-    LeadPriorityViewSet, LeadTagViewSet, LeadTypeViewSet, LeadViewSet,
+    LeadPriorityViewSet, LeadTagViewSet, LeadViewSet,
     LeadCourseInterestViewSet, EnrollmentViewSet, PaymentViewSet, EnrollmentHistoryViewSet,
     AdjustmentViewSet, EnrollmentReminderViewSet, TeamsLicenceViewSet, TeamsAccountViewSet,
     GlobalCallViewSet,
@@ -24,7 +24,6 @@ router.register(r'campaigns', CampaignViewSet)
 router.register(r'lead-statuses', LeadStatusViewSet)
 router.register(r'lead-priorities', LeadPriorityViewSet)
 router.register(r'lead-tags', LeadTagViewSet)
-router.register(r'lead-types', LeadTypeViewSet)
 router.register(r'notifications', NotificationViewSet)
 router.register(r'leads', LeadViewSet)
 router.register(r'followups', GlobalFollowUpViewSet)

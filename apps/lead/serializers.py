@@ -12,7 +12,7 @@ from apps.global_config.filters import walled_branch_id
 from apps.lead.services import STATUS_CHOICES
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
-    LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
+    LeadTag, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
     Adjustment, Placement, ReminderLog, TeamsAccount, TeamsLicence, EnquiryStageChange,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, VoiceNote,
 )
@@ -65,12 +65,6 @@ class LeadPrioritySerializer(serializers.ModelSerializer):
 class LeadTagSerializer(serializers.ModelSerializer):
     class Meta:
         model = LeadTag
-        fields = '__all__'
-
-
-class LeadTypeSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = LeadType
         fields = '__all__'
 
 
@@ -542,12 +536,11 @@ class ReasonSerializer(serializers.Serializer):
 class LeadMinSerializer(serializers.ModelSerializer):
     class Meta:
         model = Lead
-        fields = ['id', 'reference_number', 'full_name', 'phone', 'status', 'priority', 'lead_type', 'lead_score']
+        fields = ['id', 'reference_number', 'full_name', 'phone', 'status', 'priority', 'lead_score']
 
 
 class LeadListSerializer(serializers.ModelSerializer):
     status_name = serializers.CharField(source='status.name', read_only=True)
-    lead_type_name = serializers.CharField(source='lead_type.name', read_only=True)
     priority_name = serializers.CharField(source='priority.name', read_only=True)
     priority_color = serializers.CharField(source='priority.color', read_only=True)
     status_color = serializers.CharField(source='status.color', read_only=True)
@@ -571,8 +564,6 @@ class LeadImportSerializer(serializers.Serializer):
 
     file = serializers.FileField()
     duplicates = serializers.ChoiceField(choices=['skip', 'import'], default='skip')
-    default_lead_type = serializers.PrimaryKeyRelatedField(
-        queryset=LeadType.objects.all(), required=False, allow_null=True)
     default_source = serializers.PrimaryKeyRelatedField(
         queryset=LeadSource.objects.all(), required=False, allow_null=True)
     default_campaign = serializers.PrimaryKeyRelatedField(
@@ -603,13 +594,12 @@ class LeadImportSerializer(serializers.Serializer):
 
     def defaults(self):
         d = self.validated_data
-        keys = ('lead_type', 'source', 'campaign', 'status', 'priority', 'course', 'branch', 'counselor')
+        keys = ('source', 'campaign', 'status', 'priority', 'course', 'branch', 'counselor')
         return {k: d[f'default_{k}'] for k in keys if d.get(f'default_{k}') is not None}
 
 
 class LeadSerializer(serializers.ModelSerializer):
     status_name = serializers.CharField(source='status.name', read_only=True)
-    lead_type_name = serializers.CharField(source='lead_type.name', read_only=True)
     priority_name = serializers.CharField(source='priority.name', read_only=True)
     priority_color = serializers.CharField(source='priority.color', read_only=True)
     status_color = serializers.CharField(source='status.color', read_only=True)

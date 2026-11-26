@@ -182,23 +182,6 @@ class LeadTag(models.Model):
         return self.name
 
 
-class LeadType(models.Model):
-    name = models.CharField(max_length=255)
-    description = models.TextField(null=True, blank=True)
-    is_active = models.BooleanField(default=True)
-    branch = models.ForeignKey(
-        'branch.Branch', on_delete=models.SET_NULL,
-        null=True, blank=True, related_name='lead_types',
-    )
-
-    class Meta:
-        db_table = 'lead_types'
-        ordering = ['name']
-
-    def __str__(self):
-        return self.name
-
-
 class Lead(models.Model):
     full_name = models.CharField(max_length=255)
     phone = models.CharField(max_length=20, null=True, blank=True)
@@ -214,10 +197,6 @@ class Lead(models.Model):
         null=True, blank=True, related_name='leads',
     )
     landmark = models.CharField(max_length=255, null=True, blank=True)
-    lead_type = models.ForeignKey(
-        LeadType, on_delete=models.SET_NULL,
-        null=True, blank=True, related_name='leads',
-    )
     reference_number = models.CharField(max_length=20, unique=True, editable=False)
     custom_data = models.JSONField(default=dict)
     source = models.ForeignKey(

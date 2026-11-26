@@ -6,7 +6,7 @@ from rest_framework.test import APITestCase, APIRequestFactory
 from apps.branch.models import Branch
 from apps.course.models import Course
 from apps.lead.models import (
-    Enrollment, Lead, LeadSource, LeadStatus, LeadType, Payment,
+    Enrollment, Lead, LeadSource, LeadStatus, Payment,
 )
 from apps.leadreport import services
 
@@ -19,7 +19,6 @@ class LeadReportServiceTests(TestCase):
         self.branch = Branch.objects.create(name='Kathmandu', code='KTM')
         self.source = LeadSource.objects.create(name='Website')
         self.status = LeadStatus.objects.create(name='New')
-        self.lead_type = LeadType.objects.create(name='Course Inquiry')
         self.course = Course.objects.create(name='Python')
 
         self.lead = Lead.objects.create(
@@ -28,7 +27,6 @@ class LeadReportServiceTests(TestCase):
             branch=self.branch,
             source=self.source,
             status=self.status,
-            lead_type=self.lead_type,
             primary_course=self.course,
             expected_revenue=30000,
         )
@@ -133,7 +131,7 @@ class LeadReportViewTests(APITestCase):
 
     def test_all_report_endpoints_ok(self):
         endpoints = [
-            'overview', 'leads-by-status', 'leads-by-source', 'leads-by-type',
+            'overview', 'leads-by-status', 'leads-by-source',
             'leads-by-branch', 'leads-by-campaign', 'leads-by-counselor',
             'lead-trend', 'revenue', 'enrollments', 'conversion',
             'counselor-performance',

@@ -4057,7 +4057,7 @@ class LeadImportExportTests(APITestCase):
 
     def setUp(self):
         from apps.branch.models import Branch
-        from apps.lead.models import LeadStatus, LeadTag, LeadType
+        from apps.lead.models import LeadStatus, LeadTag
 
         self.ktm = Branch.objects.create(name='Kathmandu', code='KTM')
         self.pkr = Branch.objects.create(name='Pokhara', code='PKR')
@@ -4068,8 +4068,6 @@ class LeadImportExportTests(APITestCase):
         self.counselor = User.objects.create_user(
             email='sita@test.com', name='Sita Rai', password='pass', branch=self.ktm,
         )
-        self.walk_in = LeadType.objects.create(name='Walk-in')
-        self.online = LeadType.objects.create(name='Online')
         self.facebook = LeadSource.objects.create(name='Facebook')
         self.new = LeadStatus.objects.create(name='New')
         self.hot = LeadTag.objects.create(name='Hot')
@@ -4116,19 +4114,20 @@ class LeadImportExportTests(APITestCase):
         upload = self._csv(
             'Name,Mobile,E-mail,Lead Type,Lead Source,Interested Course,Favourite colour\n'
             'Ram Thapa,9801234567,ram@test.com,walk-in,FACEBOOK,python,blue\n'
-            ',9801234568,,Walk-in,,,\n'
+            ',9801234568,,,,\n'
             'Hari,98012,hari@,Walk-in,Tiktok,,\n'
-            'Gita,9801112222,,Walk-in,,,\n'
-            'Ram Again,+977-9801234567,,Walk-in,,,\n'
-            'Excel Lost,9.80123E+09,,Walk-in,,,\n'
+            'Gita,9801112222,,,,\n'
+            'Ram Again,+977-9801234567,,,,\n'
+            'Excel Lost,9.80123E+09,,,,\n'
         )
         response = self._preview(upload)
         self.assertEqual(response.status_code, 200, response.data)
         data = response.data
         self.assertEqual([c['column'] for c in data['columns']], [
-            'Full name', 'Phone', 'Email', 'Lead type', 'Source', 'Course',
+            'Full name', 'Phone', 'Email', 'Source', 'Course',
         ])
-        self.assertEqual(data['ignored'], ['Favourite colour'])
+        # Lead type is gone; an old file that still has the column imports without it.
+        self.assertEqual(data['ignored'], ['Lead Type', 'Favourite colour'])
         self.assertEqual((data['total'], data['ready'], data['duplicates'], data['errors']), (6, 1, 2, 3))
 
         rows = self._rows(response)
@@ -4149,16 +4148,11 @@ class LeadImportExportTests(APITestCase):
         self.assertIn('lost its digits in Excel', rows[7]['errors'][0])
         self.assertEqual(Lead.objects.count(), 1, 'A preview saves nothing.')
 
-    def test_defaults_fill_blanks_and_lead_type_is_needed(self):
+    def test_defaults_fill_blanks(self):
         upload = 'Full name,Phone\nAsha,9802000001\n'
-        response = self._preview(self._csv(upload))
-        self.assertEqual(
-            self._rows(response)[2]['errors'],
-            ['Lead type is missing. Add it to the file or pick a default.'],
-        )
+        self.assertEqual(self._rows(self._preview(self._csv(upload)))[2]['status'], 'ready')
         response = self._preview(
-            self._csv(upload), default_lead_type=self.walk_in.pk, default_course=self.python.pk,
-            default_counselor=self.counselor.pk,
+            self._csv(upload), default_course=self.python.pk, default_counselor=self.counselor.pk,
         )
         row = self._rows(response)[2]
         self.assertEqual(row['status'], 'ready')
@@ -4179,9 +4173,9 @@ class LeadImportExportTests(APITestCase):
 
     def test_counselor_must_be_in_the_lead_branch(self):
         upload = self._csv(
-            'Full name,Phone,Lead type,Branch,Counselor\n'
-            'Asha,9802000001,Walk-in,Pokhara,sita@test.com\n'
-            'Bina,9802000002,Walk-in,,Nobody Here\n'
+            'Full name,Phone,Branch,Counselor\n'
+            'Asha,9802000001,Pokhara,sita@test.com\n'
+            'Bina,9802000002,,Nobody Here\n'
         )
         rows = self._rows(self._preview(upload))
         self.assertEqual(rows[2]['errors'], ['Sita Rai is not in Pokhara.'])
@@ -4191,10 +4185,10 @@ class LeadImportExportTests(APITestCase):
 
     def test_import_saves_ready_rows_and_skips_duplicates(self):
         upload = (
-            'Full name,Phone,Email,Lead type,Course,Tags,Expected revenue,Notes\n'
-            'Ram Thapa,9801234567,RAM@test.com,Walk-in,Python,"Hot, Cold","NPR 30,000",Call after 5\n'
-            'Old Again,9801112222,,Walk-in,,,,\n'
-            'No Phone,,,Walk-in,,,,\n'
+            'Full name,Phone,Email,Course,Tags,Expected revenue,Notes\n'
+            'Ram Thapa,9801234567,RAM@test.com,Python,"Hot, Cold","NPR 30,000",Call after 5\n'
+            'Old Again,9801112222,,,,,\n'
+            'No Phone,,,,,,\n'
         )
         response = self._import(self._csv(upload))
         self.assertEqual(response.status_code, 200, response.data)
@@ -4205,7 +4199,7 @@ class LeadImportExportTests(APITestCase):
 
         lead = Lead.objects.get(pk=rows[2]['lead_id'])
         self.assertEqual(lead.reference_number, rows[2]['reference_number'])
-        self.assertEqual((lead.email, lead.lead_type, lead.primary_course), ('ram@test.com', self.walk_in, self.python))
+        self.assertEqual((lead.email, lead.primary_course), ('ram@test.com', self.python))
         self.assertEqual(lead.expected_revenue, Decimal('30000.00'))
         self.assertEqual(lead.notes, 'Call after 5')
         self.assertEqual(list(lead.tags.all()), [self.hot])
@@ -4219,15 +4213,15 @@ class LeadImportExportTests(APITestCase):
 
     def test_excel_file_with_numeric_phones(self):
         upload = self._xlsx([
-            ['Full Name', 'Phone', 'Lead Type'],
-            ['Asha', 9802000001, 'Online'],
-            [None, None, None],
-            ['Bina', 9802000002.0, 'Online'],
+            ['Full Name', 'Phone'],
+            ['Asha', 9802000001],
+            [None, None],
+            ['Bina', 9802000002.0],
         ])
         response = self._import(upload)
         self.assertEqual(response.data['created'], 2, response.data)
         self.assertEqual(
-            sorted(Lead.objects.filter(lead_type=self.online).values_list('phone', flat=True)),
+            sorted(Lead.objects.filter(full_name__in=['Asha', 'Bina']).values_list('phone', flat=True)),
             ['9802000001', '9802000002'],
         )
 
@@ -4236,10 +4230,10 @@ class LeadImportExportTests(APITestCase):
         from apps.lead.models import Notification
 
         upload = self._csv(
-            'Full name,Phone,Lead type,Counselor\n'
-            'Asha,9802000001,Walk-in,Sita Rai\n'
-            'Bina,9802000002,Walk-in,Sita Rai\n'
-            'Chandra,9802000003,Walk-in,sita@test.com\n'
+            'Full name,Phone,Counselor\n'
+            'Asha,9802000001,Sita Rai\n'
+            'Bina,9802000002,Sita Rai\n'
+            'Chandra,9802000003,sita@test.com\n'
         )
         response = self._import(upload)
         self.assertEqual(response.data['created'], 3)
@@ -4255,7 +4249,7 @@ class LeadImportExportTests(APITestCase):
     def test_one_lead_gets_the_usual_email(self):
         from apps.global_config.models import EmailLog
 
-        self._import(self._csv('Full name,Phone,Lead type,Counselor\nAsha,9802000001,Walk-in,Sita Rai\n'))
+        self._import(self._csv('Full name,Phone,Counselor\nAsha,9802000001,Sita Rai\n'))
         logs = EmailLog.objects.filter(kind=EmailLog.Kind.LEAD_ASSIGNED)
         self.assertEqual([log.subject for log in logs], ['New lead assigned: Asha'])
 
@@ -4264,7 +4258,7 @@ class LeadImportExportTests(APITestCase):
 
         user = User.objects.create_user(email='ktm@test.com', name='KTM', password='pass', branch=self.ktm)
         self.client.force_authenticate(user)
-        upload = 'Full name,Phone,Lead type,Branch\nAsha,9802000001,Walk-in,\nBina,9802000002,Walk-in,Pokhara\n'
+        upload = 'Full name,Phone,Branch\nAsha,9802000001,\nBina,9802000002,Pokhara\n'
         self.assertEqual(self._preview(self._csv(upload)).status_code, 403)
 
         user.user_permissions.add(Permission.objects.get(codename='add_lead'))
@@ -4280,7 +4274,7 @@ class LeadImportExportTests(APITestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_editing_keeps_the_import_file(self):
-        self._import(self._csv('Full name,Phone,Lead type\nAsha,9802000001,Walk-in\n'))
+        self._import(self._csv('Full name,Phone\nAsha,9802000001\n'))
         lead = Lead.objects.get(full_name='Asha')
         response = self.client.patch(
             f'/api/leads/{lead.pk}/', {'custom_data': {'has_laptop': True}}, format='json',
@@ -4299,7 +4293,7 @@ class LeadImportExportTests(APITestCase):
         response = self.client.get('/api/leads/import-template/')
         self.assertEqual(response.status_code, 200)
         text = response.content.decode('utf-8-sig')
-        self.assertTrue(text.startswith('Full name,Phone,Second phone,Email,Lead type'))
+        self.assertTrue(text.startswith('Full name,Phone,Second phone,Email,Source'))
 
         response = self.client.get('/api/leads/import-template/', {'file_type': 'xlsx'})
         self.assertEqual(response.status_code, 200)
@@ -4307,15 +4301,16 @@ class LeadImportExportTests(APITestCase):
         self.assertEqual(book.sheetnames, ['Leads', 'Lists'])
         self.assertEqual(book['Leads']['A1'].value, 'Full name')
         lists = {book['Lists'].cell(row=1, column=c).value: c for c in range(1, 10)}
-        types = [book['Lists'].cell(row=r, column=lists['Lead type']).value for r in range(2, 20)]
-        self.assertIn('Online', types)
+        self.assertNotIn('Lead type', lists)
+        sources = [book['Lists'].cell(row=r, column=lists['Source']).value for r in range(2, 20)]
+        self.assertIn('Facebook', sources)
         self.assertTrue(book['Leads'].data_validations.dataValidation)
 
     # ----------------------------------------------------------- export
 
     def test_export_csv_has_every_column_and_reads_back(self):
         lead = Lead.objects.create(
-            full_name='राम थापा', phone='9801234567', email='ram@test.com', lead_type=self.walk_in,
+            full_name='राम थापा', phone='9801234567', email='ram@test.com',
             source=self.facebook, status=self.new, primary_course=self.python, branch=self.ktm,
             assigned_counselor=self.counselor, notes='Hello', expected_revenue=Decimal('30000'),
         )
@@ -4329,15 +4324,13 @@ class LeadImportExportTests(APITestCase):
         self.assertEqual(len(rows), 2)
         row = rows[1]
         self.assertEqual(row['Full name'], 'राम थापा')
-        self.assertEqual(row['Lead type'], 'Walk-in')
+        self.assertNotIn('Lead type', row)
         self.assertEqual((row['Course'], row['Branch'], row['Counselor']), ('Python', 'Kathmandu', 'Sita Rai'))
         self.assertEqual((row['Tags'], row['Status'], row['Notes']), ('Hot', 'New', 'Hello'))
 
         # The same file reads back: the names match and the phone makes it a duplicate.
-        # Old Lead has no lead type, so it needs a default.
         response = self._preview(
             self._csv(response.content.decode('utf-8-sig'), name='leads-back.csv'),
-            default_lead_type=self.online.pk,
         )
         self.assertEqual(response.data['duplicates'], 2, response.data)
         self.assertEqual(self._rows(response)[3]['counselor'], 'Sita Rai')

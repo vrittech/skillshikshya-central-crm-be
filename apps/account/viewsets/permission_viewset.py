@@ -14,7 +14,7 @@ class PermissionViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         'branch',
         'course',
         'leadsource', 'campaign', 'leadstatus', 'leadpriority',
-        'leadtag', 'leadtype', 'learningmode', 'institution',
+        'leadtag', 'learningmode', 'institution',
         'province', 'city', 'lead', 'leadcourseinterest',
         'enrollment', 'payment', 'leadcall', 'leadactivity',
         'followup', 'leaddocument', 'notification',

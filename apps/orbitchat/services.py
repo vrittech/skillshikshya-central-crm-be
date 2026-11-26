@@ -2,7 +2,7 @@ import logging
 
 from apps.course.matching import match_or_create_course
 from apps.lead.enquiries import add_enquiry
-from apps.lead.models import Lead, LeadSource, LeadType
+from apps.lead.models import Lead, LeadSource
 from apps.lead.phones import phone_matches
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,6 @@ def create_lead_from_orbitchat_contact(contact):
         email=contact.get('email') or '',
         source=source,
         heard_from=CHANNEL_SOURCE_NAMES.get(contact.get('channel_type')),
-        lead_type=LeadType.objects.first(),
         notes=contact.get('notes') or '',
         custom_data=custom_data,
     )

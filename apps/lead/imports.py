@@ -30,7 +30,7 @@ from django.utils import timezone
 from apps.branch.models import Branch
 from apps.course.models import Course
 from apps.lead.models import (
-    Campaign, City, Lead, LeadPriority, LeadSource, LeadStatus, LeadTag, LeadType,
+    Campaign, City, Lead, LeadPriority, LeadSource, LeadStatus, LeadTag,
     Notification, Province,
 )
 from apps.lead.phones import MIN_DIGITS, phone_key
@@ -65,7 +65,6 @@ IMPORT_COLUMNS = (
         'alt phone',
     )),
     Column('email', 'Email', ('email address', 'e mail', 'mail', 'email id')),
-    Column('lead_type', 'Lead type', ('type',)),
     Column('source', 'Source', ('lead source',)),
     Column('campaign', 'Campaign', ()),
     Column('status', 'Status', ('lead status',)),
@@ -90,7 +89,7 @@ REQUIRED = ('full_name', 'phone')
 LABEL = {c.key: c.label for c in IMPORT_COLUMNS}
 
 EXPORT_HEADERS = (
-    'Reference', 'Full name', 'Phone', 'Second phone', 'Email', 'Lead type', 'Source',
+    'Reference', 'Full name', 'Phone', 'Second phone', 'Email', 'Source',
     'Campaign', 'Status', 'Priority', 'Course', 'Other courses', 'Branch', 'Counselor',
     'Province', 'City', 'Address', 'Landmark', 'Heard from', 'Expected revenue', 'Tags',
     'Notes', 'Lead score', 'Next follow-up', 'Last contact', 'Enrollments', 'Created by',
@@ -218,7 +217,6 @@ class Lookups:
 
     def __init__(self):
         self.lists = {
-            'lead_type': ('Lead type', _by_name(_active(LeadType.objects.all()))),
             'source': ('Source', _by_name(_active(LeadSource.objects.all()))),
             'campaign': ('Campaign', _by_name(_active(Campaign.objects.all()))),
             'status': ('Status', _by_name(_active(LeadStatus.objects.all()))),
@@ -362,7 +360,7 @@ def check_row(row, *, defaults, lookups, walled_branch):
 
     # Names from the file, else the default picked on the import screen.
     for key, model_field in (
-        ('lead_type', 'lead_type'), ('source', 'source'), ('campaign', 'campaign'),
+        ('source', 'source'), ('campaign', 'campaign'),
         ('status', 'status'), ('priority', 'priority'), ('course', 'primary_course'),
         ('branch', 'branch'),
     ):
@@ -376,8 +374,6 @@ def check_row(row, *, defaults, lookups, walled_branch):
             obj = defaults.get(key)
         if obj is not None:
             row.data[model_field] = obj
-    if 'lead_type' not in row.data and not any('Lead type' in e for e in row.errors):
-        row.errors.append('Lead type is missing. Add it to the file or pick a default.')
 
     if walled_branch is not None:
         branch = row.data.get('branch')
@@ -601,7 +597,6 @@ def _sheet_lists(user):
         return sorted({obj.name for obj in qs if obj.name})
 
     return {
-        'Lead type': names(_active(LeadType.objects.all())),
         'Source': names(_active(LeadSource.objects.all())),
         'Campaign': names(_active(Campaign.objects.all())),
         'Status': names(_active(LeadStatus.objects.all())),
@@ -682,7 +677,6 @@ def export_rows(leads, *, branch_id=None):
             lead.phone or '',
             lead.secondary_phone or '',
             lead.email or '',
-            lead.lead_type.name if lead.lead_type_id else '',
             lead.source.name if lead.source_id else '',
             lead.campaign.name if lead.campaign_id else '',
             lead.status.name if lead.status_id else '',

@@ -16,7 +16,7 @@ from rest_framework.response import Response
 from apps.global_config.throttles import LeadIntakeThrottle
 
 from apps.lead.enquiries import add_enquiry, open_enquiry_for
-from apps.lead.models import LeadSource, LeadType, Lead
+from apps.lead.models import LeadSource, Lead
 from apps.lead.phones import phone_matches
 from apps.course.matching import match_or_create_course
 
@@ -68,8 +68,6 @@ def lead_intake(request):
 
     heard_from = data.get('heard_from', '')
 
-    lead_type = LeadType.objects.first()
-
     custom_data = {}
     if data.get('education_level'):
         custom_data['education_level'] = data['education_level']
@@ -103,7 +101,6 @@ def lead_intake(request):
         address=address,
         source=source,
         heard_from=heard_from,
-        lead_type=lead_type,
         custom_data=custom_data,
         notes=data.get('notes', ''),
     )

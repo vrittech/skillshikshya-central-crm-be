@@ -2,7 +2,7 @@ from django.contrib import admin
 
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
-    LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, Adjustment,
+    LeadTag, Lead, LeadCourseInterest, Enrollment, Payment, Adjustment,
     EnrollmentHistory, LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, Placement,
     PaymentPlan, Installment, ReminderConfig, ReminderLog, TeamsAccount, TeamsLicence,
     EnquiryStageChange, VoiceNote, LeadChange,
@@ -28,10 +28,10 @@ class ReadOnlyAdmin(admin.ModelAdmin):
 
 class LeadAdmin(admin.ModelAdmin):
     list_display = [
-        'reference_number', 'full_name', 'phone', 'email', 'lead_type', 'source',
+        'reference_number', 'full_name', 'phone', 'email', 'source',
         'status', 'priority', 'assigned_counselor', 'is_converted', 'is_archived', 'is_deleted', 'created_at',
     ]
-    list_filter = ['lead_type', 'source', 'status', 'priority', 'is_converted', 'is_archived', 'is_deleted']
+    list_filter = ['source', 'status', 'priority', 'is_converted', 'is_archived', 'is_deleted']
     search_fields = ['full_name', 'reference_number', 'phone', 'email']
 
     def save_model(self, request, obj, form, change):
@@ -154,7 +154,6 @@ admin.site.register(Campaign)
 admin.site.register(LeadStatus)
 admin.site.register(LeadPriority)
 admin.site.register(LeadTag)
-admin.site.register(LeadType)
 admin.site.register(Lead, LeadAdmin)
 admin.site.register(LeadCall)
 admin.site.register(LeadActivity)

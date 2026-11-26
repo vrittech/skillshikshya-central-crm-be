@@ -7,7 +7,7 @@ from django.utils import timezone
 
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
-    LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment,
+    LeadTag, Lead, LeadCourseInterest, Enrollment, Payment,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, TeamsLicence,
 )
 
@@ -84,14 +84,6 @@ class LeadTagFilter(django_filters.FilterSet):
         fields = ['name', 'is_active']
 
 
-class LeadTypeFilter(django_filters.FilterSet):
-    name = django_filters.CharFilter(lookup_expr='icontains')
-
-    class Meta:
-        model = LeadType
-        fields = ['name', 'is_active']
-
-
 def has_enrollment_in(status, request=None):
     """Condition for leads with an enrollment in `status`.
 
@@ -137,7 +129,6 @@ class LeadFilter(django_filters.FilterSet):
     class Meta:
         model = Lead
         fields = {
-            'lead_type': ['exact', 'in'],
             'source': ['exact', 'in'],
             'campaign': ['exact', 'in'],
             'branch': ['exact', 'in'],

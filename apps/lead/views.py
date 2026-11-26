@@ -22,7 +22,7 @@ from apps.lead import services
 from apps.lead.services import ActionRefused
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
-    LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
+    LeadTag, Lead, LeadCourseInterest, Enrollment, Payment, EnrollmentHistory,
     Adjustment, ReminderLog, TeamsLicence,
     LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, VoiceNote,
 )
@@ -31,7 +31,7 @@ from apps.lead.serializers import (
     LearningModeSerializer, InstitutionSerializer,
     ProvinceSerializer, CitySerializer,
     LeadSourceSerializer, CampaignSerializer, LeadStatusSerializer,
-    LeadPrioritySerializer, LeadTagSerializer, LeadTypeSerializer, LeadSerializer,
+    LeadPrioritySerializer, LeadTagSerializer, LeadSerializer,
     LeadCourseInterestSerializer, EnrollmentSerializer, PaymentSerializer,
     EnrollmentHistorySerializer, ReasonSerializer, AdjustmentSerializer, SeatActionSerializer,
     StatusChangeSerializer,
@@ -49,7 +49,7 @@ from apps.lead.filters import (
     LearningModeFilter, InstitutionFilter,
     ProvinceFilter, CityFilter,
     LeadSourceFilter, CampaignFilter, LeadStatusFilter,
-    LeadPriorityFilter, LeadTagFilter, LeadTypeFilter, LeadFilter,
+    LeadPriorityFilter, LeadTagFilter, LeadFilter,
     LeadCourseInterestFilter, EnrollmentFilter, PaymentFilter,
     LeadCallFilter, LeadActivityFilter, FollowUpFilter, LeadDocumentFilter,
     NotificationFilter,
@@ -162,15 +162,6 @@ class LeadTagViewSet(ConfigViewSet):
     queryset = LeadTag.objects.all()
     serializer_class = LeadTagSerializer
     filterset_class = LeadTagFilter
-    search_fields = ['name']
-    ordering_fields = ['id', 'name', 'is_active']
-    ordering = ['name']
-
-
-class LeadTypeViewSet(ConfigViewSet):
-    queryset = LeadType.objects.all()
-    serializer_class = LeadTypeSerializer
-    filterset_class = LeadTypeFilter
     search_fields = ['name']
     ordering_fields = ['id', 'name', 'is_active']
     ordering = ['name']
@@ -327,7 +318,7 @@ class LeadViewSet(viewsets.ModelViewSet):
         ids = [int(i) for i in request.query_params.get('ids', '').split(',') if i.strip().isdigit()]
         if ids:
             queryset = queryset.filter(pk__in=ids)
-        queryset = queryset.select_related('lead_type').prefetch_related(
+        queryset = queryset.prefetch_related(
             'tags', 'course_interests__course', 'enrollments__course', 'followups',
         )
         return export_response(
