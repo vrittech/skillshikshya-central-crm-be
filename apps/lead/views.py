@@ -34,6 +34,7 @@ from apps.lead.serializers import (
     LeadPrioritySerializer, LeadTagSerializer, LeadTypeSerializer, LeadSerializer,
     LeadCourseInterestSerializer, EnrollmentSerializer, PaymentSerializer,
     EnrollmentHistorySerializer, ReasonSerializer, AdjustmentSerializer, SeatActionSerializer,
+    StatusChangeSerializer,
     DueDatesSerializer, ReminderLogSerializer, GiveLicenceSerializer, TeamsLicenceSerializer,
     SendTeamsDetailsSerializer, AddTeamsAccountsSerializer,
     EnquiryStageChangeSerializer, EnquiryStageSerializer, EnquiryLostSerializer,
@@ -749,7 +750,7 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in [
             'create', 'update', 'partial_update', 'destroy', 'confirm', 'cancel', 'reinstate',
-            'join_batch', 'move', 'pause', 'resume', 'due_dates', 'fee_invoice',
+            'change_status', 'join_batch', 'move', 'pause', 'resume', 'due_dates', 'fee_invoice',
         ]:
             permission_classes = [IsAuthenticated, IsStaffOrHasPermission]
         else:
@@ -811,6 +812,18 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         reason = self._reason(request)
         enrollment = services.reinstate_enrollment(enrollment, reason=reason, user=request.user)
         return Response(self.get_serializer(enrollment).data)
+
+    @action(detail=True, methods=['post'], url_path='status')
+    def change_status(self, request, *args, **kwargs):
+        """Set the status of a confirmed enrollment, with a reason."""
+        enrollment = self.get_object()
+        body = StatusChangeSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        enrollment = services.change_status(
+            enrollment, body.validated_data['status'],
+            reason=body.validated_data['reason'], user=request.user,
+        )
+        return self._fresh_reply(enrollment)
 
     # ---- seat actions: each adds a seat history row and a history row.
 

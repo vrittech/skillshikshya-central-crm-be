@@ -390,6 +390,47 @@ def reinstate_enrollment(enrollment, *, reason, user):
     return enrollment
 
 
+# Statuses Change status can set. Confirm, Cancel and Reinstate have their own actions.
+STATUS_CHOICES = (
+    Enrollment.Status.CONFIRMED, Enrollment.Status.ACTIVE, Enrollment.Status.COMPLETED,
+    Enrollment.Status.DROPPED_OUT, Enrollment.Status.TRANSFERRED,
+)
+LEAVING_STATUSES = (Enrollment.Status.DROPPED_OUT, Enrollment.Status.TRANSFERRED)
+
+
+@transaction.atomic
+def change_status(enrollment, status, *, reason, user):
+    """Set a confirmed enrollment's status, with a reason.
+
+    Dropping out or transferring frees the seat. Coming back from those
+    leaves the student without a seat until Join batch.
+    """
+    enrollment = _lock(enrollment)
+    old_status = enrollment.status
+    if old_status == Enrollment.Status.PENDING:
+        raise ActionRefused('Confirm the enrollment first.')
+    if old_status == Enrollment.Status.CANCELLED:
+        raise ActionRefused('This enrollment is cancelled. Use Reinstate to reopen it.')
+    if status not in STATUS_CHOICES:
+        raise ActionRefused('Pick another status.')
+    if status == old_status:
+        raise ActionRefused(f'This enrollment is already {enrollment.get_status_display().lower()}.')
+    enrollment.status = status
+    enrollment.updated_by = user
+    enrollment.save(update_fields=['status', 'updated_by', 'updated_at'])
+    if status in LEAVING_STATUSES and enrollment.current_batch_id:
+        _free_seat(enrollment, kind=Placement.Kind.LEAVE, reason=reason, user=user)
+    EnrollmentHistory.record(
+        enrollment=enrollment,
+        action=EnrollmentHistory.Action.CHANGE_STATUS,
+        reason=reason,
+        performed_by=user,
+        before={'status': old_status},
+        after={'status': status},
+    )
+    return enrollment
+
+
 def mark_converted(lead):
     """Note when the lead became a student (only the first time)."""
     if lead.is_converted:

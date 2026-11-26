@@ -884,7 +884,9 @@ class ConfirmEnrollmentTests(APITestCase):
         back = self.client.patch(url, {'status': 'pending'}, format='json')
         self.assertEqual(back.status_code, status.HTTP_400_BAD_REQUEST)
         onward = self.client.patch(url, {'status': 'active'}, format='json')
-        self.assertEqual(onward.status_code, status.HTTP_200_OK)
+        self.assertEqual(onward.status_code, status.HTTP_400_BAD_REQUEST)
+        same = self.client.patch(url, {'status': 'confirmed', 'notes': 'x'}, format='json')
+        self.assertEqual(same.status_code, status.HTTP_200_OK, same.data)
 
     def test_price_can_change_only_while_pending_and_unpaid(self):
         url = f'{self.enrollments_url}{self.enrollment.id}/'
@@ -1319,8 +1321,41 @@ class SeatTests(SeatTestBase):
     def test_dropped_out_students_do_not_hold_a_seat(self):
         enrollment = self._enroll(self.batch)
         self._confirm(enrollment)
-        self.client.patch(self._url(enrollment), {'status': 'dropped_out'}, format='json')
+        response = self.client.post(
+            self._url(enrollment, 'status/'), {'status': 'dropped_out', 'reason': 'Moved abroad'}, format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(self._seats(self.batch)['seats_taken'], 0)
+        self.assertEqual(enrollment.placements.order_by('-id').first().kind, Placement.Kind.LEAVE)
+
+    def test_change_status_needs_a_reason_and_writes_history(self):
+        enrollment = self._enroll(self.batch)
+        url = self._url(enrollment, 'status/')
+        self.assertEqual(self.client.post(url, {'status': 'active', 'reason': 'x'}, format='json').status_code, 400)
+        self._confirm(enrollment)
+        self.assertEqual(self.client.post(url, {'status': 'active'}, format='json').status_code, 400)
+        self.assertEqual(
+            self.client.post(url, {'status': 'cancelled', 'reason': 'x'}, format='json').status_code, 400,
+        )
+        response = self.client.post(url, {'status': 'active', 'reason': 'Classes started'}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['status'], 'active')
+        self.assertEqual(response.data['current_batch'], self.batch.id)
+        row = enrollment.history.get(action=EnrollmentHistory.Action.CHANGE_STATUS)
+        self.assertEqual((row.before, row.after, row.reason), (
+            {'status': 'confirmed'}, {'status': 'active'}, 'Classes started',
+        ))
+        self.assertEqual(self.client.post(url, {'status': 'active', 'reason': 'x'}, format='json').status_code, 400)
+
+    def test_back_from_transferred_has_no_seat(self):
+        enrollment = self._enroll(self.batch)
+        self._confirm(enrollment)
+        url = self._url(enrollment, 'status/')
+        self.client.post(url, {'status': 'transferred', 'reason': 'Other branch'}, format='json')
+        response = self.client.post(url, {'status': 'confirmed', 'reason': 'Came back'}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        enrollment.refresh_from_db()
+        self.assertEqual((enrollment.status, enrollment.current_batch_id), ('confirmed', None))
 
     def test_batch_shows_who_is_waiting(self):
         self._enroll(self.batch)

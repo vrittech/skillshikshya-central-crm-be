@@ -827,6 +827,7 @@ class EnrollmentHistory(models.Model):
         RESUME_LICENCE = 'resume_licence', 'Teams licence back in use'
         COMPLETE = 'complete', 'Completed'
         UNDO_COMPLETE = 'undo_complete', 'Completion undone'
+        CHANGE_STATUS = 'change_status', 'Status changed'
 
     enrollment = models.ForeignKey(
         Enrollment, on_delete=models.PROTECT, related_name='history',
