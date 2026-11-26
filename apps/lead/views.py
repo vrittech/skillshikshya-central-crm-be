@@ -559,7 +559,8 @@ class NotificationViewSet(viewsets.ModelViewSet):
     queryset = Notification.objects.all()
     serializer_class = NotificationSerializer
     pagination_class = CustomPagination
-    filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
+    # Each user sees their own notifications; they have no branch.
+    filter_backends = [DjangoFilterBackend, OrderingFilter]
     filterset_class = NotificationFilter
     ordering_fields = ['created_at']
     ordering = ['-created_at']
@@ -727,13 +728,22 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         from apps.lead.emails import enrollment_received
 
+        lead = visible_lead(self.request, self.kwargs['lead_pk'])
         enrollment = serializer.save(
-            lead_id=self.kwargs['lead_pk'],
+            lead=lead,
             created_by=self.request.user,
+            branch=new_record_branch(self.request, lead, serializer.validated_data.get('branch')),
         )
         enrollment_received(enrollment, user=self.request.user)
 
     def perform_update(self, serializer):
+        branch = serializer.validated_data.get('branch')
+        if (
+            'branch' in serializer.validated_data
+            and walled_branch_id(self.request.user) is not None
+            and branch != serializer.instance.branch
+        ):
+            raise ValidationError({'branch': ['Only staff can move an enrollment to another branch.']})
         serializer.save(updated_by=self.request.user)
 
     def get_permissions(self):
@@ -878,7 +888,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         enrollment = get_object_or_404(
             Enrollment.objects.select_for_update(),
-            pk=self.kwargs['enrollment_pk'], lead_id=self.kwargs['lead_pk'],
+            pk=self.kwargs['enrollment_pk'], lead=visible_lead(self.request, self.kwargs['lead_pk']),
         )
         refusal = services.payment_refusal(enrollment, serializer.validated_data['amount'])
         if refusal:
@@ -886,6 +896,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
         payment = serializer.save(
             enrollment=enrollment,
             received_by=self.request.user,
+            branch=enrollment.branch,
         )
         services.issue_receipt(payment, user=self.request.user)
 
@@ -997,12 +1008,14 @@ class LeadCallViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         from apps.callminutes.services import charge_for_call
 
+        lead = visible_lead(self.request, self.kwargs['lead_pk'])
         instance = charge_for_call(
             user=self.request.user,
             duration_seconds=serializer.validated_data.get('duration_seconds'),
             create_call=lambda: serializer.save(
-                lead_id=self.kwargs['lead_pk'],
+                lead=lead,
                 created_by=self.request.user,
+                branch=new_record_branch(self.request, lead, serializer.validated_data.get('branch')),
             ),
         )
         lead = instance.lead
@@ -1053,9 +1066,11 @@ class LeadActivityViewSet(viewsets.ModelViewSet):
         return LeadActivity.objects.filter(lead_id=self.kwargs['lead_pk']).select_related('performed_by')
 
     def perform_create(self, serializer):
+        lead = visible_lead(self.request, self.kwargs['lead_pk'])
         instance = serializer.save(
-            lead_id=self.kwargs['lead_pk'],
+            lead=lead,
             performed_by=self.request.user,
+            branch=new_record_branch(self.request, lead, serializer.validated_data.get('branch')),
         )
         lead = instance.lead
         if lead.last_contact_at is None or instance.activity_at > lead.last_contact_at:
@@ -1086,7 +1101,11 @@ class FollowUpViewSet(viewsets.ModelViewSet):
     # Saving a follow-up updates the lead's next follow-up and last contacted
     # dates (FollowUp.save).
     def perform_create(self, serializer):
-        serializer.save(lead_id=self.kwargs['lead_pk'], created_by=self.request.user)
+        lead = visible_lead(self.request, self.kwargs['lead_pk'])
+        serializer.save(
+            lead=lead, created_by=self.request.user,
+            branch=new_record_branch(self.request, lead, serializer.validated_data.get('branch')),
+        )
 
     def perform_update(self, serializer):
         serializer.save(updated_by=self.request.user)
@@ -1111,9 +1130,11 @@ class LeadDocumentViewSet(viewsets.ModelViewSet):
         return LeadDocument.objects.filter(lead_id=self.kwargs['lead_pk']).select_related('uploaded_by')
 
     def perform_create(self, serializer):
+        lead = visible_lead(self.request, self.kwargs['lead_pk'])
         serializer.save(
-            lead_id=self.kwargs['lead_pk'],
+            lead=lead,
             uploaded_by=self.request.user,
+            branch=new_record_branch(self.request, lead, serializer.validated_data.get('branch')),
         )
 
     def get_permissions(self):
@@ -1122,6 +1143,17 @@ class LeadDocumentViewSet(viewsets.ModelViewSet):
         else:
             permission_classes = [IsAuthenticated]
         return [p() for p in permission_classes]
+
+
+def new_record_branch(request, lead=None, given=None):
+    """The branch a new record belongs to.
+
+    A branch user's own branch, always. For staff (and users with no branch),
+    the branch they sent, else the lead's.
+    """
+    if walled_branch_id(request.user) is not None:
+        return request.user.branch
+    return given or (lead.branch if lead is not None else None)
 
 
 def visible_lead(request, lead_pk):

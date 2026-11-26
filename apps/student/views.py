@@ -1,9 +1,11 @@
 import csv
 
 from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
 
 from rest_framework import viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -18,7 +20,7 @@ from apps.student.serializers import (
 from apps.student.filters import StudentFilter, StudentDocumentFilter, AttendanceFilter
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission
-from apps.global_config.filters import BranchFilterBackend
+from apps.global_config.filters import BranchFilterBackend, walled_branch_id
 
 
 class StudentViewSet(viewsets.ModelViewSet):
@@ -58,8 +60,6 @@ class StudentViewSet(viewsets.ModelViewSet):
         return Response(profile)
 
     def perform_create(self, serializer):
-        from rest_framework.exceptions import ValidationError
-
         # A lead becomes a student only through Confirm enrollment, which also
         # links the enrollment and makes the fee invoice.
         if serializer.validated_data.get('lead'):
@@ -106,6 +106,12 @@ class StudentViewSet(viewsets.ModelViewSet):
         return response
 
 
+def visible_student(request, pk):
+    """The student, if this user may see them (their branch's, or all for staff); else 404."""
+    students = BranchFilterBackend().filter_queryset(request, Student.objects.all(), view=None)
+    return get_object_or_404(students, pk=pk)
+
+
 class StudentDocumentViewSet(viewsets.ModelViewSet):
     serializer_class = StudentDocumentSerializer
     pagination_class = CustomPagination
@@ -118,10 +124,12 @@ class StudentDocumentViewSet(viewsets.ModelViewSet):
         return StudentDocument.objects.filter(student_id=self.kwargs['student_pk']).select_related('uploaded_by')
 
     def perform_create(self, serializer):
-        serializer.save(
-            student_id=self.kwargs['student_pk'],
-            uploaded_by=self.request.user,
+        student = visible_student(self.request, self.kwargs['student_pk'])
+        branch = (
+            self.request.user.branch if walled_branch_id(self.request.user) is not None
+            else serializer.validated_data.get('branch') or student.branch
         )
+        serializer.save(student=student, uploaded_by=self.request.user, branch=branch)
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -136,6 +144,8 @@ class AttendanceViewSet(viewsets.ModelViewSet):
     serializer_class = AttendanceSerializer
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
+    # Attendance has no branch of its own: it follows the student's.
+    branch_field = 'student__branch'
     filterset_class = AttendanceFilter
     ordering_fields = ['date', 'created_at']
     ordering = ['-date']
@@ -147,10 +157,10 @@ class AttendanceViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
-        kwargs = {'marked_by': self.request.user}
-        if 'student_pk' in self.kwargs:
-            kwargs['student_id'] = self.kwargs['student_pk']
-        serializer.save(**kwargs)
+        if 'student_pk' not in self.kwargs:
+            raise ValidationError({'student': ['This field is required.']})
+        student = visible_student(self.request, self.kwargs['student_pk'])
+        serializer.save(marked_by=self.request.user, student=student)
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:

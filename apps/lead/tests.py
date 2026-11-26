@@ -4401,3 +4401,116 @@ class SignInRateLimitTests(APITestCase):
             other = self.client.post('/api/auth/login/', {'email': 'b@test.com', 'password': 'x'}).status_code
         self.assertEqual(codes[2], 429)
         self.assertNotEqual(other, 429)
+
+
+class BranchScopeTests(SeatTestBase):
+    """Branch users: their lists work, and what they add belongs to their branch."""
+
+    def setUp(self):
+        super().setUp()
+        from django.contrib.auth.models import Permission
+        from apps.branch.models import Branch
+
+        self.ktm = Branch.objects.create(name='Kathmandu', code='KTM')
+        self.pkr = Branch.objects.create(name='Pokhara', code='PKR')
+        self.clerk = User.objects.create_user(email='ktm@test.com', name='Ktm', password='pass', branch=self.ktm)
+        self.clerk.user_permissions.add(*Permission.objects.filter(codename__in=[
+            'add_enrollment', 'change_enrollment', 'add_payment', 'add_followup', 'add_attendance',
+        ]))
+
+    def _branch_lead(self, branch):
+        lead = self._lead()
+        lead.branch = branch
+        lead.save()
+        return lead
+
+    def _body(self, **extra):
+        return {
+            'course': self.course.id, 'enrollment_date': str(date.today()),
+            'listed_fee': '30000', 'agreed_amount': '30000', **extra,
+        }
+
+    def test_notifications_and_attendance_lists_work(self):
+        from apps.student.models import Attendance
+
+        mine = Student.objects.create(full_name='Mine', phone='9800000201', branch=self.ktm)
+        theirs = Student.objects.create(full_name='Theirs', phone='9800000202', branch=self.pkr)
+        for student in (mine, theirs):
+            Attendance.objects.create(student=student, date=date.today(), status='present')
+        self.client.force_authenticate(self.clerk)
+
+        self.assertEqual(self.client.get('/api/notifications/').status_code, 200)
+        response = self.client.get('/api/attendance/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([r['student'] for r in response.data['results']], [mine.id])
+        self.assertEqual(self.client.get(f'/api/students/{theirs.id}/attendance/').data['results'], [])
+
+    def test_branch_user_records_take_their_branch(self):
+        lead = self._branch_lead(self.ktm)
+        self.client.force_authenticate(self.clerk)
+
+        response = self.client.post(
+            f'/api/leads/{lead.id}/enrollments/', self._body(branch=self.pkr.id), format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        enrollment = Enrollment.objects.get(id=response.data['id'])
+        self.assertEqual(enrollment.branch, self.ktm)
+
+        response = self.client.post(self._url(enrollment, 'payments/'), {
+            'amount': '1000', 'payment_date': timezone.now().isoformat(), 'payment_method': 'cash',
+        }, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Payment.objects.get(id=response.data['id']).branch, self.ktm)
+
+        response = self.client.post(f'/api/leads/{lead.id}/followups/', {
+            'scheduled_at': timezone.now().isoformat(), 'branch': self.pkr.id,
+        }, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(FollowUp.objects.get(id=response.data['id']).branch, self.ktm)
+
+        moved = self.client.patch(self._url(enrollment), {'branch': self.pkr.id}, format='json')
+        self.assertEqual(moved.status_code, 400)
+        enrollment.refresh_from_db()
+        self.assertEqual(enrollment.branch, self.ktm)
+
+    def test_other_branch_lead_and_student_are_not_found(self):
+        lead = self._branch_lead(self.pkr)
+        theirs = Student.objects.create(full_name='Theirs', phone='9800000203', branch=self.pkr)
+        self.client.force_authenticate(self.clerk)
+
+        self.assertEqual(
+            self.client.post(f'/api/leads/{lead.id}/enrollments/', self._body(), format='json').status_code, 404,
+        )
+        self.assertEqual(self.client.post(f'/api/leads/{lead.id}/followups/', {
+            'scheduled_at': timezone.now().isoformat(),
+        }, format='json').status_code, 404)
+        self.assertEqual(self.client.post(f'/api/students/{theirs.id}/attendance/', {
+            'date': str(date.today()), 'status': 'present',
+        }, format='json').status_code, 404)
+        self.assertFalse(Enrollment.objects.filter(lead=lead).exists())
+
+    def test_staff_pick_the_branch_or_get_the_leads(self):
+        lead = self._branch_lead(self.pkr)
+        response = self.client.post(f'/api/leads/{lead.id}/enrollments/', self._body(), format='json')
+        self.assertEqual(Enrollment.objects.get(id=response.data['id']).branch, self.pkr)
+        response = self.client.post(
+            f'/api/leads/{lead.id}/enrollments/', self._body(branch=self.ktm.id), format='json',
+        )
+        self.assertEqual(Enrollment.objects.get(id=response.data['id']).branch, self.ktm)
+
+    def test_backfill_fills_missing_branches(self):
+        import importlib
+        from django.apps import apps as django_apps
+
+        lead = self._branch_lead(self.ktm)
+        enrollment = Enrollment.objects.create(
+            lead=lead, course=self.course, enrollment_date=date.today(), listed_fee=30000, agreed_amount=30000,
+        )
+        payment = Payment.objects.create(
+            enrollment=enrollment, amount=1000, payment_method='cash', payment_date=timezone.now(),
+        )
+        followup = FollowUp.objects.create(lead=lead, scheduled_at=timezone.now())
+        importlib.import_module('apps.lead.migrations.0036_fill_record_branches').fill_branches(django_apps, None)
+        for row in (enrollment, payment, followup):
+            row.refresh_from_db()
+            self.assertEqual(row.branch, self.ktm)
