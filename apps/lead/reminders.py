@@ -14,13 +14,12 @@ from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.core.mail import send_mail
 from django.db import IntegrityError, transaction
-from django.db.models import Prefetch, Q, Sum
-from django.db.models.functions import Coalesce
+from django.db.models import Exists, OuterRef, Prefetch
 from django.utils import timezone
 
 from apps.global_config.mailer import render_email
 from apps.lead.models import (
-    Enrollment, FollowUp, Placement, PaymentPlan, ReminderConfig, ReminderLog,
+    Enrollment, FollowUp, Payment, Placement, PaymentPlan, ReminderConfig, ReminderLog,
 )
 from apps.lead.services import due_rows
 
@@ -53,16 +52,17 @@ def step_for(days_late, config):
 
 def _enrollments():
     """Enrollments that can owe money and have due dates, ready for due_rows()."""
+    from apps.course.money import _per_enrollment
+
+    # Subqueries, not joins: joining the plans and the payments together
+    # would count each payment once per plan.
     return (
         Enrollment.objects.filter(
-            status__in=Enrollment.SEAT_STATUSES, payment_plans__isnull=False,
+            Exists(PaymentPlan.objects.filter(enrollment=OuterRef('pk'))),
+            status__in=Enrollment.SEAT_STATUSES,
         )
-        .distinct()
         .select_related('lead', 'lead__assigned_counselor', 'student', 'course', 'branch')
-        .annotate(paid_total=Coalesce(
-            Sum('payments__amount', filter=Q(payments__status='successful')),
-            Decimal('0'),
-        ))
+        .annotate(paid_total=_per_enrollment(Payment.objects.filter(status=Payment.Status.SUCCESSFUL)))
         .prefetch_related(
             'adjustments',
             Prefetch('payment_plans', queryset=PaymentPlan.objects.prefetch_related('installments')),

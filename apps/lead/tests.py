@@ -2098,6 +2098,15 @@ class PaymentReminderTests(ReminderTestBase):
         self.assertEqual([r['enrollment'] for r in report], [part_paid.id])
         self.assertEqual(report[0]['amount'], Decimal('6000.00'))
 
+    def test_a_changed_plan_does_not_count_payments_twice(self):
+        # The old plan is kept when due dates change; 4000 paid must stay 4000.
+        enrollment = self._enrollment([(0, 10000)], paid=4000)
+        plan = PaymentPlan.objects.create(enrollment=enrollment, reason='New dates', created_by=self.counselor)
+        Installment.objects.create(plan=plan, due_on=self.TODAY, amount=10000)
+        report = self._run()
+        self.assertEqual([r['enrollment'] for r in report], [enrollment.id])
+        self.assertEqual(report[0]['amount'], Decimal('6000.00'))
+
     def test_due_dates_on_the_same_run_go_in_one_email(self):
         enrollment = self._enrollment([(-8, 10000), (0, 10000), (40, 10000)])
         self._run()
