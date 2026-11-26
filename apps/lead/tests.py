@@ -4590,3 +4590,17 @@ class ActionPermissionTests(SeatTestBase):
         self.assertEqual(self._confirm(enrollment).status_code, 200)
         response = self.client.post(self._url(enrollment, 'status/'), {'status': 'active', 'reason': 'x'}, format='json')
         self.assertEqual(response.status_code, 200, response.data)
+
+
+class NepalTimeTests(APITestCase):
+    """Numbers and days follow Nepal time, not UTC."""
+
+    def test_new_year_numbers_use_the_nepal_year(self):
+        from datetime import datetime, timezone as dt_timezone
+
+        # 00:45 on 1 Jan 2027 in Nepal is still 31 Dec 2026 in UTC.
+        just_after_midnight = datetime(2026, 12, 31, 19, 0, tzinfo=dt_timezone.utc)
+        with mock.patch('django.utils.timezone.now', return_value=just_after_midnight):
+            lead = Lead.objects.create(full_name='New Year', phone='9800000999')
+            self.assertEqual(timezone.localdate().isoformat(), '2027-01-01')
+        self.assertTrue(lead.reference_number.startswith('LD-2027-'), lead.reference_number)

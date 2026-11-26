@@ -1,8 +1,9 @@
-from datetime import date, timedelta
+from datetime import timedelta
 
 from django.conf import settings
 from django.db import models
 from django.db.models import Count, Q
+from django.utils import timezone
 
 
 class Student(models.Model):
@@ -107,7 +108,7 @@ class Student(models.Model):
         longest_streak = 0
 
         if present_dates:
-            today = date.today()
+            today = timezone.localdate()
             check = today
             while check in present_dates:
                 current_streak += 1

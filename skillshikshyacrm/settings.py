@@ -21,6 +21,7 @@ CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'redis://redis:6
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
+# Beat times below are in UTC, whatever TIME_ZONE is.
 CELERY_TIMEZONE = 'UTC'
 
 CELERY_BEAT_SCHEDULE = {
@@ -186,7 +187,8 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+# Days, dates and reports follow Nepal time. Times are still stored in UTC.
+TIME_ZONE = 'Asia/Kathmandu'
 
 USE_I18N = True
 

@@ -338,7 +338,7 @@ class Lead(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.reference_number:
-            year = datetime.now().year
+            year = timezone.localdate().year
             prefix = f'LD-{year}'
             last = Lead.objects.filter(reference_number__startswith=prefix).order_by('reference_number').last()
             seq = 1
