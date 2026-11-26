@@ -68,3 +68,11 @@ class User(AbstractBaseUser, PermissionsMixin):
 
 
 
+
+
+NO_BRANCH_MESSAGE = 'Your account has no branch yet. Ask an admin to add one.'
+
+
+def has_no_branch(user):
+    """Everyone but staff works inside one branch; without one they can't sign in."""
+    return not (user.is_staff or user.is_superuser) and user.branch_id is None

@@ -13,7 +13,9 @@ from rest_framework_simplejwt.views import (
     TokenBlacklistView,
 )
 from apps.account.models import User
-from apps.account.serializers.auth_serializers import CustomTokenObtainPairSerializer
+from apps.account.serializers.auth_serializers import (
+    BranchCheckedRefreshSerializer, CustomTokenObtainPairSerializer,
+)
 from apps.account.serializers.user_serializer import UserSerializer, UserMiniSerializer
 from apps.account.tasks import send_password_changed_email_task, send_reset_link_email_task
 from apps.global_config.permissions import IsStaffOrHasPermission
@@ -69,6 +71,8 @@ class CookieTokenObtainPairView(TokenObtainPairView):
 
 
 class CookieTokenRefreshView(TokenRefreshView):
+    serializer_class = BranchCheckedRefreshSerializer
+
     def post(self, request, *args, **kwargs):
         data = request.data.copy()
         if 'refresh' not in data and 'refresh_token' in request.COOKIES:

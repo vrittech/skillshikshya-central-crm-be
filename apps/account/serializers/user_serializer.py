@@ -16,6 +16,16 @@ class UserSerializer(serializers.ModelSerializer):
         return sorted(obj.get_all_permissions())
 
     def validate(self, attrs):
+        attrs = self._check_rights(attrs)
+        # Everyone but staff works inside one branch.
+        target = self.instance
+        if not (target is not None and (target.is_staff or target.is_superuser)):
+            branch = attrs['branch'] if 'branch' in attrs else getattr(target, 'branch', None)
+            if branch is None:
+                raise serializers.ValidationError({'branch': ['Pick a branch.']})
+        return attrs
+
+    def _check_rights(self, attrs):
         """Who may give which rights.
 
         Staff may do anything, except that only a superuser edits a superuser.

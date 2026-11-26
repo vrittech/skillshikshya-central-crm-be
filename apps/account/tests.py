@@ -140,8 +140,11 @@ class DefaultRolesMigrationTests(APITestCase):
 
     def test_every_listed_permission_exists(self):
         # A typo in the list would silently leave a permission out.
+        import importlib
+
+        later = importlib.import_module('apps.student.migrations.0005_branch_moves').ROLE_RIGHTS
         for name, models in _role_migration().DEFAULT_ROLES.items():
-            expected = set()
+            expected = {('student', codename) for codename in later.get(name, [])}
             for label, actions in models.items():
                 app_label, model = label.split('.')
                 expected |= {(app_label, f'{action}_{model}') for action in actions}
@@ -176,6 +179,7 @@ class DefaultRoleAbilitiesTests(APITestCase):
             'lead.add_adjustment', 'lead.view_payment', 'course.add_batchcost', 'course.change_batchcost',
             'course.change_coursebatch', 'student.add_attendance', 'lead.add_teamslicence',
             'lead.change_teamslicence', 'lead.add_teamsaccount', 'lead.change_teamsaccount',
+            'student.move_branch',
         ],
         'Counselor': [
             'lead.add_lead', 'lead.change_lead', 'lead.change_leadcourseinterest', 'lead.add_enrollment',
@@ -195,12 +199,12 @@ class DefaultRoleAbilitiesTests(APITestCase):
         'Branch Manager': ['lead.delete_payment', 'lead.delete_enrollment', 'account.add_user', 'auth.add_group'],
         'Counselor': [
             'lead.delete_lead', 'lead.delete_enrollment', 'lead.add_payment', 'lead.view_payment',
-            'lead.add_adjustment', 'lead.add_teamsaccount', 'account.change_user',
+            'lead.add_adjustment', 'lead.add_teamsaccount', 'account.change_user', 'student.move_branch',
         ],
         'Accountant': ['lead.add_lead', 'lead.change_lead', 'course.change_coursebatch', 'account.change_user'],
         'Front Desk': [
             'lead.delete_lead', 'lead.add_enrollment', 'lead.change_enrollment', 'lead.add_payment',
-            'lead.view_payment',
+            'lead.view_payment', 'student.move_branch',
         ],
         'Trainer': ['lead.view_lead', 'lead.add_lead', 'student.change_student', 'lead.view_payment'],
     }
@@ -380,3 +384,65 @@ class RoleApiTests(APITestCase):
         self.assertNotIn('Group', sections)
         self.assertNotIn('Permission', sections)
         self.assertFalse(any('.' in s for s in sections))
+
+
+class BranchRequiredTests(APITestCase):
+    """Everyone but staff works inside one branch."""
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        from apps.branch.models import Branch
+
+        cache.clear()  # sign-in attempts are rate limited
+        self.ktm = Branch.objects.create(name='Kathmandu', code='KTM')
+        self.admin = User.objects.create_user(email='a@test.com', name='Admin', password='pass', is_staff=True)
+        self.client.force_authenticate(self.admin)
+
+    def _register(self, **body):
+        return self.client.post('/api/auth/register/', {
+            'email': 'new@test.com', 'name': 'New', 'password': 'Secret123!', **body,
+        }, format='json')
+
+    def _sign_in(self, email):
+        self.client.force_authenticate(None)
+        return self.client.post('/api/auth/login/', {'email': email, 'password': 'pass'}, format='json')
+
+    def test_new_user_needs_a_branch(self):
+        response = self._register()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['branch'], ['Pick a branch.'])
+        self.assertEqual(self._register(branch=self.ktm.id).status_code, 201)
+
+    def test_branch_cannot_be_taken_off_a_user(self):
+        user = User.objects.create_user(email='u@test.com', name='U', password='pass', branch=self.ktm)
+        url = f'/api/users/{user.id}/'
+        self.assertEqual(self.client.patch(url, {'branch': None}, format='json').status_code, 400)
+        self.assertEqual(self.client.patch(url, {'name': 'U2'}, format='json').status_code, 200)
+        # An older user saved without a branch must get one with the next edit.
+        old = User.objects.create_user(email='old@test.com', name='Old', password='pass')
+        response = self.client.patch(f'/api/users/{old.id}/', {'name': 'Old 2'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('branch', response.data)
+        # Staff need no branch.
+        response = self.client.patch(f'/api/users/{self.admin.id}/', {'name': 'Admin 2'}, format='json')
+        self.assertEqual(response.status_code, 200)
+
+    def test_user_without_a_branch_cannot_sign_in(self):
+        User.objects.create_user(email='nob@test.com', name='No branch', password='pass')
+        User.objects.create_user(email='ktm@test.com', name='Ktm', password='pass', branch=self.ktm)
+        response = self._sign_in('nob@test.com')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Your account has no branch yet', str(response.data))
+        self.assertNotIn('access_token', response.cookies)
+        self.assertEqual(self._sign_in('ktm@test.com').status_code, 200)
+        self.assertEqual(self._sign_in('a@test.com').status_code, 200)  # staff
+
+    def test_losing_the_branch_signs_the_user_out(self):
+        user = User.objects.create_user(email='ktm@test.com', name='Ktm', password='pass', branch=self.ktm)
+        self.assertEqual(self._sign_in('ktm@test.com').status_code, 200)
+        self.assertEqual(self.client.get('/api/users/me/').status_code, 200)
+        user.branch = None
+        user.save(update_fields=['branch'])
+        self.assertEqual(self.client.get('/api/users/me/').status_code, 401)
+        self.assertEqual(self.client.post('/api/auth/refresh/', {}, format='json').status_code, 401)

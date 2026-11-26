@@ -807,6 +807,7 @@ class EnrollmentHistory(models.Model):
         COMPLETE = 'complete', 'Completed'
         UNDO_COMPLETE = 'undo_complete', 'Completion undone'
         CHANGE_STATUS = 'change_status', 'Status changed'
+        MOVE_BRANCH = 'move_branch', 'Moved branch'
 
     enrollment = models.ForeignKey(
         Enrollment, on_delete=models.PROTECT, related_name='history',

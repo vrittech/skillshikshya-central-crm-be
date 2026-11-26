@@ -5,8 +5,8 @@ from rest_framework.filters import BaseFilterBackend
 def walled_branch_id(user):
     """The branch a user is kept inside, or None when they may see every branch.
 
-    Staff see every branch. A user with no branch isn't walled either, as in
-    BranchFilterBackend.
+    Staff see every branch. Everyone else has a branch: a user without one
+    can't sign in (apps.account.authentication).
     """
     if user.is_staff or user.is_superuser:
         return None
@@ -41,10 +41,12 @@ class BranchFilterBackend(BaseFilterBackend):
 
 
 class LeadBranchFilterBackend(BranchFilterBackend):
-    """Leads: a branch sees its own leads and leads with an enquiry taken at the branch.
+    """Leads: a branch sees its own leads, leads with an enquiry taken at the
+    branch, and leads with an enrollment at the branch.
 
     A person may ask at any branch, so one lead can have enquiries from
-    several branches.
+    several branches. A student moved to another branch takes their open
+    enrollments along, and the new branch needs the lead to work them.
     """
 
     def filter_queryset(self, request, queryset, view):
@@ -54,12 +56,16 @@ class LeadBranchFilterBackend(BranchFilterBackend):
             branch_id = request.query_params.get('branch_id')
             if branch_id:
                 return queryset.filter(
-                    Q(branch_id=branch_id) | Q(course_interests__branch_id=branch_id)
+                    Q(branch_id=branch_id)
+                    | Q(course_interests__branch_id=branch_id)
+                    | Q(enrollments__branch_id=branch_id)
                 ).distinct()
             return queryset
         if user_branch:
             return queryset.filter(
-                Q(branch=user_branch) | Q(course_interests__branch=user_branch)
+                Q(branch=user_branch)
+                | Q(course_interests__branch=user_branch)
+                | Q(enrollments__branch=user_branch)
             ).distinct()
         return queryset
 

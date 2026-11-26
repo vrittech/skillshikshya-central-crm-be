@@ -46,6 +46,11 @@ def _take_seat(enrollment, batch, *, kind, reason, user, on=None, from_batch=Non
             f'{batch.name} is a batch of another course. To switch course, cancel this '
             'enrollment with a reason and add a new one.'
         )
+    if batch.branch_id and enrollment.branch_id and batch.branch_id != enrollment.branch_id:
+        raise ActionRefused(
+            f'{batch.name} is a batch of {batch.branch.name}. To study there, move the '
+            'student to that branch first.'
+        )
     refusal = batch.seat_refusal(exclude=enrollment)
     if refusal:
         raise ActionRefused(refusal)
@@ -222,6 +227,63 @@ def resume_enrollment(enrollment, batch, *, reason, user, on=None):
     )
     _resume_teams_licence(enrollment, reason=f'Resumed: {reason}', user=user)
     return enrollment
+
+
+# Enrollments that move with a student; finished and cancelled ones stay put.
+MOVING_STATUSES = (Enrollment.Status.PENDING, Enrollment.Status.CONFIRMED, Enrollment.Status.ACTIVE)
+
+
+@transaction.atomic
+def move_student_branch(student, branch, *, reason, user):
+    """Move a student, their open enrollments and their documents to another branch.
+
+    A batch belongs to one branch, so a seated enrollment leaves its batch;
+    join a batch of the new branch next. Payments, invoices and money entries
+    stay with the branch that took them. Adds one BranchMove row, and a
+    history row on each enrollment that moved.
+    """
+    from apps.student.models import BranchMove, Student, StudentDocument
+
+    student = Student.objects.select_for_update(of=('self',)).select_related('branch').get(pk=student.pk)
+    old = student.branch
+    if old is not None and old.pk == branch.pk:
+        raise ActionRefused(f'{student.full_name} is already at {branch.name}.')
+    if not branch.is_active:
+        raise ActionRefused(f'{branch.name} is not active.')
+    reason = (reason or '').strip()
+    if not reason:
+        raise ActionRefused('Give a reason for the move.')
+    note = f'Moved from {old.name if old else "no branch"} to {branch.name}: {reason}'
+
+    enrollments = (
+        Enrollment.objects.select_for_update(of=('self',))
+        .select_related('current_batch')
+        .filter(student=student, status__in=MOVING_STATUSES)
+        .order_by('id')
+    )
+    for enrollment in enrollments:
+        left = None
+        if enrollment.current_batch_id:
+            left = _free_seat(enrollment, kind=Placement.Kind.LEAVE, reason=note, user=user)
+        enrollment.branch = branch
+        enrollment.save(update_fields=['branch', 'updated_at'])
+        EnrollmentHistory.record(
+            enrollment=enrollment,
+            action=EnrollmentHistory.Action.MOVE_BRANCH,
+            reason=note,
+            performed_by=user,
+            before={'branch': old.name if old else None, 'batch': _code(left) if left else None},
+            after={'branch': branch.name, 'batch': None},
+        )
+
+    StudentDocument.objects.filter(student=student).update(branch=branch)
+    student.branch = branch
+    student.updated_by = user
+    student.save(update_fields=['branch', 'updated_by', 'updated_at'])
+    BranchMove.objects.create(
+        student=student, from_branch=old, to_branch=branch, reason=reason, moved_by=user,
+    )
+    return student
 
 
 def latest_placement(field):
@@ -457,7 +519,9 @@ def student_for_lead(lead, *, enrollment, user):
             email=lead.email,
             address=lead.address,
             source=lead.source,
-            branch=lead.branch or enrollment.branch,
+            # The student belongs where they enrolled, which may not be
+            # where they first asked.
+            branch=enrollment.branch or lead.branch,
             assigned_counselor=lead.assigned_counselor,
             lead=lead,
             enrolled_at=enrollment.enrollment_date,

@@ -1,5 +1,6 @@
 from rest_framework import serializers
-from apps.student.models import Student, StudentDocument, Attendance
+from apps.branch.models import Branch
+from apps.student.models import BranchMove, Student, StudentDocument, Attendance
 from apps.lead.models import Payment
 
 
@@ -85,3 +86,23 @@ class AttendanceSerializer(serializers.ModelSerializer):
         model = Attendance
         fields = '__all__'
         read_only_fields = ['student', 'marked_by', 'created_at']
+
+
+class MoveBranchSerializer(serializers.Serializer):
+    """Body of Move branch: the branch to move to and why."""
+
+    branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.all())
+    reason = serializers.CharField(max_length=1000)
+
+
+class BranchMoveSerializer(serializers.ModelSerializer):
+    from_branch_name = serializers.CharField(source='from_branch.name', read_only=True, default=None)
+    to_branch_name = serializers.CharField(source='to_branch.name', read_only=True)
+    moved_by_name = serializers.CharField(source='moved_by.name', read_only=True)
+
+    class Meta:
+        model = BranchMove
+        fields = [
+            'id', 'from_branch', 'from_branch_name', 'to_branch', 'to_branch_name',
+            'reason', 'moved_by', 'moved_by_name', 'moved_at',
+        ]

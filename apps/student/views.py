@@ -14,12 +14,12 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from apps.student.models import Student, StudentDocument, Attendance
 from apps.student.serializers import (
-    StudentSerializer, StudentListSerializer,
+    BranchMoveSerializer, MoveBranchSerializer, StudentSerializer, StudentListSerializer,
     StudentDocumentSerializer, AttendanceSerializer,
 )
 from apps.student.filters import StudentFilter, StudentDocumentFilter, AttendanceFilter
 from apps.global_config.pagination import CustomPagination
-from apps.global_config.permissions import IsStaffOrHasPermission
+from apps.global_config.permissions import IsStaffOrHasPermission, needs
 from apps.global_config.filters import BranchFilterBackend, walled_branch_id
 
 
@@ -67,17 +67,54 @@ class StudentViewSet(viewsets.ModelViewSet):
                 'lead': 'A lead becomes a student when one of their enrollments is '
                         'confirmed. Use Confirm enrollment on the lead.'
             })
-        serializer.save(created_by=self.request.user)
+        # A branch user's students are always their own branch's.
+        branch = (
+            self.request.user.branch if walled_branch_id(self.request.user) is not None
+            else serializer.validated_data.get('branch')
+        )
+        if branch is None:
+            raise ValidationError({'branch': ['Pick a branch.']})
+        serializer.save(created_by=self.request.user, branch=branch)
 
     def perform_update(self, serializer):
+        branch = serializer.validated_data.get('branch')
+        if 'branch' in serializer.validated_data and branch != serializer.instance.branch:
+            raise ValidationError({'branch': ['Use Move branch to change a student’s branch.']})
         serializer.save(updated_by=self.request.user)
 
     def get_permissions(self):
+        if self.action == 'move_branch':
+            return [IsAuthenticated(), needs('student.move_branch')()]
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             permission_classes = [IsAuthenticated, IsStaffOrHasPermission]
         else:
             permission_classes = [IsAuthenticated]
         return [p() for p in permission_classes]
+
+    @action(detail=True, methods=['post'], url_path='move-branch')
+    def move_branch(self, request, pk=None):
+        """Move the student (and their open enrollments) to another branch, with a reason.
+
+        A branch user can only move their own branch's students.
+        """
+        from apps.lead.services import move_student_branch
+
+        student = self.get_object()
+        body = MoveBranchSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        student = move_student_branch(
+            student, body.validated_data['branch'], reason=body.validated_data['reason'], user=request.user,
+        )
+        student = Student.objects.select_related(
+            'source', 'branch', 'assigned_counselor', 'created_by', 'updated_by',
+        ).get(pk=student.pk)
+        return Response(StudentSerializer(student, context=self.get_serializer_context()).data)
+
+    @action(detail=True, methods=['get'], url_path='branch-moves')
+    def branch_moves(self, request, pk=None):
+        """Every branch move of this student, newest first."""
+        moves = self.get_object().branch_moves.select_related('from_branch', 'to_branch', 'moved_by')
+        return Response(BranchMoveSerializer(moves, many=True).data)
 
     @action(detail=False, methods=['get'])
     def export_csv(self, request):

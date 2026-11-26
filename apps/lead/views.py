@@ -745,14 +745,30 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         from apps.lead.emails import enrollment_received
 
         lead = visible_lead(self.request, self.kwargs['lead_pk'])
-        enrollment = serializer.save(
-            lead=lead,
-            created_by=self.request.user,
-            branch=new_record_branch(self.request, lead, serializer.validated_data.get('branch')),
-        )
+        data = serializer.validated_data
+        batch = data.get('batch')
+        # Staff adding an enrollment with a batch: it belongs to the batch's branch.
+        given = data.get('branch') or (batch.branch if batch is not None else None)
+        branch = new_record_branch(self.request, lead, given)
+        self._batch_must_be_of(batch, branch)
+        enrollment = serializer.save(lead=lead, created_by=self.request.user, branch=branch)
         enrollment_received(enrollment, user=self.request.user)
 
+    @staticmethod
+    def _batch_must_be_of(batch, branch):
+        """A batch belongs to one branch; an enrollment can only plan a batch of its own."""
+        if batch is not None and batch.branch_id and branch is not None and batch.branch_id != branch.pk:
+            raise ValidationError({
+                'batch': [f'{batch.name} is a batch of {batch.branch.name}. Pick a batch of {branch.name}.'],
+            })
+
     def perform_update(self, serializer):
+        data = serializer.validated_data
+        if 'batch' in data or 'branch' in data:
+            self._batch_must_be_of(
+                data['batch'] if 'batch' in data else serializer.instance.batch,
+                data['branch'] if 'branch' in data else serializer.instance.branch,
+            )
         branch = serializer.validated_data.get('branch')
         if (
             'branch' in serializer.validated_data
@@ -760,6 +776,12 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
             and branch != serializer.instance.branch
         ):
             raise ValidationError({'branch': ['Only staff can move an enrollment to another branch.']})
+        if (
+            'branch' in serializer.validated_data
+            and branch != serializer.instance.branch
+            and serializer.instance.student_id
+        ):
+            raise ValidationError({'branch': ['Use Move branch on the student to change this branch.']})
         serializer.save(updated_by=self.request.user)
 
     # Actions that change an enrollment need change_enrollment, not add_.
@@ -908,6 +930,11 @@ class PaymentViewSet(viewsets.ModelViewSet):
     filterset_class = PaymentFilter
     ordering_fields = ['payment_date', 'created_at']
     ordering = ['-payment_date']
+
+    # An enrollment's payments show to the branch that has the enrollment now,
+    # also those taken at a branch the student left. Money lists and reports
+    # still count each payment at the branch that took it.
+    branch_field = 'enrollment__branch'
 
     def get_queryset(self):
         return Payment.objects.filter(

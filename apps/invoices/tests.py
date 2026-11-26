@@ -67,6 +67,7 @@ class FeeInvoiceOnConfirmTests(InvoiceTestBase):
         response = self.client.post('/api/students/', {
             'full_name': 'Standalone Student',
             'phone': '222',
+            'branch': self.branch.id,
         }, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(Invoice.objects.count(), 0)
