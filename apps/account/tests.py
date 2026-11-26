@@ -175,11 +175,11 @@ class DefaultRoleAbilitiesTests(APITestCase):
             'lead.add_enrollment', 'lead.change_enrollment', 'lead.add_payment', 'lead.change_payment',
             'lead.add_adjustment', 'lead.view_payment', 'course.add_batchcost', 'course.change_batchcost',
             'course.change_coursebatch', 'student.add_attendance', 'lead.add_teamslicence',
-            'lead.change_teamslicence',
+            'lead.change_teamslicence', 'lead.add_teamsaccount', 'lead.change_teamsaccount',
         ],
         'Counselor': [
             'lead.add_lead', 'lead.change_lead', 'lead.change_leadcourseinterest', 'lead.add_enrollment',
-            'lead.add_followup', 'lead.add_leadcall', 'lead.view_lead',
+            'lead.change_enrollment', 'lead.add_followup', 'lead.add_leadcall', 'lead.view_lead',
         ],
         'Accountant': [
             'lead.view_lead', 'lead.change_enrollment', 'lead.add_payment', 'lead.change_payment',
@@ -194,11 +194,14 @@ class DefaultRoleAbilitiesTests(APITestCase):
     CANNOT = {
         'Branch Manager': ['lead.delete_payment', 'lead.delete_enrollment', 'account.add_user', 'auth.add_group'],
         'Counselor': [
-            'lead.delete_lead', 'lead.change_enrollment', 'lead.add_payment', 'lead.view_payment',
-            'lead.add_adjustment', 'account.change_user',
+            'lead.delete_lead', 'lead.delete_enrollment', 'lead.add_payment', 'lead.view_payment',
+            'lead.add_adjustment', 'lead.add_teamsaccount', 'account.change_user',
         ],
         'Accountant': ['lead.add_lead', 'lead.change_lead', 'course.change_coursebatch', 'account.change_user'],
-        'Front Desk': ['lead.delete_lead', 'lead.add_enrollment', 'lead.add_payment', 'lead.view_payment'],
+        'Front Desk': [
+            'lead.delete_lead', 'lead.add_enrollment', 'lead.change_enrollment', 'lead.add_payment',
+            'lead.view_payment',
+        ],
         'Trainer': ['lead.view_lead', 'lead.add_lead', 'student.change_student', 'lead.view_payment'],
     }
 
@@ -238,9 +241,14 @@ class DefaultRolesThroughTheApiTests(APITestCase):
         # Rights are checked before the record is looked up, so ids need not exist.
         pay = '/api/leads/999/enrollments/999/payments/'
         confirm = '/api/leads/999/enrollments/999/confirm/'
+        self._as('Front Desk')
+        self.assertEqual(self.client.post(confirm, {}, format='json').status_code, 403)
+        # Counselors confirm enrollments but don't take money.
         self._as('Counselor')
         self.assertEqual(self.client.post(pay, {}, format='json').status_code, 403)
-        self.assertEqual(self.client.post(confirm, {}, format='json').status_code, 403)
+        self.assertNotEqual(self.client.post(confirm, {}, format='json').status_code, 403)
+        due_dates = '/api/leads/999/enrollments/999/due-dates/'
+        self.assertNotEqual(self.client.post(due_dates, {}, format='json').status_code, 403)
         self._as('Accountant')
         self.assertNotEqual(self.client.post(pay, {}, format='json').status_code, 403)
         self.assertNotEqual(self.client.post(confirm, {}, format='json').status_code, 403)
@@ -261,6 +269,12 @@ class DefaultRolesThroughTheApiTests(APITestCase):
         self.assertNotEqual(self.client.post(costs, {}, format='json').status_code, 403)
         self._as('Branch Manager')
         self.assertNotEqual(self.client.post(close, {}, format='json').status_code, 403)
+
+    def test_branch_manager_adds_teams_accounts(self):
+        self._as('Counselor')
+        self.assertEqual(self.client.post('/api/teams-accounts/', {}, format='json').status_code, 403)
+        self._as('Branch Manager')
+        self.assertNotEqual(self.client.post('/api/teams-accounts/', {}, format='json').status_code, 403)
 
 
 class RoleApiTests(APITestCase):
