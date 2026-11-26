@@ -17,7 +17,7 @@ class MeTests(APITestCase):
         self.assertEqual(response.data['user_permissions'], [])
 
     def test_me_includes_permissions_from_groups(self):
-        group = Group.objects.create(name='Counselor')
+        group = Group.objects.create(name='Test role')
         group.permissions.add(Permission.objects.get(codename='add_lead'))
         self.user.groups.add(group)
         response = self.client.get('/api/users/me/')
@@ -27,6 +27,29 @@ class MeTests(APITestCase):
     def test_me_needs_sign_in(self):
         self.client.force_authenticate(None)
         self.assertEqual(self.client.get('/api/users/me/').status_code, 401)
+
+
+class DefaultRolesTests(APITestCase):
+    def test_default_roles_exist_with_permissions(self):
+        roles = {g.name: g for g in Group.objects.prefetch_related('permissions')}
+        for name in ['Branch Manager', 'Counselor', 'Accountant', 'Front Desk', 'Trainer']:
+            self.assertIn(name, roles)
+            self.assertTrue(roles[name].permissions.exists(), name)
+        counselor = {p.codename for p in roles['Counselor'].permissions.all()}
+        self.assertIn('add_lead', counselor)
+        self.assertNotIn('delete_lead', counselor)
+        self.assertNotIn('add_payment', counselor)
+        accountant = {p.codename for p in roles['Accountant'].permissions.all()}
+        self.assertIn('add_payment', accountant)
+        self.assertIn('view_payment', accountant)
+
+    def test_role_screen_lists_every_default_permission(self):
+        from apps.account.viewsets.permission_viewset import PermissionViewSet
+
+        listed = set(PermissionViewSet.queryset.values_list('pk', flat=True))
+        for group in Group.objects.filter(name__in=['Branch Manager', 'Counselor', 'Accountant', 'Front Desk', 'Trainer']):
+            missing = group.permissions.exclude(pk__in=listed).values_list('codename', flat=True)
+            self.assertEqual(list(missing), [], group.name)
 
 
 class UserRightsTests(APITestCase):
@@ -44,9 +67,9 @@ class UserRightsTests(APITestCase):
         )
         self.manager = User.objects.create_user(email='m@test.com', name='Manager', password='pass', branch=self.ktm)
         self.manager.user_permissions.set(perms)
-        self.counselor_role = Group.objects.create(name='Counselor')
+        self.counselor_role = Group.objects.create(name='Test counselor')
         self.counselor_role.permissions.set(perms.filter(codename='view_user'))
-        self.admin_role = Group.objects.create(name='Admin')
+        self.admin_role = Group.objects.create(name='Test admin')
         self.admin_role.permissions.set(Permission.objects.filter(codename__in=['delete_user', 'add_user']))
         self.staff = User.objects.create_user(email='s@test.com', name='Staff', password='pass', is_staff=True)
         self.root = User.objects.create_superuser(email='r@test.com', name='Root', password='pass')
@@ -74,7 +97,7 @@ class UserRightsTests(APITestCase):
     def test_cannot_give_a_role_with_more_rights(self):
         response = self._register(groups=[self.admin_role.id])
         self.assertEqual(response.status_code, 400)
-        self.assertIn('Admin', str(response.data['groups']))
+        self.assertIn('Test admin', str(response.data['groups']))
         self.assertEqual(self._register(branch=self.pkr.id).status_code, 400)
 
     def test_cannot_raise_own_rights_or_touch_staff(self):

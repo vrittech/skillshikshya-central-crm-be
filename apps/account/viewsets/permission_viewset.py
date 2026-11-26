@@ -19,6 +19,9 @@ class PermissionViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         'enrollment', 'payment', 'leadcall', 'leadactivity',
         'followup', 'leaddocument', 'notification',
         'student', 'studentdocument', 'attendance',
+        'coursebatch', 'batch', 'batchcost', 'batchclosing',
+        'installment', 'paymentplan', 'adjustment', 'invoice',
+        'voicenote', 'teamslicence', 'teamsaccount',
     ]
     ).exclude(  # exclude by
         content_type__app_label='auth',
