@@ -13,31 +13,36 @@ def walled_branch_id(user):
     return getattr(user, 'branch_id', None)
 
 
+def picked_branch_id(request):
+    """The branch staff picked with ?branch_id, or None for every branch."""
+    picked = request.query_params.get('branch_id', '')
+    return int(picked) if picked.isdigit() else None
+
+
 class BranchFilterBackend(BaseFilterBackend):
     """Branch users see their branch's rows; staff see all or pick one with ?branch_id.
 
-    A view with `shared_when_no_branch = True` also shows branch users the
-    rows that have no branch (shared by every branch, e.g. shifts).
+    A view with `shared_when_no_branch = True` also shows the rows that have
+    no branch (shared by every branch, e.g. courses and shifts). Staff who
+    pick a branch see what that branch's users see.
     """
 
     def filter_queryset(self, request, queryset, view):
+        user = request.user
+        if user.is_staff or user.is_superuser:
+            branch_id = picked_branch_id(request)
+            if branch_id is None:
+                return queryset
+        else:
+            branch_id = getattr(user, 'branch_id', None)
+            if branch_id is None:
+                return queryset
+
         branch_field = getattr(view, 'branch_field', 'branch')
-        user_branch = getattr(request.user, 'branch', None)
-
-        if request.user.is_staff or request.user.is_superuser:
-            branch_id = request.query_params.get('branch_id')
-            if branch_id:
-                filter_kwargs = {f'{branch_field}_id': branch_id}
-                return queryset.filter(**filter_kwargs)
-            return queryset
-
-        if user_branch:
-            mine = Q(**{branch_field: user_branch})
-            if getattr(view, 'shared_when_no_branch', False):
-                mine |= Q(**{f'{branch_field}__isnull': True})
-            return queryset.filter(mine)
-
-        return queryset
+        mine = Q(**{f'{branch_field}_id': branch_id})
+        if getattr(view, 'shared_when_no_branch', False):
+            mine |= Q(**{f'{branch_field}__isnull': True})
+        return queryset.filter(mine)
 
 
 class LeadBranchFilterBackend(BranchFilterBackend):
@@ -53,8 +58,8 @@ class LeadBranchFilterBackend(BranchFilterBackend):
         user = request.user
         user_branch = getattr(user, 'branch', None)
         if user.is_staff or user.is_superuser:
-            branch_id = request.query_params.get('branch_id')
-            if branch_id:
+            branch_id = picked_branch_id(request)
+            if branch_id is not None:
                 return queryset.filter(
                     Q(branch_id=branch_id)
                     | Q(course_interests__branch_id=branch_id)

@@ -69,8 +69,8 @@ def _branch_scope(request):
     if user is None:
         return None
     if user.is_staff or user.is_superuser:
-        branch_id = _query_param(request, 'branch_id')
-        return int(branch_id) if branch_id else None
+        branch_id = _query_param(request, 'branch_id') or ''
+        return int(branch_id) if branch_id.isdigit() else None
     return getattr(user, 'branch_id', None)
 
 

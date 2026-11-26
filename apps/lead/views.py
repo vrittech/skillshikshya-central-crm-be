@@ -63,6 +63,8 @@ from apps.global_config.filters import BranchFilterBackend, LeadBranchFilterBack
 class ConfigViewSet(viewsets.ModelViewSet):
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, BranchFilterBackend]
+    # Statuses, sources and the rest with no branch are shared by every branch.
+    shared_when_no_branch = True
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:

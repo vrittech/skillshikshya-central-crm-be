@@ -31,6 +31,8 @@ class CourseCategoryViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'description']
     ordering_fields = ['id', 'name']
     ordering = ['name']
+    # A category with no branch is shared by every branch.
+    shared_when_no_branch = True
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -52,6 +54,8 @@ class CourseViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'remarks']
     ordering_fields = ['id', 'name', 'full_amount', 'course_type']
     ordering = ['name']
+    # A course with no branch is shared by every branch.
+    shared_when_no_branch = True
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)

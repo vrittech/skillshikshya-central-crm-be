@@ -802,3 +802,67 @@ class ShiftTests(APITestCase):
         self.assertEqual((str(a.start_time), str(a.end_time)), ('06:00:00', '08:00:00'))
         self.assertEqual((str(b.start_time), str(b.end_time)), ('17:30:00', '19:00:00'))
         self.assertIsNone(c.start_time)
+
+
+class AdminBranchPickTests(APITestCase):
+    """An admin who picks a branch sees what that branch's users see."""
+
+    def setUp(self):
+        from apps.branch.models import Branch
+        from apps.lead.models import LeadStatus
+
+        self.ktm = Branch.objects.create(name='Kathmandu', code='KTM')
+        self.pkr = Branch.objects.create(name='Pokhara', code='PKR')
+        self.admin = User.objects.create_user(
+            email='admin@test.com', name='Admin', password='pass', is_staff=True,
+        )
+        self.ktm_user = User.objects.create_user(
+            email='ktm@test.com', name='Ktm', password='pass', branch=self.ktm,
+        )
+        Course.objects.create(name='Shared course', full_amount=1000)
+        Course.objects.create(name='Ktm course', full_amount=1000, branch=self.ktm)
+        Course.objects.create(name='Pkr course', full_amount=1000, branch=self.pkr)
+        Batch.objects.create(name='Shared shift')
+        Batch.objects.create(name='Pkr shift', branch=self.pkr)
+        LeadStatus.objects.create(name='New')
+        LeadStatus.objects.create(name='Pkr only', branch=self.pkr)
+        shared = Course.objects.get(name='Shared course')
+        CourseBatch.objects.create(name='Ktm batch', course=shared, branch=self.ktm)
+        CourseBatch.objects.create(name='Pkr batch', course=shared, branch=self.pkr)
+
+    def _names(self, url):
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        return {row['name'] for row in response.data['results']}
+
+    def test_branch_users_see_their_rows_and_the_shared_ones(self):
+        self.client.force_authenticate(self.ktm_user)
+        self.assertEqual(self._names('/api/courses/'), {'Shared course', 'Ktm course'})
+        self.assertEqual(self._names('/api/batches/'), {'Shared shift'})
+        self.assertEqual(self._names('/api/lead-statuses/'), {'New'})
+        self.assertEqual(self._names('/api/course-batches/'), {'Ktm batch'})
+
+    def test_admin_picking_a_branch_sees_what_the_branch_sees(self):
+        self.client.force_authenticate(self.admin)
+        for url in ('/api/courses/', '/api/batches/', '/api/lead-statuses/', '/api/course-batches/'):
+            self.client.force_authenticate(self.ktm_user)
+            branch_view = self._names(url)
+            self.client.force_authenticate(self.admin)
+            self.assertEqual(self._names(f'{url}?branch_id={self.ktm.id}'), branch_view, url)
+
+    def test_admin_without_a_pick_sees_every_branch(self):
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(self._names('/api/courses/'), {'Shared course', 'Ktm course', 'Pkr course'})
+        self.assertEqual(self._names('/api/course-batches/'), {'Ktm batch', 'Pkr batch'})
+
+    def test_a_bad_branch_pick_is_ignored(self):
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(len(self._names('/api/courses/?branch_id=abc')), 3)
+        response = self.client.get('/api/reports/leads-by-status/?branch_id=abc')
+        self.assertNotEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def test_branch_users_cannot_pick_another_branch(self):
+        self.client.force_authenticate(self.ktm_user)
+        self.assertEqual(
+            self._names(f'/api/courses/?branch_id={self.pkr.id}'), {'Shared course', 'Ktm course'},
+        )
