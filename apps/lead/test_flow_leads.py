@@ -8,7 +8,6 @@ branch walls, the public intake, and signing in.
 
 A test marked expectedFailure shows a bug: the `# BUG:` line above it says what.
 """
-import unittest
 from datetime import date, timedelta
 from decimal import Decimal
 from unittest import mock
@@ -321,8 +320,6 @@ class TimelineRightsTests(FlowTestCase):
 class BranchWallTests(FlowTestCase):
     """A branch user reads, adds and changes only their branch's records."""
 
-    # BUG: LeadViewSet.perform_create never sets the branch; the import forces the user's own.
-    @unittest.expectedFailure
     def test_new_lead_from_a_branch_user_belongs_to_their_branch(self):
         self._as(self._user('Counselor'))
         response = self.client.post('/api/leads/', {'full_name': 'Walk In', 'phone': self._phone()}, format='json')
@@ -330,8 +327,6 @@ class BranchWallTests(FlowTestCase):
         self.assertEqual(Lead.objects.get(pk=response.data['id']).branch, self.ktm)
         self.assertEqual(self.client.get(f'/api/leads/{response.data["id"]}/').status_code, 200)
 
-    # BUG: LeadSerializer takes any branch from the body; the import refuses another branch.
-    @unittest.expectedFailure
     def test_branch_user_cannot_add_a_lead_to_another_branch(self):
         self._as(self._user('Counselor'))
         self.client.post('/api/leads/', {
@@ -339,8 +334,6 @@ class BranchWallTests(FlowTestCase):
         }, format='json')
         self.assertFalse(Lead.objects.filter(branch=self.pkr).exists())
 
-    # BUG: LeadViewSet.perform_update lets a branch user change the branch; enrollments refuse it.
-    @unittest.expectedFailure
     def test_branch_user_cannot_move_a_lead_to_another_branch(self):
         lead = self._lead(self.ktm)
         self._as(self._user('Counselor'))
@@ -348,8 +341,6 @@ class BranchWallTests(FlowTestCase):
         lead.refresh_from_db()
         self.assertEqual(lead.branch, self.ktm)
 
-    # BUG: LeadSerializer accepts any user as counselor; the import refuses one of another branch.
-    @unittest.expectedFailure
     def test_lead_counselor_must_work_in_the_lead_branch(self):
         pkr_counselor = self._user('Counselor', branch='pkr')
         self._as(self._user('Counselor'))
@@ -359,8 +350,6 @@ class BranchWallTests(FlowTestCase):
         }, format='json')
         self.assertEqual(response.status_code, 400)
 
-    # BUG: LeadSerializer accepts an inactive user as counselor; the import only finds active ones.
-    @unittest.expectedFailure
     def test_lead_counselor_must_be_an_active_user(self):
         gone = self._user('Counselor', is_active=False)
         self._as(self._user('Counselor'))
@@ -369,8 +358,6 @@ class BranchWallTests(FlowTestCase):
         }, format='json')
         self.assertEqual(response.status_code, 400)
 
-    # BUG: FollowUpSerializer takes any assignee; one of another branch can't even see the follow-up.
-    @unittest.expectedFailure
     def test_follow_up_cannot_go_to_a_counselor_of_another_branch(self):
         lead = self._lead(self.ktm)
         pkr_counselor = self._user('Counselor', branch='pkr')
@@ -380,8 +367,6 @@ class BranchWallTests(FlowTestCase):
         }, format='json')
         self.assertEqual(response.status_code, 400)
 
-    # BUG: FollowUpViewSet (and calls, notes, documents) save `branch` from the body on edit.
-    @unittest.expectedFailure
     def test_a_follow_up_stays_in_its_branch_when_a_branch_user_edits_it(self):
         lead = self._lead(self.ktm)
         self._as(self._user('Counselor'))
@@ -393,8 +378,6 @@ class BranchWallTests(FlowTestCase):
         self.client.patch(url, {'branch': self.pkr.id}, format='json')
         self.assertEqual(FollowUp.objects.get(pk=created.data['id']).branch, self.ktm)
 
-    # BUG: LeadActivitySerializer leaves performed_by writable, so an edit can change who wrote a note.
-    @unittest.expectedFailure
     def test_note_author_stays_who_wrote_it(self):
         lead = self._lead(self.ktm)
         manager = self._as(self._user('Branch Manager'))
@@ -409,8 +392,6 @@ class BranchWallTests(FlowTestCase):
         )
         self.assertEqual(LeadActivity.objects.get(pk=note.data['id']).performed_by_id, manager.id)
 
-    # BUG: LeadSerializer.get_next_followup and get_call_count read every branch's follow-ups and calls.
-    @unittest.expectedFailure
     def test_lead_detail_shows_only_own_branch_follow_up_and_calls(self):
         lead = self._lead(self.pkr, full_name='Shared Person')
         pkr_counselor = self._user('Counselor', branch='pkr', name='Pkr Counselor')
@@ -430,8 +411,6 @@ class BranchWallTests(FlowTestCase):
         self.assertIsNone(detail['next_followup'])
         self.assertEqual(detail['call_count'], 0)
 
-    # BUG: PrimaryCourseField (and the enquiry course field) take a course of another branch.
-    @unittest.expectedFailure
     def test_course_of_another_branch_cannot_be_picked(self):
         pkr_course = Course.objects.create(name='Pokhara Only', full_amount=10000, branch=self.pkr)
         self._as(self._user('Counselor'))
@@ -442,8 +421,6 @@ class BranchWallTests(FlowTestCase):
         }, format='json')
         self.assertEqual(response.status_code, 400)
 
-    # BUG: ConfigViewSet saves a branch user's new source with no branch, so every branch gets it.
-    @unittest.expectedFailure
     def test_new_lead_source_from_a_branch_user_belongs_to_their_branch(self):
         self._as(self._user('Counselor'))
         response = self.client.post('/api/lead-sources/', {'name': 'Kathmandu Fair'}, format='json')
@@ -603,8 +580,6 @@ class BadInputTests(FlowTestCase):
                 self.assertIn(field, response.data)
         self.assertFalse(Lead.objects.exists())
 
-    # BUG: Lead.expected_revenue has no lower bound in the API; the import refuses below 0.
-    @unittest.expectedFailure
     def test_expected_revenue_cannot_be_negative(self):
         self._as(self._user('Counselor'))
         response = self.client.post('/api/leads/', {
@@ -612,8 +587,6 @@ class BadInputTests(FlowTestCase):
         }, format='json')
         self.assertEqual(response.status_code, 400)
 
-    # BUG: LeadCallSerializer takes a negative duration (charged as 0, summed as negative talk time).
-    @unittest.expectedFailure
     def test_call_duration_cannot_be_negative(self):
         lead = self._lead(self.ktm)
         self._as(self._user('Counselor'))
@@ -623,8 +596,6 @@ class BadInputTests(FlowTestCase):
         }, format='json')
         self.assertEqual(response.status_code, 400)
 
-    # BUG: LeadDocument.file is a URLField, so the '/api/files/<key>' address /api/upload/ returns is refused.
-    @unittest.expectedFailure
     def test_document_can_hold_the_address_the_upload_gives(self):
         lead = self._lead(self.ktm)
         self._as(self._user('Counselor'))
@@ -661,8 +632,6 @@ class FollowUpEdgeTests(FlowTestCase):
         self.lead.refresh_from_db()
         self.assertEqual(self.lead.last_contact_at, contacted)
 
-    # BUG: FollowUp.save never clears completed_at, so a reopened follow-up still shows as done.
-    @unittest.expectedFailure
     def test_a_reopened_follow_up_is_not_shown_as_done(self):
         self._patch({'status': 'completed'})
         self._patch({'status': 'pending'})
@@ -697,8 +666,6 @@ class ListParamTests(FlowTestCase):
             with self.subTest(url=url):
                 self.assertIn(self.client.get(url, {'due': 'never', 'search': '%'}).status_code, (200, 400))
 
-    # BUG: apps/lead/filters.py has_enrollment_in uses staff's raw ?branch_id, so a non-number is a 500.
-    @unittest.expectedFailure
     def test_staff_bad_branch_pick_does_not_crash_lead_counts(self):
         self._as(self.admin)
         self.client.raise_request_exception = False
@@ -796,24 +763,18 @@ class IntakeFlowTests(APITestCase):
         self.client.force_authenticate(admin)
         self.assertEqual(ids(self.client.get('/api/leads/')), [lead.id])
 
-    # BUG: apps/lead/intake.py dedupes repeat enquiries only for known courses; a text course doubles.
-    @unittest.expectedFailure
     @override_settings(LEAD_INTAKE_TOKEN='t')
     def test_a_repeat_submission_adds_no_second_enquiry_for_a_course_name_kept_as_text(self):
         self.assertEqual(self._post(course_interests='Underwater Basket Weaving').status_code, 201)
         self.assertEqual(self._post(course_interests='Underwater Basket Weaving').status_code, 200)
         self.assertEqual(Lead.objects.get().course_interests.count(), 1)
 
-    # BUG: apps/lead/intake.py saves the phone unchecked; more than 20 characters is a database error (500).
-    @unittest.expectedFailure
     @override_settings(LEAD_INTAKE_TOKEN='t')
     def test_a_too_long_phone_is_refused_not_crashed(self):
         self.client.raise_request_exception = False
         response = self._post(phone_number='9800000556 call after 5pm please')
         self.assertEqual(response.status_code, 400)
 
-    # BUG: apps/lead/intake.py uses bool() on has_laptop, so a form's "false" is saved as True.
-    @unittest.expectedFailure
     @override_settings(LEAD_INTAKE_TOKEN='t')
     def test_has_laptop_false_from_a_form_is_saved_as_false(self):
         response = self._post(format='multipart', has_laptop='false')

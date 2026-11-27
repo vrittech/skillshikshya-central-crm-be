@@ -5,6 +5,7 @@ import django_filters
 from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
+from apps.global_config.filters import picked_branch_id
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
     LeadTag, Lead, LeadCourseInterest, Enrollment, Payment,
@@ -84,6 +85,15 @@ class LeadTagFilter(django_filters.FilterSet):
         fields = ['name', 'is_active']
 
 
+def viewer_branch_id(request):
+    """The branch whose records the user sees: a branch user's own, or the one
+    staff picked with ?branch_id. None means every branch."""
+    user = request.user
+    if user.is_staff or user.is_superuser:
+        return picked_branch_id(request)
+    return getattr(user, 'branch_id', None)
+
+
 def has_enrollment_in(status, request=None):
     """Condition for leads with an enrollment in `status`.
 
@@ -93,10 +103,7 @@ def has_enrollment_in(status, request=None):
     enrollments = Enrollment.objects.filter(lead=OuterRef('pk'), status=status)
     user = getattr(request, 'user', None)
     if user is not None and user.is_authenticated:
-        if user.is_staff or user.is_superuser:
-            branch_id = request.query_params.get('branch_id')
-        else:
-            branch_id = getattr(user, 'branch_id', None)
+        branch_id = viewer_branch_id(request)
         if branch_id:
             enrollments = enrollments.filter(branch_id=branch_id)
     return Exists(enrollments)
