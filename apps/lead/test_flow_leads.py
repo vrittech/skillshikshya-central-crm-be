@@ -5,8 +5,6 @@ migration 0010), across two branches. They cover flows that cross features
 (a lead, its enquiries, calls, notes, follow-ups, documents and history),
 the read and write rights of every lead address for every default role, the
 branch walls, the public intake, and signing in.
-
-A test marked expectedFailure shows a bug: the `# BUG:` line above it says what.
 """
 from datetime import date, timedelta
 from decimal import Decimal

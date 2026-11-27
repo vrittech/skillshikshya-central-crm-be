@@ -5,8 +5,6 @@ due dates -> history -> reminders -> money reports. Single rules already
 covered in apps/lead/tests.py, apps/invoices/tests.py and
 apps/leadreport/tests.py are not repeated here; these tests cross features
 and check that every screen shows the same money.
-
-A test marked expectedFailure shows a bug; its # BUG: line says what is wrong.
 """
 from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
