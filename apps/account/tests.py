@@ -1,5 +1,8 @@
+from unittest import mock
+
 from django.contrib.auth.models import Group, Permission
-from rest_framework.test import APITestCase
+from django.test import override_settings
+from rest_framework.test import APIClient, APITestCase
 
 from apps.account.models import User
 
@@ -503,3 +506,136 @@ class SessionCookieTests(APITestCase):
         response = self._logout()
         self.assertEqual(response.status_code, 200)
         self._assert_cookies_cleared(response)
+
+
+class InactiveBranchTests(APITestCase):
+    """Users of an inactive branch can't sign in and are signed out."""
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        from apps.branch.models import Branch
+
+        cache.clear()  # sign-in attempts are rate limited
+        self.ktm = Branch.objects.create(name='Kathmandu', code='KTM')
+        User.objects.create_user(email='ktm@test.com', name='Ktm', password='pass', branch=self.ktm)
+        User.objects.create_user(email='admin@test.com', name='Admin', password='pass', is_staff=True)
+
+    def _sign_in(self, email):
+        return self.client.post('/api/auth/login/', {'email': email, 'password': 'pass'}, format='json')
+
+    def test_inactive_branch_refuses_sign_in(self):
+        self.ktm.is_active = False
+        self.ktm.save()
+        response = self._sign_in('ktm@test.com')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Your branch is inactive', str(response.data))
+        self.assertNotIn('access_token', response.cookies)
+        self.assertEqual(self._sign_in('admin@test.com').status_code, 200)  # staff
+
+    def test_branch_made_inactive_signs_the_user_out(self):
+        self.assertEqual(self._sign_in('ktm@test.com').status_code, 200)
+        self.assertEqual(self.client.get('/api/users/me/').status_code, 200)
+        self.ktm.is_active = False
+        self.ktm.save()
+        self.assertEqual(self.client.get('/api/users/me/').status_code, 401)
+        self.assertEqual(self.client.post('/api/auth/refresh/', {}, format='json').status_code, 401)
+        self.ktm.is_active = True
+        self.ktm.save()
+        self.assertEqual(self._sign_in('ktm@test.com').status_code, 200)
+
+
+@mock.patch('apps.account.auth_views.send_password_changed_email_task.delay')
+class PasswordChangeSignOutTests(APITestCase):
+    """A new password signs out every other device: old cookies can't read or refresh."""
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        from apps.branch.models import Branch
+
+        cache.clear()
+        branch = Branch.objects.create(name='Kathmandu', code='KTM')
+        self.user = User.objects.create_user(email='u@test.com', name='U', password='pass', branch=branch)
+        self.admin = User.objects.create_user(email='admin@test.com', name='Admin', password='pass', is_staff=True)
+        self.other_device = self._signed_in_client('u@test.com')
+
+    def _signed_in_client(self, email, password='pass'):
+        client = APIClient()
+        response = client.post('/api/auth/login/', {'email': email, 'password': password}, format='json')
+        self.assertEqual(response.status_code, 200)
+        return client
+
+    def _assert_signed_out(self, client):
+        self.assertEqual(client.get('/api/users/me/').status_code, 401)
+        self.assertEqual(client.post('/api/auth/refresh/', {}, format='json').status_code, 401)
+
+    def test_change_password_signs_out_other_devices_and_keeps_this_one(self, _email):
+        this_device = self._signed_in_client('u@test.com')
+        response = this_device.post('/api/auth/change-password/', {
+            'old_password': 'pass', 'new_password': 'NewPass123!', 'confirm_new_password': 'NewPass123!',
+        }, format='json')
+        self.assertEqual(response.status_code, 200)
+        self._assert_signed_out(self.other_device)
+        # The device that changed it got new cookies and stays signed in.
+        self.assertTrue(response.cookies['access_token'].value)
+        self.assertEqual(this_device.get('/api/users/me/').status_code, 200)
+        self.assertEqual(this_device.post('/api/auth/refresh/', {}, format='json').status_code, 200)
+        self._signed_in_client('u@test.com', 'NewPass123!')
+
+    def test_reset_password_signs_out_every_device(self, _email):
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.encoding import force_bytes
+        from django.utils.http import urlsafe_base64_encode
+
+        response = APIClient().post('/api/auth/reset-password/', {
+            'uid': urlsafe_base64_encode(force_bytes(self.user.pk)),
+            'token': default_token_generator.make_token(self.user),
+            'new_password': 'NewPass123!', 'confirm_new_password': 'NewPass123!',
+        }, format='json')
+        self.assertEqual(response.status_code, 200)
+        self._assert_signed_out(self.other_device)
+
+    def test_admin_setting_a_password_signs_the_user_out(self, _email):
+        admin = self._signed_in_client('admin@test.com')
+        response = admin.patch(f'/api/users/{self.user.id}/', {'password': 'NewPass123!'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self._assert_signed_out(self.other_device)
+        self.assertEqual(admin.get('/api/users/me/').status_code, 200)
+
+    def test_editing_without_a_password_keeps_the_user_signed_in(self, _email):
+        admin = self._signed_in_client('admin@test.com')
+        response = admin.patch(f'/api/users/{self.user.id}/', {'name': 'U2'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.other_device.get('/api/users/me/').status_code, 200)
+
+
+class SecureCookieTests(APITestCase):
+    """Sign-in cookies are Secure unless AUTH_COOKIE_SECURE is off (local http with DEBUG)."""
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        from apps.branch.models import Branch
+
+        cache.clear()
+        branch = Branch.objects.create(name='Kathmandu', code='KTM')
+        User.objects.create_user(email='u@test.com', name='U', password='pass', branch=branch)
+
+    def _sign_in(self):
+        return self.client.post('/api/auth/login/', {'email': 'u@test.com', 'password': 'pass'}, format='json')
+
+    def test_cookies_are_secure_when_on(self):
+        with override_settings(AUTH_COOKIE_SECURE=True):
+            response = self._sign_in()
+            self.assertEqual(response.status_code, 200)
+            for name in ('access_token', 'refresh_token'):
+                self.assertTrue(response.cookies[name]['secure'])
+                self.assertTrue(response.cookies[name]['httponly'])
+            refreshed = self.client.post('/api/auth/refresh/', {}, format='json')
+            self.assertTrue(refreshed.cookies['access_token']['secure'])
+
+    def test_cookies_are_not_secure_when_off(self):
+        with override_settings(AUTH_COOKIE_SECURE=False):
+            response = self._sign_in()
+            self.assertFalse(response.cookies['access_token']['secure'])

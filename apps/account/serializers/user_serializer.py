@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from apps.account.models import User
+from apps.account.tokens import sign_out_everywhere
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -93,6 +94,8 @@ class UserSerializer(serializers.ModelSerializer):
         if password:
             instance.set_password(password)
         instance.save()
+        if password:
+            sign_out_everywhere(instance)
         return instance
 
 
