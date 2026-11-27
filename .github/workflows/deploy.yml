@@ -161,6 +161,10 @@ jobs:
             done
             printf "BACKEND_IMAGE='%s'\n" "$IMAGE:$GITHUB_SHA"
           } > server.env
+          # The copy step runs in its own container as another user, so it must be able to
+          # read the file. The runner is thrown away after the job; on the server the
+          # file becomes .env with mode 600.
+          chmod 644 server.env
 
           if is_set "$DEPLOY_PATH"; then path="$DEPLOY_PATH"; else path="~/skillshikshya-crm-backend"; fi
           if is_set "$SSH_PORT"; then port="$SSH_PORT"; else port=22; fi
