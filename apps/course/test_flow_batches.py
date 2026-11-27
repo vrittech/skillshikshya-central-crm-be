@@ -580,8 +580,6 @@ class CloseFlowTests(FlowBase):
         self._ok(self._reopen(nov))
         self.assertEqual(self._licence_state(licence), ('in_use', ''))
 
-    # BUG: attendance is kept per course, not per batch (apps/course/closing.py:100), so marks a moved-in student got in his old batch become class days of the new batch and its other students show as missing.
-    @unittest.expectedFailure
     def test_close_check_counts_only_the_class_days_of_this_batch(self):
         nov, dec = self._batch('Python Nov'), self._batch('Python Dec')
         mover = self._student(nov)
@@ -615,16 +613,12 @@ class RegisterTests(FlowBase):
         self._ok(self._mark(dec, self.today, [(ram, 'present')]))
         self._refused(self._mark(nov, self.today, [(ram, 'present')]), 'not in this batch')
 
-    # BUG: mark_register (apps/course/closing.py:321) refuses days before the start but saves days after the end, which window() then leaves out of the totals and the close check.
-    @unittest.expectedFailure
     def test_a_day_after_the_batch_ended_is_refused(self):
         nov = self._batch('Python Nov', started=10, ends=-3)
         ram = self._student(nov)
         response = self._mark(nov, self.today - timedelta(days=1), [(ram, 'present')])
         self.assertEqual(response.status_code, 400, response.data)
 
-    # BUG: /api/students/<id>/attendance/ (apps/student/views.py:184) saves any mark with no register rules, so a future day can be marked.
-    @unittest.expectedFailure
     def test_the_student_attendance_list_cannot_mark_a_future_day(self):
         nov = self._batch('Python Nov')
         ram = self._student(nov)
@@ -634,8 +628,6 @@ class RegisterTests(FlowBase):
         }, format='json')
         self.assertEqual(response.status_code, 400, response.data)
 
-    # BUG: /api/attendance/<id>/ (apps/student/views.py:184) changes a mark of a closed batch, which the register refuses.
-    @unittest.expectedFailure
     def test_a_mark_of_a_closed_batch_cannot_be_changed_through_the_attendance_list(self):
         nov = self._batch('Python Nov')
         ram = self._student(nov)
