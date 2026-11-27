@@ -3,9 +3,11 @@ from rest_framework import viewsets
 from rest_framework.permissions import SAFE_METHODS, IsAdminUser, IsAuthenticated
 from apps.account.serializers.group_serializer import GroupSerializer
 from apps.global_config.pagination import CustomPagination
+from apps.global_config.permissions import ReadRights, OPEN
 
 
-class GroupViewSet(viewsets.ModelViewSet):
+class GroupViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = OPEN
     queryset = Group.objects.prefetch_related('permissions').order_by('name')
     serializer_class = GroupSerializer
     pagination_class = CustomPagination

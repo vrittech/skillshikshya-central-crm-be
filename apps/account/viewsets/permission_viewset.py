@@ -4,9 +4,11 @@ from rest_framework.permissions import IsAdminUser
 from rest_framework import mixins
 from apps.account.serializers.permission_serializer import PermissionSerializer
 from apps.global_config.pagination import CustomPagination
+from apps.global_config.permissions import ReadRights, STAFF
 
 
-class PermissionViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+class PermissionViewSet(ReadRights, mixins.ListModelMixin, viewsets.GenericViewSet):
+    read_perm = STAFF
     # The rights the role screen offers. Roles themselves are admin-only, so
     # rights on roles and permissions would do nothing and are left out.
     queryset = Permission.objects.select_related('content_type').filter(content_type__model__in=[

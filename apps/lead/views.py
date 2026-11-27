@@ -56,11 +56,12 @@ from apps.lead.filters import (
     GlobalEnrollmentFilter, GlobalPaymentFilter, GlobalCallFilter, TeamsLicenceFilter,
 )
 from apps.global_config.pagination import CustomPagination
-from apps.global_config.permissions import IsStaffOrHasPermission, needs
+from apps.global_config.permissions import IsStaffOrHasPermission, OPEN, ReadRights, needs
 from apps.global_config.filters import BranchFilterBackend, LeadBranchFilterBackend, walled_branch_id
 
 
-class ConfigViewSet(viewsets.ModelViewSet):
+class ConfigViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = OPEN
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, BranchFilterBackend]
     # Statuses, sources and the rest with no branch are shared by every branch.
@@ -169,7 +170,11 @@ class LeadTagViewSet(ConfigViewSet):
     ordering = ['name']
 
 
-class LeadViewSet(viewsets.ModelViewSet):
+class LeadViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = 'lead.view_lead'
+    read_perms = {
+        'recycle_bin': 'lead.delete_lead',
+    }
     queryset = Lead.objects.select_related(
         'source', 'campaign', 'branch', 'priority', 'status',
         'assigned_counselor', 'primary_course', 'created_by', 'updated_by',
@@ -439,7 +444,8 @@ class LeadViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
-class GlobalFollowUpViewSet(viewsets.ReadOnlyModelViewSet):
+class GlobalFollowUpViewSet(ReadRights, viewsets.ReadOnlyModelViewSet):
+    read_perm = 'lead.view_followup'
     queryset = FollowUp.objects.none()
     serializer_class = GlobalFollowUpSerializer
     pagination_class = CustomPagination
@@ -471,7 +477,8 @@ class GlobalFollowUpViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({**counts, 'total': sum(counts.values())})
 
 
-class GlobalEnrollmentViewSet(viewsets.ReadOnlyModelViewSet):
+class GlobalEnrollmentViewSet(ReadRights, viewsets.ReadOnlyModelViewSet):
+    read_perm = 'lead.view_enrollment'
     queryset = Enrollment.objects.none()
     serializer_class = GlobalEnrollmentSerializer
     pagination_class = CustomPagination
@@ -497,7 +504,8 @@ class GlobalEnrollmentViewSet(viewsets.ReadOnlyModelViewSet):
         return [IsAuthenticated(), IsStaffOrHasPermission()]
 
 
-class GlobalPaymentViewSet(viewsets.ReadOnlyModelViewSet):
+class GlobalPaymentViewSet(ReadRights, viewsets.ReadOnlyModelViewSet):
+    read_perm = 'lead.view_payment'
     queryset = Payment.objects.none()
     serializer_class = GlobalPaymentSerializer
     pagination_class = CustomPagination
@@ -532,8 +540,9 @@ class GlobalPaymentViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({'count': totals['count'], 'successful_total': str(totals['successful'])})
 
 
-class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
+class GlobalCallViewSet(ReadRights, viewsets.ReadOnlyModelViewSet):
     """Flat, cross-lead call log. Newest calls first by default."""
+    read_perm = 'lead.view_leadcall'
     queryset = LeadCall.objects.none()
     serializer_class = GlobalCallSerializer
     pagination_class = CustomPagination
@@ -573,7 +582,8 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         return [IsAuthenticated(), IsStaffOrHasPermission()]
 
 
-class NotificationViewSet(viewsets.ModelViewSet):
+class NotificationViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = OPEN
     queryset = Notification.objects.all()
     serializer_class = NotificationSerializer
     pagination_class = CustomPagination
@@ -614,7 +624,8 @@ class NotificationViewSet(viewsets.ModelViewSet):
         return Response({'unread_count': count})
 
 
-class LeadCourseInterestViewSet(viewsets.ModelViewSet):
+class LeadCourseInterestViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = 'lead.view_leadcourseinterest'
     serializer_class = LeadCourseInterestSerializer
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
@@ -725,7 +736,8 @@ class LeadCourseInterestViewSet(viewsets.ModelViewSet):
         return Response(EnquiryStageChangeSerializer(changes, many=True).data)
 
 
-class EnrollmentViewSet(viewsets.ModelViewSet):
+class EnrollmentViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = 'lead.view_enrollment'
     serializer_class = EnrollmentSerializer
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
@@ -923,8 +935,9 @@ class EnrollmentViewSet(viewsets.ModelViewSet):
         return self._fresh_reply(enrollment)
 
 
-class PaymentViewSet(viewsets.ModelViewSet):
+class PaymentViewSet(ReadRights, viewsets.ModelViewSet):
     """Payments are only added. Fix a wrong one with void (reason) and record a new one."""
+    read_perm = 'lead.view_payment'
     serializer_class = PaymentSerializer
     http_method_names = ['get', 'post', 'head', 'options']
     pagination_class = CustomPagination
@@ -991,13 +1004,14 @@ class PaymentViewSet(viewsets.ModelViewSet):
         return Response(InvoiceSerializer(receipt).data, status=201)
 
 
-class AdjustmentViewSet(
+class AdjustmentViewSet(ReadRights, 
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
     viewsets.GenericViewSet,
 ):
     """Money entries of one enrollment: list and add only. Each needs a reason."""
+    read_perm = 'lead.view_adjustment'
     serializer_class = AdjustmentSerializer
     pagination_class = CustomPagination
     filter_backends = [BranchFilterBackend]
@@ -1031,11 +1045,12 @@ class AdjustmentViewSet(
         return Response(self.get_serializer(adjustment).data, status=status.HTTP_201_CREATED)
 
 
-class EnrollmentHistoryViewSet(viewsets.ReadOnlyModelViewSet):
+class EnrollmentHistoryViewSet(ReadRights, viewsets.ReadOnlyModelViewSet):
     """Reason trail of one enrollment, newest first.
 
     Read-only: rows are only written by EnrollmentHistory.record().
     """
+    read_perm = 'lead.view_enrollment'
     serializer_class = EnrollmentHistorySerializer
     pagination_class = CustomPagination
     filter_backends = [BranchFilterBackend]
@@ -1048,8 +1063,9 @@ class EnrollmentHistoryViewSet(viewsets.ReadOnlyModelViewSet):
         ).select_related('performed_by').order_by('-created_at', '-id')
 
 
-class EnrollmentReminderViewSet(viewsets.ReadOnlyModelViewSet):
+class EnrollmentReminderViewSet(ReadRights, viewsets.ReadOnlyModelViewSet):
     """Payment reminders sent for one enrollment, newest first."""
+    read_perm = 'lead.view_enrollment'
     serializer_class = ReminderLogSerializer
     pagination_class = CustomPagination
     filter_backends = [BranchFilterBackend]
@@ -1062,7 +1078,8 @@ class EnrollmentReminderViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
 
-class LeadCallViewSet(viewsets.ModelViewSet):
+class LeadCallViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = 'lead.view_leadcall'
     serializer_class = LeadCallSerializer
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
@@ -1122,7 +1139,8 @@ class LeadCallViewSet(viewsets.ModelViewSet):
         return [p() for p in permission_classes]
 
 
-class LeadActivityViewSet(viewsets.ModelViewSet):
+class LeadActivityViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = 'lead.view_leadactivity'
     serializer_class = LeadActivitySerializer
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
@@ -1153,7 +1171,8 @@ class LeadActivityViewSet(viewsets.ModelViewSet):
         return [p() for p in permission_classes]
 
 
-class FollowUpViewSet(viewsets.ModelViewSet):
+class FollowUpViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = 'lead.view_followup'
     serializer_class = FollowUpSerializer
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
@@ -1186,7 +1205,8 @@ class FollowUpViewSet(viewsets.ModelViewSet):
         return [p() for p in permission_classes]
 
 
-class LeadDocumentViewSet(viewsets.ModelViewSet):
+class LeadDocumentViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = 'lead.view_leaddocument'
     serializer_class = LeadDocumentSerializer
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
@@ -1232,7 +1252,7 @@ def visible_lead(request, lead_pk):
     return get_object_or_404(leads, pk=lead_pk)
 
 
-class VoiceNoteViewSet(
+class VoiceNoteViewSet(ReadRights, 
     mixins.ListModelMixin, mixins.CreateModelMixin, mixins.RetrieveModelMixin,
     mixins.DestroyModelMixin, viewsets.GenericViewSet,
 ):
@@ -1241,6 +1261,7 @@ class VoiceNoteViewSet(
     Anyone who can work enquiries records. Only the person who recorded a
     note, or staff, deletes it; the file goes with it.
     """
+    read_perm = 'lead.view_voicenote'
 
     serializer_class = VoiceNoteSerializer
     pagination_class = CustomPagination
@@ -1302,7 +1323,7 @@ class VoiceNoteViewSet(
         return response
 
 
-class TeamsLicenceViewSet(
+class TeamsLicenceViewSet(ReadRights, 
     mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet,
 ):
     """Teams licences given to students.
@@ -1310,6 +1331,7 @@ class TeamsLicenceViewSet(
     POST gives a ready account (and can email the sign-in), POST {id}/free/
     takes it back with a reason, POST {id}/send-details/ emails the sign-in.
     """
+    read_perm = 'lead.view_teamslicence'
 
     serializer_class = TeamsLicenceSerializer
     pagination_class = CustomPagination
@@ -1395,13 +1417,14 @@ def _teams_branch(request):
     return branch_id
 
 
-class TeamsAccountViewSet(viewsets.ViewSet):
+class TeamsAccountViewSet(ReadRights, viewsets.ViewSet):
     """The Teams accounts the institute owns, each with its state.
 
     GET lists them (?state=, ?search=, ?give_at=<branch> for accounts that can
     be given at a branch). POST {emails, branch} adds accounts. POST
     {id}/retire/ with a reason stops counting one; {id}/restore/ undoes it.
     """
+    read_perm = 'lead.view_teamsaccount'
 
     def get_permissions(self):
         perms = {

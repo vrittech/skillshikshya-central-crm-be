@@ -9,6 +9,7 @@ from apps.lead.models import (
     Enrollment, Lead, LeadSource, LeadStatus, Payment,
 )
 from apps.leadreport import services
+from apps.global_config.testing import give_view_rights
 
 
 class LeadReportServiceTests(TestCase):
@@ -391,6 +392,7 @@ class EnquiryFunnelTests(APITestCase):
         counselor = User.objects.create_user(
             email='pkr-funnel@test.com', name='Pokhara', password='pass', branch=self.pkr,
         )
+        give_view_rights(counselor)
         self.client.force_authenticate(counselor)
         data = self.client.get(self.URL, {'branch_id': self.ktm.id}).data
         self.assertEqual(data['summary']['enquiries'], 1)

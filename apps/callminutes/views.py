@@ -16,6 +16,7 @@ from apps.callminutes.serializers import (
 )
 from apps.callminutes.services import add_minutes
 from apps.global_config.pagination import CustomPagination
+from apps.global_config.permissions import OPEN, ReadRights, STAFF, reads
 
 DEFAULT_NESTED_LIMIT = 10
 MAX_NESTED_LIMIT = 50
@@ -42,7 +43,8 @@ def add_call_minutes(request, user_id):
     }, status=status.HTTP_200_OK)
 
 
-class CallMinutesTransactionListView(generics.ListAPIView):
+class CallMinutesTransactionListView(ReadRights, generics.ListAPIView):
+    read_perm = STAFF
     serializer_class = CallMinutesTransactionSerializer
     pagination_class = CustomPagination
     permission_classes = [IsAdminUser]
@@ -56,7 +58,7 @@ class CallMinutesTransactionListView(generics.ListAPIView):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, reads(OPEN)])
 def my_call_minutes(request):
     recent = CallMinutesTransaction.objects.filter(user=request.user)[:10]
     balance = request.user.call_seconds_balance
@@ -68,8 +70,9 @@ def my_call_minutes(request):
     })
 
 
-class CallBalanceListView(generics.ListAPIView):
+class CallBalanceListView(ReadRights, generics.ListAPIView):
     """Staff-only: every active user's call balance with recent activity."""
+    read_perm = STAFF
     serializer_class = UserCallBalanceSerializer
     pagination_class = CustomPagination
     permission_classes = [IsAdminUser]

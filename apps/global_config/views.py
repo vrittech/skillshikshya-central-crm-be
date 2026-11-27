@@ -13,6 +13,7 @@ from rest_framework.response import Response
 
 from apps.global_config.filters import walled_branch_id
 from apps.global_config.integrations import r2_config
+from apps.global_config.permissions import OPEN, can, reads
 from apps.global_config.utilities.r2_storage import upload_file_to_r2, get_r2_client
 
 logger = logging.getLogger(__name__)
@@ -57,35 +58,42 @@ def upload_file(request):
     return Response(result, status=status.HTTP_201_CREATED)
 
 
-def _document_branches(key):
-    """Branch ids of the lead and student documents stored under this key."""
+def _documents(key):
+    """(view right, branch id) of each lead and student document stored under this key."""
     from apps.lead.models import LeadDocument
     from apps.student.models import StudentDocument
 
     url = f'/api/files/{key}'
-    branches = set()
-    for model in (LeadDocument, StudentDocument):
-        branches |= set(
-            model.objects.filter(Q(file=url) | Q(file__endswith=f'/{key}')).values_list('branch_id', flat=True)
+    found = []
+    for model, right in (
+        (LeadDocument, 'lead.view_leaddocument'),
+        (StudentDocument, 'student.view_studentdocument'),
+    ):
+        branches = model.objects.filter(Q(file=url) | Q(file__endswith=f'/{key}')).values_list(
+            'branch_id', flat=True,
         )
-    return branches
+        found += [(right, branch) for branch in branches]
+    return found
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, reads(OPEN)])
 def serve_file(request, key):
     """A stored file, for signed-in users only.
 
     Voice notes are never served here (they have their own checked address).
-    A file attached to a document of another branch is hidden from branch users.
+    A file attached to a document needs the right to see that kind of
+    document, and one of another branch is hidden from branch users.
     """
     if key.startswith(PRIVATE_PREFIXES) or '..' in key:
         return HttpResponseNotFound('File not found.')
+    documents = _documents(key)
     branch_id = walled_branch_id(request.user)
-    if branch_id is not None:
-        branches = _document_branches(key)
-        if branches and branch_id not in branches:
-            return HttpResponseNotFound('File not found.')
+    if documents and not any(
+        can(request.user, right) and (branch_id is None or branch == branch_id)
+        for right, branch in documents
+    ):
+        return HttpResponseNotFound('File not found.')
     try:
         cfg = r2_config()
         obj = get_r2_client(cfg).get_object(Bucket=cfg.bucket_name, Key=key)

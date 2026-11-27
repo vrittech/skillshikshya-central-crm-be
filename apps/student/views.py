@@ -19,11 +19,15 @@ from apps.student.serializers import (
 )
 from apps.student.filters import StudentFilter, StudentDocumentFilter, AttendanceFilter
 from apps.global_config.pagination import CustomPagination
-from apps.global_config.permissions import IsStaffOrHasPermission, needs
+from apps.global_config.permissions import IsStaffOrHasPermission, ReadRights, needs
 from apps.global_config.filters import BranchFilterBackend, walled_branch_id
 
 
-class StudentViewSet(viewsets.ModelViewSet):
+class StudentViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = 'student.view_student'
+    read_perms = {
+        'attendance_profile': 'student.view_attendance',
+    }
     queryset = Student.objects.select_related(
         'source', 'branch', 'assigned_counselor', 'created_by', 'updated_by',
     )
@@ -149,7 +153,8 @@ def visible_student(request, pk):
     return get_object_or_404(students, pk=pk)
 
 
-class StudentDocumentViewSet(viewsets.ModelViewSet):
+class StudentDocumentViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = 'student.view_studentdocument'
     serializer_class = StudentDocumentSerializer
     pagination_class = CustomPagination
     filter_backends = [DjangoFilterBackend, OrderingFilter, BranchFilterBackend]
@@ -176,7 +181,8 @@ class StudentDocumentViewSet(viewsets.ModelViewSet):
         return [p() for p in permission_classes]
 
 
-class AttendanceViewSet(viewsets.ModelViewSet):
+class AttendanceViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = 'student.view_attendance'
     queryset = Attendance.objects.all()
     serializer_class = AttendanceSerializer
     pagination_class = CustomPagination

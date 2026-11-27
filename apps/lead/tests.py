@@ -22,6 +22,7 @@ from apps.lead.models import (
 from apps.lead import services
 from apps.lead.seat_backfill import backfill_seats
 from apps.student.models import Student
+from apps.global_config.testing import give_rights, give_view_rights
 
 User = get_user_model()
 
@@ -239,6 +240,7 @@ class GlobalCallListTests(APITestCase):
             branch=other_branch,
         )
         LeadCall.objects.filter(id=self.recent_call.id).update(branch=None)
+        give_view_rights(other_admin)
         self.client.force_authenticate(other_admin)
         response = self.client.get('/api/calls/')
         self.assertNotIn(self.recent_call.id, [r['id'] for r in response.data['results']])
@@ -2573,6 +2575,7 @@ class TeamsLicenceTests(APITestCase):
         clerk = User.objects.create_user(
             email='teams-ktm@test.com', name='KTM', password='pass', branch=self.ktm,
         )
+        give_view_rights(clerk)
         self.client.force_authenticate(clerk)
         rows = self._rows()
         self.assertEqual(set(rows), {'ktm@x.com', 'shared@x.com'})
@@ -2614,6 +2617,11 @@ class TeamsLicenceTests(APITestCase):
         self.client.force_authenticate(clerk)
         self.assertEqual(self._give(self._student(), self._account('q@x.com')).status_code, 403)
         self.assertEqual(self.client.post(self.ACCOUNTS, {'emails': ['n@x.com']}, format='json').status_code, 403)
+        # Reading needs the view rights.
+        self.assertEqual(self.client.get(self.URL).status_code, 403)
+        self.assertEqual(self.client.get(self.ACCOUNTS).status_code, 403)
+        clerk = give_rights(clerk, 'lead.view_teamslicence', 'lead.view_teamsaccount')
+        self.client.force_authenticate(clerk)
         self.assertEqual(self.client.get(self.URL).status_code, 200)
         self.assertEqual(self.client.get(self.ACCOUNTS).status_code, 200)
 
@@ -2878,6 +2886,7 @@ class PhoneMatchTests(APITestCase):
         counselor = User.objects.create_user(
             email='pkr@test.com', name='Pokhara Counselor', password='pass', branch=self.pkr,
         )
+        give_view_rights(counselor)
         self.client.force_authenticate(counselor)
         self.assertEqual(self._match('9800000800'), [self.lead.id])
         self.assertEqual(self.client.get(f'/api/leads/{self.lead.id}/').status_code, 404)
@@ -2944,6 +2953,7 @@ class VoiceNoteTests(APITestCase):
         from django.contrib.auth.models import Permission
 
         self.counselor.user_permissions.add(Permission.objects.get(codename='change_leadcourseinterest'))
+        self.counselor.user_permissions.add(Permission.objects.get(codename='view_voicenote'))
         self.client.force_authenticate(self.counselor)
         self.course = Course.objects.create(name='Python', full_amount=30000)
         self.lead = Lead.objects.create(full_name='Ram Thapa', phone='9800000900', branch=self.ktm)
@@ -3002,6 +3012,7 @@ class VoiceNoteTests(APITestCase):
     def test_another_branch_cannot_hear_it(self):
         note = self._record()
         outsider = User.objects.create_user(email='pkr@test.com', name='Pkr', password='pass', branch=self.pkr)
+        give_view_rights(outsider)
         self.client.force_authenticate(outsider)
         self.assertEqual(self.client.get(self._url(rest=f'{note["id"]}/audio/')).status_code, 404)
         self.assertEqual(self.client.get(self._url()).status_code, 404)
@@ -3603,6 +3614,7 @@ class PendingEnrollmentTests(SeatTestBase):
         pending = self._with_enrollment('pending', self.ktm)
         self._with_enrollment('pending', self.pkr)
         clerk = User.objects.create_user(email='ktm@test.com', name='Ktm', password='pass', branch=self.ktm)
+        give_view_rights(clerk)
         self.client.force_authenticate(clerk)
         self.assertEqual(self.client.get('/api/leads/summary/').data['pending_enrollment'], 1)
         listed = self.client.get('/api/leads/', {'enrollment_status': 'pending'}).data['results']
@@ -3664,6 +3676,7 @@ class LeadTimelineTests(SeatTestBase):
             email='far@test.com', name='Far', password='pass',
             branch=Branch.objects.create(name='Pokhara', code='PKR'),
         )
+        give_view_rights(outsider)
         self.client.force_authenticate(outsider)
         self.assertEqual(self.client.get(f'/api/leads/{lead.id}/timeline/').status_code, 404)
 
@@ -3861,6 +3874,7 @@ class BranchHistoryTests(APITestCase):
         self.pkr_user = User.objects.create_user(
             email='bh-pkr@test.com', name='Pkr Counselor', password='pass', branch=self.pkr,
         )
+        give_view_rights(self.ktm_user, self.pkr_user)
         python = Course.objects.create(name='Python', full_amount=30000)
         react = Course.objects.create(name='React', full_amount=20000)
         self.lead = Lead.objects.create(full_name='Two Branches', phone='9800009101', branch=self.ktm)
@@ -3913,6 +3927,7 @@ class BranchHistoryTests(APITestCase):
         self.assertIn('Lead added', {i['title'] for i in items})
         summary = self.client.get(f'/api/leads/{self.lead.id}/').data['enrollment_summary']
         self.assertFalse(summary['is_enrolled'])
+        give_view_rights(self.ktm_user)
         self.client.force_authenticate(self.ktm_user)
         summary = self.client.get(f'/api/leads/{self.lead.id}/').data['enrollment_summary']
         self.assertEqual((summary['is_enrolled'], summary['course']), (True, 'Python'))
@@ -3931,6 +3946,7 @@ class BranchHistoryTests(APITestCase):
         self.assertEqual({i['course'] for i in everything if i['kind'] == 'enquiry'}, {'Python', 'React'})
 
     def test_the_other_branch_cannot_list_or_play_its_voice_notes(self):
+        give_view_rights(self.pkr_user)
         self.client.force_authenticate(self.pkr_user)
         url = f'/api/leads/{self.lead.id}/voice-notes/'
         listed = self.client.get(url).data['results']
@@ -4407,6 +4423,7 @@ class LeadImportExportTests(APITestCase):
         self.assertEqual(names(ids=f'{other.pk},{archived.pk}'), ['Pokhara Lead'])
         self.assertEqual(names(search='Pokhara'), ['Pokhara Lead'])
 
+        give_view_rights(self.counselor)
         self.client.force_authenticate(self.counselor)
         self.assertEqual(names(), ['Old Lead'])
 
@@ -4531,6 +4548,7 @@ class BranchScopeTests(SeatTestBase):
         theirs = Student.objects.create(full_name='Theirs', phone='9800000202', branch=self.pkr)
         for student in (mine, theirs):
             Attendance.objects.create(student=student, date=date.today(), status='present')
+        give_view_rights(self.clerk)
         self.client.force_authenticate(self.clerk)
 
         self.assertEqual(self.client.get('/api/notifications/').status_code, 200)

@@ -14,6 +14,7 @@ from apps.course.models import Course
 from apps.invoices.models import Invoice, InvoiceEmailConfig
 from apps.invoices.services import create_invoice
 from apps.lead.models import Adjustment, Enrollment, EnrollmentHistory, Lead, Payment
+from apps.global_config.testing import give_view_rights
 
 User = get_user_model()
 
@@ -215,6 +216,7 @@ class InvoiceBranchScopingTests(InvoiceTestBase):
         counselor = User.objects.create_user(
             email='br@t.com', name='BR', password='x', branch=self.branch,
         )
+        give_view_rights(counselor)
         self.client.force_authenticate(counselor)
         scoped = self.client.get('/api/invoices/')
         self.assertEqual(scoped.data['count'], 1)

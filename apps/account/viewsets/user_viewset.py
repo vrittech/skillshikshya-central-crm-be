@@ -14,11 +14,15 @@ from apps.account.models import User
 from apps.account.filters import UserFilter
 from apps.account.serializers.user_serializer import UserMiniSerializer, UserSerializer
 from apps.global_config.pagination import CustomPagination
-from apps.global_config.permissions import IsStaffOrHasPermission
+from apps.global_config.permissions import IsStaffOrHasPermission, OPEN, ReadRights
 from apps.global_config.filters import BranchFilterBackend
 
 
-class UserViewSet(viewsets.ModelViewSet):
+class UserViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = OPEN
+    read_perms = {
+        'export_csv': 'account.view_user',
+    }
     queryset = User.objects.all()
     serializer_class = UserSerializer
     pagination_class = CustomPagination

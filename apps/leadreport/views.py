@@ -4,9 +4,18 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.leadreport import services
+from apps.global_config.permissions import ReadRights
 
 
-class ReportViewSet(viewsets.ViewSet):
+class ReportViewSet(ReadRights, viewsets.ViewSet):
+    read_perm = 'lead.view_lead'
+    read_perms = {
+        'revenue': 'lead.view_payment',
+        'enrollments': 'lead.view_payment',
+        'who_owes': 'lead.view_payment',
+        'due_in_month': 'lead.view_payment',
+        'batch_profit': 'lead.view_payment',
+    }
     permission_classes = [IsAuthenticated]
     pagination_class = None
 

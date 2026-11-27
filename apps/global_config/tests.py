@@ -12,6 +12,7 @@ from rest_framework.test import APITestCase
 from apps.global_config import integrations
 from apps.global_config.mail import SavedSettingsEmailBackend
 from apps.global_config.models import EmailSettings, StorageSettings
+from apps.global_config.testing import give_view_rights
 
 User = get_user_model()
 
@@ -351,6 +352,7 @@ class FileAccessTests(APITestCase):
 
     def test_branch_user_sees_own_and_loose_files_only(self):
         user = User.objects.create_user(email='k@test.com', name='K', password='pass', branch=self.ktm)
+        give_view_rights(user)
         self.client.force_authenticate(user)
         ok = self._get('uploads/ktm.pdf')
         self.assertEqual(ok.status_code, 200)
@@ -390,3 +392,163 @@ class UploadTests(APITestCase):
             up.assert_not_called()
         response, _ = self._upload(content_type='application/x-msdownload')
         self.assertEqual(response.status_code, 400)
+
+
+def _api_routes():
+    """(path, callback) for every DRF address under /api/."""
+    from django.urls import URLPattern, URLResolver, get_resolver
+
+    def walk(patterns, prefix=''):
+        for pattern in patterns:
+            if isinstance(pattern, URLResolver):
+                yield from walk(pattern.url_patterns, prefix + str(pattern.pattern))
+            elif isinstance(pattern, URLPattern):
+                yield prefix + str(pattern.pattern), pattern.callback
+
+    for path, callback in walk(get_resolver().url_patterns):
+        if path.startswith('api/') and hasattr(callback, 'cls'):
+            yield path, callback
+
+
+def _read_rule(callback):
+    """(action, right) for the address's GET, None when it has no GET.
+
+    right is None when the address has no read rule.
+    """
+    from rest_framework.permissions import IsAdminUser
+
+    from apps.global_config.permissions import STAFF, ReadRights
+
+    cls = callback.cls
+    actions = getattr(callback, 'actions', None)
+    if actions is not None:  # a viewset address
+        if 'get' not in actions:
+            return None
+        action = actions['get']
+        if not issubclass(cls, ReadRights):
+            return action, None
+        return action, cls.read_perms.get(action, cls.read_perm)
+    if not hasattr(cls, 'get'):
+        return None
+    if issubclass(cls, ReadRights):
+        return None, cls.read_perm
+    for permission in cls.permission_classes:
+        if permission is IsAdminUser:
+            return None, STAFF
+        if getattr(permission, 'read_right', None):
+            return None, permission.read_right
+    return None, None
+
+
+class ReadRuleTests(APITestCase):
+    """Every read address has a view right (or is a pick list), and the server checks it."""
+
+    def setUp(self):
+        from apps.branch.models import Branch
+
+        self.branch = Branch.objects.create(name='Kathmandu', code='KTM')
+        self.user = User.objects.create_user(
+            email='nobody@test.com', name='Nobody', password='pass', branch=self.branch,
+        )
+
+    def _reads(self):
+        for path, callback in _api_routes():
+            rule = _read_rule(callback)
+            if rule is not None:
+                yield path, callback, rule
+
+    def test_every_read_address_has_a_rule(self):
+        missing = sorted(
+            f'{path} ({action or callback.cls.__name__})'
+            for path, callback, (action, right) in self._reads()
+            if right is None and callback.cls.__name__ != 'APIRootView'
+        )
+        self.assertEqual(missing, [])
+
+    def test_a_user_without_rights_reads_only_the_pick_lists(self):
+        import re
+
+        from apps.global_config.permissions import OPEN, STAFF
+        from apps.global_config.testing import give_rights
+
+        checked = 0
+        for path, callback, (action, right) in self._reads():
+            if '(?P<' in path or '<' in path or callback.cls.__name__ == 'APIRootView':
+                continue  # addresses with an id are covered by the role tests
+            url = '/' + re.sub(r'[\^$]', '', path)
+            self.client.force_authenticate(User.objects.get(pk=self.user.pk))
+            status = self.client.get(url).status_code
+            if right == OPEN:
+                self.assertNotEqual(status, 403, url)
+                continue
+            self.assertEqual(status, 403, f'{url} needs {right}')
+            if right != STAFF:
+                with_right = give_rights(self.user, right)
+                self.client.force_authenticate(with_right)
+                self.assertNotEqual(self.client.get(url).status_code, 403, f'{url} with {right}')
+                with_right.user_permissions.clear()
+            checked += 1
+        self.assertGreater(checked, 25)
+
+    def test_staff_read_everything(self):
+        staff = User.objects.create_user(email='s@test.com', name='S', password='pass', is_staff=True)
+        self.client.force_authenticate(staff)
+        for url in ('/api/payments/', '/api/reports/batch-profit/', '/api/settings/email/'):
+            self.assertEqual(self.client.get(url).status_code, 200, url)
+
+
+class DefaultRoleReadTests(APITestCase):
+    """What each default role (made by account migration 0010) can read."""
+
+    PAGES = {
+        'leads': '/api/leads/',
+        'lead_statuses': '/api/lead-statuses/',
+        'courses': '/api/courses/',
+        'batches': '/api/course-batches/',
+        'students': '/api/students/',
+        'attendance': '/api/attendance/',
+        'enrollments': '/api/enrollments/',
+        'payments': '/api/payments/',
+        'invoices': '/api/invoices/',
+        'calls': '/api/calls/',
+        'follow_ups': '/api/followups/',
+        'teams': '/api/teams-licences/',
+        'lead_report': '/api/reports/conversion/',
+        'money_report': '/api/reports/who-owes/',
+    }
+    CAN_READ = {
+        'Branch Manager': set(PAGES),
+        'Counselor': {
+            'leads', 'lead_statuses', 'courses', 'batches', 'students', 'enrollments',
+            'calls', 'follow_ups', 'lead_report',
+        },
+        'Accountant': {
+            'leads', 'lead_statuses', 'courses', 'batches', 'students', 'enrollments',
+            'payments', 'invoices', 'lead_report', 'money_report',
+        },
+        'Front Desk': {
+            'leads', 'lead_statuses', 'courses', 'batches', 'students', 'attendance',
+            'calls', 'follow_ups', 'lead_report',
+        },
+        'Trainer': {'lead_statuses', 'courses', 'batches', 'students', 'attendance'},
+    }
+
+    def test_each_default_role_reads_what_its_screens_need(self):
+        from django.contrib.auth.models import Group
+
+        from apps.branch.models import Branch
+
+        branch = Branch.objects.create(name='Kathmandu', code='KTM')
+        for number, (role, allowed) in enumerate(self.CAN_READ.items()):
+            user = User.objects.create_user(
+                email=f'role{number}@test.com', name=role, password='pass', branch=branch,
+            )
+            user.groups.add(Group.objects.get(name=role))
+            self.client.force_authenticate(user)
+            for page, url in self.PAGES.items():
+                status = self.client.get(url).status_code
+                with self.subTest(role=role, page=page):
+                    if page in allowed:
+                        self.assertEqual(status, 200)
+                    else:
+                        self.assertEqual(status, 403)

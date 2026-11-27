@@ -18,11 +18,12 @@ from apps.course.serializers import (
     RegisterSerializer,
 )
 from apps.global_config.pagination import CustomPagination
-from apps.global_config.permissions import IsStaffOrHasPermission, needs
+from apps.global_config.permissions import IsStaffOrHasPermission, OPEN, ReadRights, needs
 from apps.global_config.filters import BranchFilterBackend
 
 
-class CourseCategoryViewSet(viewsets.ModelViewSet):
+class CourseCategoryViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = OPEN
     queryset = CourseCategory.objects.all()
     serializer_class = CourseCategorySerializer
     pagination_class = CustomPagination
@@ -45,7 +46,8 @@ class CourseCategoryViewSet(viewsets.ModelViewSet):
         return [p() for p in permission_classes]
 
 
-class CourseViewSet(viewsets.ModelViewSet):
+class CourseViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = OPEN
     queryset = Course.objects.all()
     serializer_class = CourseSerializer
     pagination_class = CustomPagination
@@ -68,7 +70,8 @@ class CourseViewSet(viewsets.ModelViewSet):
         return [p() for p in permission_classes]
 
 
-class BatchViewSet(viewsets.ModelViewSet):
+class BatchViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = OPEN
     queryset = Batch.objects.all()
     serializer_class = BatchSerializer
     pagination_class = CustomPagination
@@ -93,7 +96,12 @@ class BatchViewSet(viewsets.ModelViewSet):
         return [p() for p in permission_classes]
 
 
-class CourseBatchViewSet(viewsets.ModelViewSet):
+class CourseBatchViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = 'course.view_coursebatch'
+    read_perms = {
+        'money': 'course.view_batchcost',
+        'attendance': 'student.view_attendance',
+    }
     queryset = CourseBatch.objects.all()
     serializer_class = CourseBatchSerializer
     pagination_class = CustomPagination

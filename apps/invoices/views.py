@@ -16,9 +16,11 @@ from apps.invoices.serializers import (
 )
 from apps.invoices.services import cancel_invoice as cancel_invoice_service
 from apps.lead.serializers import ReasonSerializer
+from apps.global_config.permissions import ReadRights
 
 
-class InvoiceListAPIView(generics.ListAPIView):
+class InvoiceListAPIView(ReadRights, generics.ListAPIView):
+    read_perm = 'invoices.view_invoice'
     serializer_class = InvoiceSerializer
     pagination_class = CustomPagination
     permission_classes = [IsAuthenticated]
@@ -33,8 +35,9 @@ class InvoiceListAPIView(generics.ListAPIView):
         )
 
 
-class InvoicePdfAPIView(generics.RetrieveAPIView):
+class InvoicePdfAPIView(ReadRights, generics.RetrieveAPIView):
     """GET invoices/{id}/pdf/: the invoice or receipt as a PDF, for anyone who can see it."""
+    read_perm = 'invoices.view_invoice'
 
     permission_classes = [IsAuthenticated]
     filter_backends = [BranchFilterBackend]

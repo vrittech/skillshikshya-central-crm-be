@@ -8,6 +8,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from apps.course.models import Batch, Course, CourseBatch
+from apps.global_config.testing import give_rights, give_view_rights
 
 User = get_user_model()
 
@@ -645,6 +646,9 @@ class CloseChecklistTests(ClosingTestBase):
     def test_close_check_is_open_to_anyone_who_can_see_the_batch(self):
         clerk = User.objects.create_user(email='clerk3@test.com', name='Clerk', password='pass')
         self.client.force_authenticate(clerk)
+        self.assertEqual(self.client.get(f'{self.url}close-check/').status_code, 403)
+        clerk = give_rights(clerk, 'course.view_coursebatch')
+        self.client.force_authenticate(clerk)
         self.assertEqual(self.client.get(f'{self.url}close-check/').status_code, 200)
         self.assertEqual(
             self.client.post(f'{self.url}close/', {'reason': 'Over'}, format='json').status_code, 403,
@@ -712,6 +716,9 @@ class BatchAttendanceTests(ClosingTestBase):
 
         ram, sita = self._student(), self._student()
         clerk = User.objects.create_user(email='clerk4@test.com', name='Clerk', password='pass')
+        self.client.force_authenticate(clerk)
+        self.assertEqual(self.client.get(f'{self.url}attendance/').status_code, 403)
+        clerk = give_rights(clerk, 'student.view_attendance')
         self.client.force_authenticate(clerk)
         self.assertEqual(self._register()['students'][0]['status'], None)
         self.assertEqual(self._save(self.today, [(ram, 'present')]).status_code, 403)
@@ -836,6 +843,7 @@ class AdminBranchPickTests(APITestCase):
         return {row['name'] for row in response.data['results']}
 
     def test_branch_users_see_their_rows_and_the_shared_ones(self):
+        give_view_rights(self.ktm_user)
         self.client.force_authenticate(self.ktm_user)
         self.assertEqual(self._names('/api/courses/'), {'Shared course', 'Ktm course'})
         self.assertEqual(self._names('/api/batches/'), {'Shared shift'})
@@ -845,6 +853,7 @@ class AdminBranchPickTests(APITestCase):
     def test_admin_picking_a_branch_sees_what_the_branch_sees(self):
         self.client.force_authenticate(self.admin)
         for url in ('/api/courses/', '/api/batches/', '/api/lead-statuses/', '/api/course-batches/'):
+            give_view_rights(self.ktm_user)
             self.client.force_authenticate(self.ktm_user)
             branch_view = self._names(url)
             self.client.force_authenticate(self.admin)
