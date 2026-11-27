@@ -734,8 +734,6 @@ class StoredFileTests(FlowTestCase):
             lead=pkr_lead, document_type='ID', file='/api/files/uploads/pkr-id.pdf', branch=self.pkr,
         )
 
-    # BUG: serve_file (apps/global_config/views.py) unlocks a key if any own-branch document ends with it.
-    @unittest.expectedFailure
     def test_own_document_pointing_at_another_branch_file_does_not_unlock_it(self):
         ktm_lead = self._lead(self.ktm)
         self._as(self._user('Counselor'))
