@@ -338,8 +338,6 @@ class FiguresAgreeTests(MoneyFlowBase):
 class RevenueReportTests(MoneyFlowBase):
     """The revenue report against who owes and batch profit."""
 
-    # BUG: revenue_report (leadreport/services.py:345) sums payments and ignores refunds, so refunded money stays "collected".
-    @unittest.expectedFailure
     def test_revenue_collected_takes_off_refunds_like_batch_profit(self):
         enrollment = self.confirmed(paid='30000', batch=self.batch)
         self.added(enrollment, 'discount', '10000', 'Moved to a cheaper plan')
@@ -347,8 +345,6 @@ class RevenueReportTests(MoneyFlowBase):
         self.assertEqual(money(self.batch_row(self.batch)['collected']), 20000)
         self.assertEqual(money(self.report('revenue')['summary']['total_collected']), 20000)
 
-    # BUG: revenue_report (leadreport/services.py:367) counts pending enrollments as outstanding; who-owes and batch profit don't.
-    @unittest.expectedFailure
     def test_revenue_outstanding_matches_who_owes(self):
         self.confirmed(paid='5000')
         self.enroll()  # pending: not confirmed and nothing paid

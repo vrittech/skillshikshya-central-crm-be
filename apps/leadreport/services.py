@@ -7,7 +7,7 @@ from django.db.models.functions import Coalesce, TruncDate, TruncMonth, TruncWee
 from django.utils import timezone
 
 from apps.lead.models import (
-    Enrollment, FollowUp, Lead, LeadActivity, LeadCall,
+    Adjustment, Enrollment, FollowUp, Lead, LeadActivity, LeadCall,
     LeadCourseInterest, Payment, PaymentPlan,
 )
 from apps.lead.services import (
@@ -107,6 +107,16 @@ def _apply_lead_filters(request, qs, date_field='created_at'):
     return qs, start_date, end_date, None
 
 
+def _refunds():
+    return Adjustment.objects.filter(kind=Adjustment.Kind.REFUND)
+
+
+def _collected(payments, refunds):
+    """Successful payments less refunds, the same as batch profit's collected."""
+    paid = payments.aggregate(total=Coalesce(Sum('amount'), Decimal('0')))['total']
+    return paid - refunds.aggregate(total=Coalesce(Sum('amount'), Decimal('0')))['total']
+
+
 def _lead_dimension_breakdown(request, qs, dimension, dimension_label):
     start_date, end_date, error = None, None, None
     qs, start_date, end_date, error = _apply_lead_filters(request, qs)
@@ -198,13 +208,12 @@ def lead_overview_report(request):
     enrollments = Enrollment.objects.filter(lead_id__in=range_ids)
     if branch_id:
         enrollments = enrollments.filter(branch_id=branch_id)
-    revenue_collected = (
-        Payment.objects.filter(
-            status='successful',
-            enrollment__lead_id__in=range_ids,
-        ).filter(branch_id=branch_id) if branch_id else
-        Payment.objects.filter(status='successful', enrollment__lead_id__in=range_ids)
-    ).aggregate(total=Coalesce(Sum('amount'), Decimal('0')))['total']
+    payments = Payment.objects.filter(status='successful', enrollment__lead_id__in=range_ids)
+    refunds = _refunds().filter(enrollment__lead_id__in=range_ids)
+    if branch_id:
+        payments = payments.filter(branch_id=branch_id)
+        refunds = refunds.filter(branch_id=branch_id)
+    revenue_collected = _collected(payments, refunds)
 
     expected_revenue = (
         qs.aggregate(total=Coalesce(Sum('expected_revenue'), Decimal('0')))['total']
@@ -342,7 +351,14 @@ def revenue_report(request):
     if end_date:
         payments = payments.filter(payment_date__date__lte=end_date)
 
-    total_revenue = payments.aggregate(total=Coalesce(Sum('amount'), Decimal('0')))['total']
+    refunds = _refunds()
+    if branch_id:
+        refunds = refunds.filter(branch_id=branch_id)
+    if start_date:
+        refunds = refunds.filter(created_at__date__gte=start_date)
+    if end_date:
+        refunds = refunds.filter(created_at__date__lte=end_date)
+    total_revenue = _collected(payments, refunds)
 
     by_method = list(
         payments.values('payment_method')
@@ -356,32 +372,18 @@ def revenue_report(request):
         .order_by('-amount')
     )
 
-    enrollments = Enrollment.objects.all()
-    if branch_id:
-        enrollments = enrollments.filter(branch_id=branch_id)
+    # What Who owes counts: the same enrollments and the same amounts. A
+    # credit (we owe them) is not money to collect.
+    owing = _confirmed_enrollments(branch_id)
     if start_date:
-        enrollments = enrollments.filter(enrollment_date__gte=start_date)
+        owing = owing.filter(enrollment_date__gte=start_date)
     if end_date:
-        enrollments = enrollments.filter(enrollment_date__lte=end_date)
-    enrollments = enrollments.exclude(
-        status__in=['cancelled', 'dropped_out', 'transferred']
-    ).annotate(
-        paid=Coalesce(
-            Sum('payments__amount', filter=Q(payments__status='successful')),
-            Decimal('0'),
-        ),
-    ).prefetch_related('adjustments')
-
-    # Same rule as Enrollment.remaining_amount. A credit (we owe them) is not
-    # money to collect, so only positive balances count.
-    outstanding = Decimal('0')
-    for enrollment in enrollments:
-        t = enrollment.adjustment_totals()
-        owed = (
-            enrollment.agreed_amount + t['extra_charge'] - t['discount']
-            - t['write_off'] - enrollment.paid + t['refund']
-        )
-        outstanding += max(owed, Decimal('0'))
+        owing = owing.filter(enrollment_date__lte=end_date)
+    today = timezone.localdate()
+    outstanding = sum(
+        (row['left'] for e in _ready_for_due_rows(owing) for row in _open_rows(e, today)),
+        Decimal('0'),
+    )
 
     return {
         'date_range': {
@@ -434,9 +436,9 @@ def enrollment_report(request):
         .order_by('-count')
     )
 
-    collected = (
-        Payment.objects.filter(status='successful', enrollment__in=enrollments)
-        .aggregate(total=Coalesce(Sum('amount'), Decimal('0')))['total']
+    collected = _collected(
+        Payment.objects.filter(status='successful', enrollment__in=enrollments),
+        _refunds().filter(enrollment__in=enrollments),
     )
 
     totals = enrollments.aggregate(
@@ -600,12 +602,34 @@ LATE_BUCKETS = [
 ]
 
 
+def _confirmed_enrollments(branch_id):
+    """Confirmed, active and completed enrollments in the branch: the ones money is owed on."""
+    qs = Enrollment.objects.filter(status__in=Enrollment.SEAT_STATUSES)
+    return qs.filter(branch_id=branch_id) if branch_id else qs
+
+
+def _ready_for_due_rows(qs):
+    """Enrollments with what each paid, and their money entries and due dates loaded."""
+    return qs.annotate(
+        paid_total=Coalesce(
+            Sum('payments__amount', filter=Q(payments__status='successful')),
+            Decimal('0'),
+        ),
+    ).prefetch_related(
+        'adjustments',
+        Prefetch('payment_plans', queryset=PaymentPlan.objects.prefetch_related('installments')),
+    )
+
+
+def _open_rows(enrollment, today):
+    """The due rows of an enrollment from _ready_for_due_rows() that still have money left to pay."""
+    rows = due_rows(enrollment, today=today, paid=enrollment.paid_total)
+    return [r for r in rows if r['left'] > 0]
+
+
 def _owing_enrollments(request):
     """Confirmed, active and completed enrollments in the user's branch, ready for due_rows()."""
-    branch_id = _branch_scope(request)
-    qs = Enrollment.objects.filter(status__in=Enrollment.SEAT_STATUSES)
-    if branch_id:
-        qs = qs.filter(branch_id=branch_id)
+    qs = _confirmed_enrollments(_branch_scope(request))
     for name in ('course', 'batch'):
         value = _query_param(request, name)
         if value and str(value).isdigit():
@@ -621,17 +645,9 @@ def _owing_enrollments(request):
     seat = _query_param(request, 'seat')
     if seat in SEAT_STATES:
         qs = filter_seat(qs, seat)
-    return qs.select_related(
+    return _ready_for_due_rows(qs.select_related(
         'lead', 'lead__assigned_counselor', 'student', 'course', 'batch', 'branch',
-    ).annotate(
-        paid_total=Coalesce(
-            Sum('payments__amount', filter=Q(payments__status='successful')),
-            Decimal('0'),
-        ),
-    ).prefetch_related(
-        'adjustments',
-        Prefetch('payment_plans', queryset=PaymentPlan.objects.prefetch_related('installments')),
-    )
+    ))
 
 
 def _who(enrollment):
@@ -691,8 +707,7 @@ def who_owes_report(request):
     buckets = {key: Decimal('0') for key, _, _ in LATE_BUCKETS}
 
     for enrollment in _owing_enrollments(request):
-        rows = due_rows(enrollment, today=today, paid=enrollment.paid_total)
-        open_rows = [r for r in rows if r['left'] > 0]
+        open_rows = _open_rows(enrollment, today)
         late_rows = [r for r in open_rows if r['status'] == 'late']
         owed = sum((r['left'] for r in open_rows), Decimal('0'))
         if owed <= 0 or (late_only and not late_rows):
