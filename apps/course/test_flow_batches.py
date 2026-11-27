@@ -670,9 +670,16 @@ class RoleTests(FlowBase):
 
     def test_counselor_seats_students_but_cannot_take_attendance_or_close(self):
         nov, dec = self._batch('Python Nov'), self._batch('Python Dec')
-        self._as(self._user('Counselor'))
+        counselor = self._user('Counselor')
+        self._as(counselor)
         ram = self._enroll(nov)
-        self._ok(self._confirm(ram))
+        self._as(self._user('Accountant'))  # a Counselor doesn't take money
+        self._ok(self.client.post(self._url(ram, 'payments/'), {
+            'amount': '5000', 'payment_date': timezone.now().isoformat(),
+            'payment_method': 'cash', 'status': 'successful',
+        }, format='json'), 201)
+        self._as(counselor)
+        self._ok(self.client.post(self._url(ram, 'confirm/'), {}, format='json'))
         self._ok(self._act(ram, 'move', batch=dec.id, reason='Evening'))
         ram.refresh_from_db()
 

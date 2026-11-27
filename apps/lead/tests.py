@@ -4655,6 +4655,8 @@ class ActionPermissionTests(SeatTestBase):
     def test_change_permission_can(self):
         enrollment = self._enroll(self.batch)
         self.client.force_authenticate(self._user('change_enrollment'))
+        self.assertEqual(self._confirm(enrollment).status_code, 403)  # the first payment needs add_payment
+        self.client.force_authenticate(self._user('change_enrollment', 'add_payment'))
         self.assertEqual(self._confirm(enrollment).status_code, 200)
         response = self.client.post(self._url(enrollment, 'status/'), {'status': 'active', 'reason': 'x'}, format='json')
         self.assertEqual(response.status_code, 200, response.data)

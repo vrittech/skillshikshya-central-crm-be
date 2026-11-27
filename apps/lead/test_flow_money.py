@@ -8,7 +8,6 @@ and check that every screen shows the same money.
 
 A test marked expectedFailure shows a bug; its # BUG: line says what is wrong.
 """
-import unittest
 from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from unittest import mock
@@ -338,8 +337,6 @@ class FiguresAgreeTests(MoneyFlowBase):
 class RevenueReportTests(MoneyFlowBase):
     """The revenue report against who owes and batch profit."""
 
-    # BUG: revenue_report (leadreport/services.py:345) sums payments and ignores refunds, so refunded money stays "collected".
-    @unittest.expectedFailure
     def test_revenue_collected_takes_off_refunds_like_batch_profit(self):
         enrollment = self.confirmed(paid='30000', batch=self.batch)
         self.added(enrollment, 'discount', '10000', 'Moved to a cheaper plan')
@@ -347,8 +344,6 @@ class RevenueReportTests(MoneyFlowBase):
         self.assertEqual(money(self.batch_row(self.batch)['collected']), 20000)
         self.assertEqual(money(self.report('revenue')['summary']['total_collected']), 20000)
 
-    # BUG: revenue_report (leadreport/services.py:367) counts pending enrollments as outstanding; who-owes and batch profit don't.
-    @unittest.expectedFailure
     def test_revenue_outstanding_matches_who_owes(self):
         self.confirmed(paid='5000')
         self.enroll()  # pending: not confirmed and nothing paid
@@ -360,13 +355,12 @@ class RevenueReportTests(MoneyFlowBase):
 class VoidAndRefundTests(MoneyFlowBase):
     """Voids and refunds on the same enrollment."""
 
-    # BUG: void_payment (lead/services.py:755) skips the refund rule, so refunds end up above what was paid and the student owes more than the fee.
-    @unittest.expectedFailure
     def test_voiding_a_refunded_payment_keeps_refunds_within_what_was_paid(self):
         enrollment = self.confirmed(paid='30000')
         self.added(enrollment, 'discount', '10000', 'Course price dropped')
         self.added(enrollment, 'refund', '10000', 'Gave back the difference')
-        self.void(enrollment, self.first_payment(enrollment).id, reason='Payment was entered twice')
+        response = self.void(enrollment, self.first_payment(enrollment).id, reason='Payment was entered twice')
+        self.assertEqual(response.status_code, 400)
         card = self.card(enrollment)
         self.assertGreaterEqual(money(card['total_paid']), money(card['refunds_total']))
         self.assertLessEqual(money(card['remaining_amount']), 20000)  # never more than the fee after the discount
@@ -417,8 +411,6 @@ class BranchAndRightsTests(MoneyFlowBase):
         payment.refresh_from_db()
         self.assertEqual(payment.status, 'successful')
 
-    # BUG: PaymentViewSet.perform_create (lead/views.py:964) finds the enrollment by lead only, not inside the user's branch.
-    @unittest.expectedFailure
     def test_branch_user_cannot_pay_into_another_branchs_enrollment(self):
         enrollment = self.pokhara_enrollment()
         self.client.force_authenticate(self.role_user('Accountant', branch=self.ktm))
@@ -439,13 +431,11 @@ class BranchAndRightsTests(MoneyFlowBase):
         self.assertEqual(self.entry(enrollment, 'discount', '1000').status_code, 403)
         self.assertEqual(self.void(enrollment, payment_id).status_code, 403)
 
-    # BUG: confirm needs only change_enrollment (lead/views.py:810) but records first_payment; Counselor has no add_payment.
-    @unittest.expectedFailure
     def test_counselor_cannot_take_money_through_confirm(self):
         self.client.force_authenticate(self.role_user('Counselor'))
         enrollment = self.enroll()
         response = self.confirm(enrollment, paid='5000')
-        self.assertIn(response.status_code, (400, 403))
+        self.assertEqual(response.status_code, 403)
         self.assertFalse(Payment.objects.filter(enrollment=enrollment).exists())
 
     def test_only_money_roles_add_money_entries_or_void(self):
@@ -645,11 +635,10 @@ class PaymentAmountTests(MoneyFlowBase):
         self.assertIsNone(self.owed_row(enrollment))
         self.assertEqual(money(self.report('revenue')['summary']['outstanding_to_collect']), 0)
 
-    # BUG: an extra charge has no cap, and a 13-digit balance overflows the 12-digit remaining_amount field (lead/serializers.py:262): 500.
-    @unittest.expectedFailure
     def test_a_huge_extra_charge_does_not_break_the_enrollment_screens(self):
         enrollment = self.confirmed(paid='5000')
-        self.entry(enrollment, 'extra_charge', '9999999999.99', 'Typed too many nines')
+        response = self.entry(enrollment, 'extra_charge', '9999999999.99', 'Typed too many nines')
+        self.assertEqual(response.status_code, 400)
         self.client.raise_request_exception = False
         self.assertEqual(self.client.get(self.url(enrollment)).status_code, 200)
         self.assertEqual(self.client.get('/api/enrollments/').status_code, 200)
@@ -702,8 +691,6 @@ class PendingEnrollmentMoneyTests(MoneyFlowBase):
         self.assertFalse(Invoice.objects.filter(enrollment=second).exists())
         self.assertFalse(Student.objects.filter(lead=second.lead).exists())
 
-    # BUG: confirm wants something paid when agreed > 0 (lead/services.py:637), but a full discount entry leaves nothing to pay: stuck.
-    @unittest.expectedFailure
     def test_a_fully_discounted_pending_enrollment_is_not_stuck(self):
         enrollment = self.enroll()
         self.entry(enrollment, 'discount', '30000', 'Full scholarship')

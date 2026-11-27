@@ -609,10 +609,11 @@ def confirm_enrollment(enrollment, *, user, due_dates=None, first_payment=None):
     made, the enrollment is linked to it, the lead is marked converted, a
     history row is written and the fee invoice is made.
 
-    Something must be paid first (unless the agreed amount is 0); the rest
-    can be paid later or in parts. first_payment ({'amount', 'payment_method',
-    'payment_date', 'transaction_reference', 'notes'}) records that payment in
-    the same step, so a refused confirm keeps no payment either.
+    Something must be paid first (unless discounts leave nothing of the
+    agreed amount to pay); the rest can be paid later or in parts.
+    first_payment ({'amount', 'payment_method', 'payment_date',
+    'transaction_reference', 'notes'}) records that payment in the same step,
+    so a refused confirm keeps no payment either.
 
     due_dates is a list of {'due_on', 'amount'} that adds up to the agreed
     amount. Without it, the whole amount is due on the confirm day.
@@ -634,7 +635,8 @@ def confirm_enrollment(enrollment, *, user, due_dates=None, first_payment=None):
             transaction_reference=first_payment.get('transaction_reference') or None,
             notes=first_payment.get('notes') or None,
         )
-    if enrollment.agreed_amount > 0 and net_paid(enrollment) <= 0:
+    to_pay = enrollment.agreed_amount - enrollment.discounts_total
+    if to_pay > 0 and net_paid(enrollment) <= 0:
         raise ActionRefused('Record a payment first. An enrollment is confirmed once something is paid.')
     if due_dates:
         due_dates = _clean_parts(enrollment, due_dates)
@@ -759,6 +761,14 @@ def void_payment(payment, *, reason, user):
         raise ActionRefused(
             f'A {payment.get_status_display().lower()} payment can\'t be voided.'
         )
+    if payment.status == Payment.Status.SUCCESSFUL:
+        # Refunds can't be more than what was paid, the same as for a new refund.
+        enrollment = _lock(payment.enrollment)
+        if payment.amount > enrollment.total_paid - enrollment.refunds_total:
+            raise ActionRefused(
+                f"This payment can't be voided: the refunds ({_npr(enrollment.refunds_total)}) "
+                'would be more than what was paid.'
+            )
     old_status = payment.status
     payment.status = Payment.Status.VOIDED
     payment.void_reason = reason
@@ -781,6 +791,10 @@ def void_payment(payment, *, reason, user):
     return payment
 
 
+# The most a money field (12 digits, 2 of them decimals) holds, such as the balance.
+MAX_AMOUNT = Decimal('9999999999.99')
+
+
 @transaction.atomic
 def add_adjustment(enrollment, *, kind, amount, reason, user):
     """Add an extra charge, discount, write-off or refund, with a history row.
@@ -788,10 +802,15 @@ def add_adjustment(enrollment, *, kind, amount, reason, user):
     A refund can't be more than what was paid and not yet refunded. A write-off
     can't be more than what is owed. A discount can't be more than the fee
     (after earlier discounts and write-offs); when the student already paid,
-    it may leave a credit we owe them, to be refunded.
+    it may leave a credit we owe them, to be refunded. An extra charge can't
+    take what is owed above MAX_AMOUNT.
     """
     enrollment = _lock(enrollment)
     balance_before = enrollment.remaining_amount
+    if kind == Adjustment.Kind.EXTRA_CHARGE and balance_before + amount > MAX_AMOUNT:
+        raise ActionRefused(
+            f"An extra charge can't take what is owed above {_npr(MAX_AMOUNT)}. Check the amount."
+        )
     if kind == Adjustment.Kind.DISCOUNT:
         t = enrollment.adjustment_totals()
         fee = (
