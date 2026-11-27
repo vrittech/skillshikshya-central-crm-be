@@ -693,8 +693,6 @@ class PendingEnrollmentMoneyTests(MoneyFlowBase):
         self.assertFalse(Invoice.objects.filter(enrollment=second).exists())
         self.assertFalse(Student.objects.filter(lead=second.lead).exists())
 
-    # BUG: confirm wants something paid when agreed > 0 (lead/services.py:637), but a full discount entry leaves nothing to pay: stuck.
-    @unittest.expectedFailure
     def test_a_fully_discounted_pending_enrollment_is_not_stuck(self):
         enrollment = self.enroll()
         self.entry(enrollment, 'discount', '30000', 'Full scholarship')

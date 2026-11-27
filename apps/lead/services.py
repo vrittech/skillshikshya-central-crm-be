@@ -609,10 +609,11 @@ def confirm_enrollment(enrollment, *, user, due_dates=None, first_payment=None):
     made, the enrollment is linked to it, the lead is marked converted, a
     history row is written and the fee invoice is made.
 
-    Something must be paid first (unless the agreed amount is 0); the rest
-    can be paid later or in parts. first_payment ({'amount', 'payment_method',
-    'payment_date', 'transaction_reference', 'notes'}) records that payment in
-    the same step, so a refused confirm keeps no payment either.
+    Something must be paid first (unless discounts leave nothing of the
+    agreed amount to pay); the rest can be paid later or in parts.
+    first_payment ({'amount', 'payment_method', 'payment_date',
+    'transaction_reference', 'notes'}) records that payment in the same step,
+    so a refused confirm keeps no payment either.
 
     due_dates is a list of {'due_on', 'amount'} that adds up to the agreed
     amount. Without it, the whole amount is due on the confirm day.
@@ -634,7 +635,8 @@ def confirm_enrollment(enrollment, *, user, due_dates=None, first_payment=None):
             transaction_reference=first_payment.get('transaction_reference') or None,
             notes=first_payment.get('notes') or None,
         )
-    if enrollment.agreed_amount > 0 and net_paid(enrollment) <= 0:
+    to_pay = enrollment.agreed_amount - enrollment.discounts_total
+    if to_pay > 0 and net_paid(enrollment) <= 0:
         raise ActionRefused('Record a payment first. An enrollment is confirmed once something is paid.')
     if due_dates:
         due_dates = _clean_parts(enrollment, due_dates)
