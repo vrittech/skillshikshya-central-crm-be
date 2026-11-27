@@ -10,7 +10,9 @@ Before a batch closes, the checklist looks at:
 - students: who closing will mark completed, and anyone still pending for
   the batch (pending is open: cancel them or move them first).
 - attendance: every student in the batch has a mark on every register day
-  since they sat in it. A register day is a day anyone in the batch was marked.
+  since they sat in it. A register day is a day anyone in the batch was
+  marked; a mark counts for the batch the student's seat history puts them
+  in that day.
 - teams: no student in the batch still holds a Teams licence.
 - owing: who still owes money on the batch. For information only; it never
   stops the close.
@@ -92,22 +94,54 @@ def _students(batch, rows):
     return [person(e) for e in rows if e.status in STUDYING], [person(e) for e in pending]
 
 
+def _sat_in(history, day):
+    """(batch id, seated) for a day, by an enrollment's seat history (oldest row first).
+
+    The newest row that started on or before the day says where the student
+    sat. Before their first row they sat nowhere yet (seated is False), but a
+    mark of those days belongs to the batch they first joined: its register
+    lets earlier days be filled in.
+    """
+    rows = [p for p in history if p.started_on <= day]
+    if not rows:
+        return history[0].course_batch_id, False
+    return rows[-1].course_batch_id, True
+
+
 def _attendance(batch, rows):
+    """A student's marks count here only for the days their seat history puts
+    them in this batch, so a student who moved in brings no class days from
+    their old batch."""
+    from apps.lead.models import Placement
     from apps.student.models import Attendance
+
+    history = {}
+    for p in Placement.objects.filter(enrollment__in=[e.id for e in rows]).order_by('created_at', 'id'):
+        history.setdefault(p.enrollment_id, []).append(p)
+
+    def counts(e, day):
+        # Without seat history every day counts, and is expected.
+        return e.id not in history or _sat_in(history[e.id], day)[0] == batch.pk
+
+    def expected(e, day):
+        return e.id not in history or _sat_in(history[e.id], day) == (batch.pk, True)
 
     student_ids = [e.student_id for e in rows if e.student_id]
     marks = _in_window(
         Attendance.objects.filter(course_id=batch.course_id, student_id__in=student_ids), batch,
     ).values_list('student_id', 'date')
-    marked = {}
+    by_student = {}
     for student_id, day in marks:
-        marked.setdefault(student_id, set()).add(day)
+        by_student.setdefault(student_id, set()).add(day)
+    marked = {
+        e.id: {d for d in by_student.get(e.student_id, ()) if counts(e, d)}
+        for e in rows if e.student_id
+    }
     days = sorted(set().union(*marked.values())) if marked else []
 
     missing = []
     for e in rows:
-        expected = [d for d in days if e.seat_on is None or d >= e.seat_on]
-        gaps = [d for d in expected if d not in marked.get(e.student_id, set())]
+        gaps = [d for d in days if expected(e, d) and d not in marked.get(e.id, set())]
         if gaps:
             missing.append({
                 **_person(e),
@@ -304,6 +338,19 @@ def register(batch, day):
     }
 
 
+def day_refusal(batch, day):
+    """Why the batch's register can't take marks on day, or None when it can."""
+    if batch.status == CourseBatch.Status.CLOSED:
+        return 'This batch is closed. Its attendance can no longer change.'
+    if day > nepal_today():
+        return 'Attendance can’t be marked for a future day.'
+    if batch.start_date and day < batch.start_date:
+        return 'This day is before the batch starts.'
+    if batch.end_date and day > batch.end_date:
+        return 'This day is after the batch ends.'
+    return None
+
+
 @transaction.atomic
 def mark_register(batch, *, day, marks, user, can_change):
     """Save the day's marks for students in the batch. Returns (created, changed).
@@ -314,12 +361,9 @@ def mark_register(batch, *, day, marks, user, can_change):
     from apps.student.models import Attendance
 
     batch = _lock(batch)
-    if batch.status == CourseBatch.Status.CLOSED:
-        raise ActionRefused('This batch is closed. Its attendance can no longer change.')
-    if day > nepal_today():
-        raise ActionRefused('Attendance can’t be marked for a future day.')
-    if batch.start_date and day < batch.start_date:
-        raise ActionRefused('This day is before the batch starts.')
+    refusal = day_refusal(batch, day)
+    if refusal:
+        raise ActionRefused(refusal)
     in_batch = {e.student_id for e in seated(batch) if e.student_id}
     wanted = {m['student']: m['status'] for m in marks}
     if not wanted:
@@ -346,3 +390,26 @@ def mark_register(batch, *, day, marks, user, can_change):
     ]
     Attendance.objects.bulk_create(new)
     return len(new), len(to_change)
+
+
+def check_one_mark(student_id, course_id, day):
+    """A mark saved outside the register keeps the register's rules.
+
+    The student sits in a batch of the course now, and that batch takes marks
+    on the day. Raises ActionRefused otherwise. Call it inside a transaction:
+    it locks the batch rows, as the register does.
+    """
+    from apps.lead.models import Enrollment
+
+    if course_id is None:
+        raise ActionRefused('Pick a course.')
+    batch_ids = Enrollment.objects.filter(
+        student_id=student_id, course_id=course_id, current_batch__isnull=False,
+        status__in=Enrollment.SEAT_STATUSES,
+    ).values_list('current_batch', flat=True)
+    batches = CourseBatch.objects.select_for_update().filter(pk__in=list(batch_ids)).order_by('pk')
+    refusals = [day_refusal(b, day) for b in batches]
+    if not refusals:
+        raise ActionRefused('This student is not in a batch of this course.')
+    if all(refusals):
+        raise ActionRefused(refusals[0])

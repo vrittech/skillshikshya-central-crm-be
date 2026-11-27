@@ -32,6 +32,28 @@ def _lock(instance):
 
 # ---------------------------------------------------------------- seats
 
+# Enrollments that no longer hold a place anywhere.
+ENDED_STATUSES = (
+    Enrollment.Status.CANCELLED, Enrollment.Status.DROPPED_OUT, Enrollment.Status.TRANSFERRED,
+)
+
+
+def same_batch_refusal(lead_id, batch, *, exclude=None):
+    """Why this lead can't have one more enrollment in the batch, or None.
+
+    One person has one place in a batch: another open enrollment (not
+    cancelled, dropped out or transferred) that waits for the batch, counts
+    its money there or sits in it blocks a second one.
+    """
+    others = Enrollment.objects.filter(
+        Q(batch=batch) | Q(current_batch=batch), lead_id=lead_id,
+    ).exclude(status__in=ENDED_STATUSES)
+    if exclude is not None:
+        others = others.exclude(pk=exclude.pk)
+    if others.exists():
+        return f'This person already has an enrollment in {batch.name}.'
+    return None
+
 
 def _take_seat(enrollment, batch, *, kind, reason, user, on=None, from_batch=None):
     """Seat the (locked) enrollment in a batch and add a seat history row.
@@ -51,7 +73,9 @@ def _take_seat(enrollment, batch, *, kind, reason, user, on=None, from_batch=Non
             f'{batch.name} is a batch of {batch.branch.name}. To study there, move the '
             'student to that branch first.'
         )
-    refusal = batch.seat_refusal(exclude=enrollment)
+    refusal = batch.seat_refusal(exclude=enrollment) or same_batch_refusal(
+        enrollment.lead_id, batch, exclude=enrollment,
+    )
     if refusal:
         raise ActionRefused(refusal)
     Placement.objects.create(
@@ -340,7 +364,10 @@ def batch_students(batch):
     paused = list(enrollments.filter(
         current_batch__isnull=True, seat_kind=Placement.Kind.PAUSE, last_from=batch.pk,
     ))
-    moves_out = Placement.objects.filter(from_batch=batch, kind=Placement.Kind.MOVE)
+    # Moving out: a move to another batch, or a pause here and a resume into another batch.
+    moves_out = Placement.objects.filter(
+        from_batch=batch, kind__in=(Placement.Kind.MOVE, Placement.Kind.RESUME),
+    ).exclude(course_batch=batch)
     last_move_out = moves_out.filter(enrollment=OuterRef('pk')).order_by('-created_at', '-id')
     paused_ids = {e.id for e in paused}
     moved_out = [
@@ -349,6 +376,7 @@ def batch_students(batch):
         ).annotate(
             out_on=Subquery(last_move_out.values('started_on')[:1]),
             out_to=Subquery(last_move_out.values('course_batch')[:1]),
+            out_how=Subquery(last_move_out.values('kind')[:1]),
         )
         if e.id not in paused_ids
     ]
@@ -383,8 +411,8 @@ def batch_students(batch):
         return {
             **row(e),
             'since': e.out_on,
-            'how': Placement.Kind.MOVE,
-            'how_display': kinds[Placement.Kind.MOVE],
+            'how': e.out_how,
+            'how_display': kinds[e.out_how],
             'from_batch': batch.pk,
             'from_batch_name': batch.name,
             'moved_in': False,

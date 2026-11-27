@@ -4,10 +4,7 @@ Each test drives real URLs across features: seats, moves, pauses, close and
 reopen, batch money, the register, Teams licences and the default roles.
 Single rules have their own tests in apps/course/tests.py and
 apps/lead/tests.py; these tests cross them.
-
-Tests marked expectedFailure show a bug, named in the # BUG: line above.
 """
-import unittest
 from datetime import timedelta
 from decimal import Decimal
 
@@ -336,8 +333,6 @@ class SeatCountTests(FlowBase):
         self.assertEqual(self._money(nov)['figures']['students'], 1)
         self.assertEqual(self._money(pokhara)['figures']['students'], 0)
 
-    # BUG: nothing stops a lead's second enrollment in the same batch (apps/lead/serializers.py:383), so one person takes two seats.
-    @unittest.expectedFailure
     def test_one_person_cannot_hold_two_seats_in_the_same_batch(self):
         nov = self._batch('Python Nov', seats=3)
         lead = self._lead()
@@ -346,6 +341,18 @@ class SeatCountTests(FlowBase):
         again = self._enroll_response(nov, lead=lead)
         if again.status_code == 201:
             self._confirm(Enrollment.objects.get(pk=again.data['id']))
+        self.assertEqual(self._seats(nov)[0], 1)
+
+    def test_one_person_cannot_move_or_resume_into_a_batch_they_are_in(self):
+        nov, dec = self._batch('Python Nov', seats=3), self._batch('Python Dec', seats=3)
+        lead = self._lead()
+        self._student(nov, lead=lead)
+        other = self._student(dec, lead=lead)
+
+        taken = 'already has an enrollment in Python Nov'
+        self._refused(self._act(other, 'move', batch=nov.id, reason='Morning'), taken)
+        self._ok(self._act(other, 'pause', reason='Exams'))
+        self._refused(self._act(other, 'resume', batch=nov.id, reason='Back'), taken)
         self.assertEqual(self._seats(nov)[0], 1)
 
 
@@ -373,8 +380,6 @@ class BatchStudentListTests(FlowBase):
             (ram.id, dec.id, nov.id, True),
         )
 
-    # BUG: batch_students (apps/lead/services.py:343) counts only Move rows as moving out, so a student paused out of a batch and resumed into another vanishes from the old batch's lists.
-    @unittest.expectedFailure
     def test_a_student_resumed_into_another_batch_shows_as_moved_out_of_the_old_one(self):
         nov, dec = self._batch('Python Nov'), self._batch('Python Dec')
         ram = self._student(nov)
@@ -572,8 +577,6 @@ class CloseFlowTests(FlowBase):
         self._ok(self._reopen(nov))
         self.assertEqual(self._licence_state(licence), ('in_use', ''))
 
-    # BUG: attendance is kept per course, not per batch (apps/course/closing.py:100), so marks a moved-in student got in his old batch become class days of the new batch and its other students show as missing.
-    @unittest.expectedFailure
     def test_close_check_counts_only_the_class_days_of_this_batch(self):
         nov, dec = self._batch('Python Nov'), self._batch('Python Dec')
         mover = self._student(nov)
@@ -607,16 +610,12 @@ class RegisterTests(FlowBase):
         self._ok(self._mark(dec, self.today, [(ram, 'present')]))
         self._refused(self._mark(nov, self.today, [(ram, 'present')]), 'not in this batch')
 
-    # BUG: mark_register (apps/course/closing.py:321) refuses days before the start but saves days after the end, which window() then leaves out of the totals and the close check.
-    @unittest.expectedFailure
     def test_a_day_after_the_batch_ended_is_refused(self):
         nov = self._batch('Python Nov', started=10, ends=-3)
         ram = self._student(nov)
         response = self._mark(nov, self.today - timedelta(days=1), [(ram, 'present')])
         self.assertEqual(response.status_code, 400, response.data)
 
-    # BUG: /api/students/<id>/attendance/ (apps/student/views.py:184) saves any mark with no register rules, so a future day can be marked.
-    @unittest.expectedFailure
     def test_the_student_attendance_list_cannot_mark_a_future_day(self):
         nov = self._batch('Python Nov')
         ram = self._student(nov)
@@ -626,8 +625,6 @@ class RegisterTests(FlowBase):
         }, format='json')
         self.assertEqual(response.status_code, 400, response.data)
 
-    # BUG: /api/attendance/<id>/ (apps/student/views.py:184) changes a mark of a closed batch, which the register refuses.
-    @unittest.expectedFailure
     def test_a_mark_of_a_closed_batch_cannot_be_changed_through_the_attendance_list(self):
         nov = self._batch('Python Nov')
         ram = self._student(nov)
@@ -728,8 +725,6 @@ class RoleTests(FlowBase):
         pokhara.refresh_from_db()
         self.assertEqual((pokhara.status, pokhara.capacity), ('running', 2))
 
-    # BUG: CourseBatchViewSet.perform_create (apps/course/views.py:131) and the serializer let a branch user pick any branch, so a Kathmandu manager makes or moves a batch into Pokhara.
-    @unittest.expectedFailure
     def test_a_branch_manager_cannot_put_a_batch_in_another_branch(self):
         self._as(self._user('Branch Manager', self.ktm))
         self.client.post('/api/course-batches/', {
@@ -741,16 +736,12 @@ class RoleTests(FlowBase):
         self.client.patch(f'/api/course-batches/{mine["id"]}/', {'branch': self.pkr.id}, format='json')
         self.assertFalse(CourseBatch.objects.filter(branch=self.pkr).exists())
 
-    # BUG: CourseBatchSerializer (apps/course/serializers.py:146) blocks a course change once students are enrolled but not a branch change, so Kathmandu students end up seated in a Pokhara batch.
-    @unittest.expectedFailure
     def test_a_batch_with_students_cannot_move_to_another_branch(self):
         nov = self._batch('Python Nov')
         self._student(nov)
         response = self.client.patch(self._batch_url(nov), {'branch': self.pkr.id}, format='json')
         self.assertEqual(response.status_code, 400, response.data)
 
-    # BUG: BatchViewSet (apps/course/views.py:73) shows shared shifts to every branch and lets a branch user with change_batch edit them, changing the class time of every branch.
-    @unittest.expectedFailure
     def test_a_branch_manager_cannot_change_a_shared_shift(self):
         shared = self._ok(self.client.post(
             '/api/batches/', {'name': 'Morning', 'start_time': '07:00', 'end_time': '09:00'}, format='json',
@@ -760,6 +751,20 @@ class RoleTests(FlowBase):
         response = self.client.patch(f'/api/batches/{shared["id"]}/', {'end_time': '10:00'}, format='json')
         self.assertIn(response.status_code, (400, 403, 404))
         self.assertEqual(Batch.objects.get(pk=shared['id']).end_time.strftime('%H:%M'), '09:00')
+
+    def test_a_branch_manager_changes_only_their_own_branch_shifts(self):
+        self._as(self._user('Branch Manager', self.ktm))
+        shift = {'name': 'Evening', 'start_time': '17:00', 'end_time': '19:00'}
+        self._refused(
+            self.client.post('/api/batches/', {**shift, 'branch': self.pkr.id}, format='json'), 'your own branch',
+        )
+        own = self._ok(self.client.post('/api/batches/', shift, format='json'), 201)
+        self.assertEqual(own['branch'], self.ktm.id)
+
+        url = f'/api/batches/{own["id"]}/'
+        self._ok(self.client.patch(url, {'end_time': '20:00'}, format='json'))
+        self._refused(self.client.patch(url, {'branch': None}, format='json'), 'Only staff')
+        self.assertEqual(Batch.objects.get(pk=own['id']).branch_id, self.ktm.id)
 
 
 # ==================================================================== Teams licences
