@@ -457,9 +457,21 @@ class StatusChangeSerializer(serializers.Serializer):
     reason = serializers.CharField()
 
 
+def active_receipt_number(payment):
+    """Number of the payment's active receipt, or None. Reads the prefetched invoices."""
+    for invoice in payment.invoices.all():
+        if invoice.status == 'active':
+            return invoice.invoice_number
+    return None
+
+
 class PaymentSerializer(serializers.ModelSerializer):
     received_by_name = serializers.CharField(source='received_by.name', read_only=True)
     voided_by_name = serializers.CharField(source='voided_by.name', read_only=True)
+    receipt_number = serializers.SerializerMethodField()
+
+    def get_receipt_number(self, payment):
+        return active_receipt_number(payment)
 
     class Meta:
         model = Payment
@@ -890,6 +902,10 @@ class GlobalPaymentSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source='enrollment.course.name', read_only=True)
     received_by_name = serializers.CharField(source='received_by.name', read_only=True)
     branch_name = serializers.CharField(source='branch.name', read_only=True)
+    receipt_number = serializers.SerializerMethodField()
+
+    def get_receipt_number(self, payment):
+        return active_receipt_number(payment)
 
     class Meta:
         model = Payment
@@ -902,6 +918,7 @@ class GlobalPaymentSerializer(serializers.ModelSerializer):
             'status', 'void_reason', 'voided_at',
             'received_by', 'received_by_name',
             'branch', 'branch_name',
+            'receipt_number',
         ]
         read_only_fields = fields
 

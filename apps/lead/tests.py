@@ -556,6 +556,63 @@ class PaymentActionTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
+    def _receipt_number(self, payment_id):
+        nested = self.client.get(self.payments_url).data['results']
+        listed = self.client.get('/api/payments/').data['results']
+        numbers = {row['receipt_number'] for row in nested + listed if row['id'] == payment_id}
+        self.assertEqual(len(numbers), 1)
+        return numbers.pop()
+
+    def test_a_new_receipt_after_the_old_one_is_cancelled(self):
+        from apps.global_config.models import EmailLog
+
+        payment_id = self._pay().data['id']
+        url = f'{self.payments_url}{payment_id}/receipt/'
+        old = Invoice.objects.get(payment_id=payment_id)
+        self.assertEqual(self._receipt_number(payment_id), old.invoice_number)
+
+        refused = self.client.post(url)
+        self.assertEqual(refused.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(refused.data['detail'], 'This payment already has an active receipt.')
+
+        self.client.post(f'/api/invoices/{old.id}/cancel/', {'reason': 'Wrong method'}, format='json')
+        self.assertIsNone(self._receipt_number(payment_id))
+
+        response = self.client.post(url)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertNotEqual(response.data['invoice_number'], old.invoice_number)
+        self.assertEqual(response.data['amount'], '10000.00')
+        self.assertEqual(self._receipt_number(payment_id), response.data['invoice_number'])
+        # Sent as a receipt; the student got "payment received" once, with the first one.
+        self.assertTrue(
+            EmailLog.objects.filter(kind=EmailLog.Kind.INVOICE, invoice_id=response.data['id']).exists()
+        )
+        self.assertEqual(EmailLog.objects.filter(kind=EmailLog.Kind.PAYMENT_RECEIVED).count(), 1)
+        self.enrollment.refresh_from_db()
+        self.assertEqual(self.enrollment.total_paid, 10000)
+
+    def test_no_receipt_for_a_voided_or_pending_payment(self):
+        voided = self._pay().data['id']
+        self.client.post(f'{self.payments_url}{voided}/void/', {'reason': 'Duplicate entry'}, format='json')
+        pending = self._pay(amount='5000', pay_status='pending').data['id']
+        for payment_id in (voided, pending):
+            response = self.client.post(f'{self.payments_url}{payment_id}/receipt/')
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertEqual(response.data['detail'], 'A receipt is made only for a successful payment.')
+        self.assertFalse(Invoice.objects.filter(payment_id=pending).exists())
+
+    def test_making_a_receipt_needs_change_payment(self):
+        from apps.branch.models import Branch
+
+        payment_id = self._pay().data['id']
+        clerk = User.objects.create_user(
+            email='clerk@test.com', name='Clerk', password='pass',
+            branch=Branch.objects.create(name='Kathmandu', code='KTM'),
+        )
+        self.client.force_authenticate(clerk)
+        response = self.client.post(f'{self.payments_url}{payment_id}/receipt/')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
 
 class AdjustmentTests(APITestCase):
     """Extra charge, discount, write-off and refund: added with a reason, never edited."""

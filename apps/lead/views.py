@@ -513,7 +513,7 @@ class GlobalPaymentViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         return Payment.objects.select_related(
             'enrollment', 'enrollment__lead', 'enrollment__course', 'received_by', 'branch',
-        )
+        ).prefetch_related('invoices')
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve', 'summary']:
@@ -942,7 +942,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
         return Payment.objects.filter(
             enrollment_id=self.kwargs['enrollment_pk'],
             enrollment__lead_id=self.kwargs['lead_pk'],
-        ).select_related('received_by', 'voided_by')
+        ).select_related('received_by', 'voided_by').prefetch_related('invoices')
 
     @transaction.atomic
     def perform_create(self, serializer):
@@ -961,7 +961,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
         services.issue_receipt(payment, user=self.request.user)
 
     def get_permissions(self):
-        if self.action in ['confirm', 'void']:
+        if self.action in ['confirm', 'void', 'receipt']:
             return [IsAuthenticated(), needs('lead.change_payment')()]
         if self.action == 'create':
             return [IsAuthenticated(), IsStaffOrHasPermission()]
@@ -981,6 +981,14 @@ class PaymentViewSet(viewsets.ModelViewSet):
             payment, reason=reason.validated_data['reason'], user=request.user,
         )
         return Response(self.get_serializer(payment).data)
+
+    @action(detail=True, methods=['post'])
+    def receipt(self, request, *args, **kwargs):
+        """Make a new receipt when the old one was cancelled."""
+        from apps.invoices.serializers import InvoiceSerializer
+
+        receipt = services.reissue_receipt(self.get_object(), user=request.user)
+        return Response(InvoiceSerializer(receipt).data, status=201)
 
 
 class AdjustmentViewSet(

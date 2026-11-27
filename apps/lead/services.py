@@ -694,21 +694,45 @@ def confirm_enrollment(enrollment, *, user, due_dates=None, first_payment=None):
     return enrollment
 
 
-def issue_receipt(payment, *, user):
-    """Make the receipt for a successful payment, once, and email it to the student."""
-    from apps.invoices.services import create_invoice
-    from apps.lead.emails import payment_received
+def _has_active_receipt(payment):
+    return payment.invoices.filter(status='active').exists()
 
-    if payment.status != Payment.Status.SUCCESSFUL or payment.invoices.exists():
-        return None
-    invoice = create_invoice(
+
+def _make_receipt(payment, *, user):
+    from apps.invoices.services import create_invoice
+
+    return create_invoice(
         enrollment=payment.enrollment,
         invoice_type='payment',
         amount=payment.amount,
         payment=payment,
         created_by=user,
     )
+
+
+def issue_receipt(payment, *, user):
+    """Make the receipt for a successful payment, once, and email it to the student."""
+    from apps.lead.emails import payment_received
+
+    if payment.status != Payment.Status.SUCCESSFUL or _has_active_receipt(payment):
+        return None
+    invoice = _make_receipt(payment, user=user)
     payment_received(payment, invoice, user=user)
+    return invoice
+
+
+@transaction.atomic
+def reissue_receipt(payment, *, user):
+    """Make a new receipt after the old one was cancelled, and email it."""
+    from apps.lead.emails import invoice_again
+
+    payment = _lock(payment)
+    if payment.status != Payment.Status.SUCCESSFUL:
+        raise ActionRefused('A receipt is made only for a successful payment.')
+    if _has_active_receipt(payment):
+        raise ActionRefused('This payment already has an active receipt.')
+    invoice = _make_receipt(payment, user=user)
+    invoice_again(invoice, user=user)
     return invoice
 
 
