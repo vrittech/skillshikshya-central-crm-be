@@ -2,6 +2,7 @@ from django.db.models import Count, F, Q
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.permissions import IsAuthenticated
@@ -19,7 +20,33 @@ from apps.course.serializers import (
 )
 from apps.global_config.pagination import CustomPagination
 from apps.global_config.permissions import IsStaffOrHasPermission, OPEN, ReadRights, can, needs
-from apps.global_config.filters import BranchFilterBackend
+from apps.global_config.filters import BranchFilterBackend, walled_branch_id
+from apps.lead.services import ActionRefused
+
+
+def branch_for_new(request, given, what):
+    """The branch a new shift or batch takes.
+
+    A branch user's is always their own. Staff pick one, or it takes their
+    own branch (none: shared, for a shift).
+    """
+    user = request.user
+    if walled_branch_id(user) is None:
+        return given or getattr(user, 'branch', None)
+    if given is not None and given.pk != user.branch_id:
+        raise ValidationError({'branch': [f'You can only add a {what} to your own branch.']})
+    return user.branch
+
+
+def branch_kept(request, serializer, what):
+    """Only staff move a shift or batch to another branch."""
+    data = serializer.validated_data
+    if (
+        'branch' in data
+        and data['branch'] != serializer.instance.branch
+        and walled_branch_id(request.user) is not None
+    ):
+        raise ValidationError({'branch': [f'Only staff can change the branch of a {what}.']})
 
 
 class CourseCategoryViewSet(ReadRights, viewsets.ModelViewSet):
@@ -85,8 +112,22 @@ class BatchViewSet(ReadRights, viewsets.ModelViewSet):
     shared_when_no_branch = True
 
     def perform_create(self, serializer):
-        branch = serializer.validated_data.get('branch') or getattr(self.request.user, 'branch', None)
+        branch = branch_for_new(self.request, serializer.validated_data.get('branch'), 'shift')
         serializer.save(created_by=self.request.user, branch=branch)
+
+    def _not_shared(self, shift):
+        """Branch users change their own branch's shifts. Shared ones are for staff."""
+        if walled_branch_id(self.request.user) is not None and shift.branch_id is None:
+            raise ActionRefused('This shift is shared by every branch. An admin can change it.')
+
+    def perform_update(self, serializer):
+        self._not_shared(serializer.instance)
+        branch_kept(self.request, serializer, 'shift')
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        self._not_shared(instance)
+        instance.delete()
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -130,9 +171,13 @@ class CourseBatchViewSet(ReadRights, viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         # A batch without a branch is hidden from branch users, so it takes
-        # the creator's branch unless one is picked.
-        branch = serializer.validated_data.get('branch') or getattr(self.request.user, 'branch', None)
+        # the creator's branch unless staff pick one.
+        branch = branch_for_new(self.request, serializer.validated_data.get('branch'), 'batch')
         serializer.save(created_by=self.request.user, branch=branch)
+
+    def perform_update(self, serializer):
+        branch_kept(self.request, serializer, 'batch')
+        serializer.save()
 
     # Batch actions that aren't plain create/update need their own permission.
     ACTION_PERMS = {

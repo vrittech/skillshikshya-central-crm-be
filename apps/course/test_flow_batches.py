@@ -4,10 +4,7 @@ Each test drives real URLs across features: seats, moves, pauses, close and
 reopen, batch money, the register, Teams licences and the default roles.
 Single rules have their own tests in apps/course/tests.py and
 apps/lead/tests.py; these tests cross them.
-
-Tests marked expectedFailure show a bug, named in the # BUG: line above.
 """
-import unittest
 from datetime import timedelta
 from decimal import Decimal
 
@@ -721,8 +718,6 @@ class RoleTests(FlowBase):
         pokhara.refresh_from_db()
         self.assertEqual((pokhara.status, pokhara.capacity), ('running', 2))
 
-    # BUG: CourseBatchViewSet.perform_create (apps/course/views.py:131) and the serializer let a branch user pick any branch, so a Kathmandu manager makes or moves a batch into Pokhara.
-    @unittest.expectedFailure
     def test_a_branch_manager_cannot_put_a_batch_in_another_branch(self):
         self._as(self._user('Branch Manager', self.ktm))
         self.client.post('/api/course-batches/', {
@@ -734,16 +729,12 @@ class RoleTests(FlowBase):
         self.client.patch(f'/api/course-batches/{mine["id"]}/', {'branch': self.pkr.id}, format='json')
         self.assertFalse(CourseBatch.objects.filter(branch=self.pkr).exists())
 
-    # BUG: CourseBatchSerializer (apps/course/serializers.py:146) blocks a course change once students are enrolled but not a branch change, so Kathmandu students end up seated in a Pokhara batch.
-    @unittest.expectedFailure
     def test_a_batch_with_students_cannot_move_to_another_branch(self):
         nov = self._batch('Python Nov')
         self._student(nov)
         response = self.client.patch(self._batch_url(nov), {'branch': self.pkr.id}, format='json')
         self.assertEqual(response.status_code, 400, response.data)
 
-    # BUG: BatchViewSet (apps/course/views.py:73) shows shared shifts to every branch and lets a branch user with change_batch edit them, changing the class time of every branch.
-    @unittest.expectedFailure
     def test_a_branch_manager_cannot_change_a_shared_shift(self):
         shared = self._ok(self.client.post(
             '/api/batches/', {'name': 'Morning', 'start_time': '07:00', 'end_time': '09:00'}, format='json',
@@ -753,6 +744,20 @@ class RoleTests(FlowBase):
         response = self.client.patch(f'/api/batches/{shared["id"]}/', {'end_time': '10:00'}, format='json')
         self.assertIn(response.status_code, (400, 403, 404))
         self.assertEqual(Batch.objects.get(pk=shared['id']).end_time.strftime('%H:%M'), '09:00')
+
+    def test_a_branch_manager_changes_only_their_own_branch_shifts(self):
+        self._as(self._user('Branch Manager', self.ktm))
+        shift = {'name': 'Evening', 'start_time': '17:00', 'end_time': '19:00'}
+        self._refused(
+            self.client.post('/api/batches/', {**shift, 'branch': self.pkr.id}, format='json'), 'your own branch',
+        )
+        own = self._ok(self.client.post('/api/batches/', shift, format='json'), 201)
+        self.assertEqual(own['branch'], self.ktm.id)
+
+        url = f'/api/batches/{own["id"]}/'
+        self._ok(self.client.patch(url, {'end_time': '20:00'}, format='json'))
+        self._refused(self.client.patch(url, {'branch': None}, format='json'), 'Only staff')
+        self.assertEqual(Batch.objects.get(pk=own['id']).branch_id, self.ktm.id)
 
 
 # ==================================================================== Teams licences

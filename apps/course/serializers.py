@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -150,6 +151,18 @@ class CourseBatchSerializer(serializers.ModelSerializer):
         ):
             raise serializers.ValidationError(
                 'Students are enrolled in this batch, so its course cannot change.'
+            )
+        return value
+
+    def validate_branch(self, value):
+        from apps.lead.models import Enrollment
+
+        batch = self.instance
+        if batch is not None and value != batch.branch and Enrollment.objects.filter(
+            Q(batch=batch) | Q(current_batch=batch),
+        ).exclude(status=Enrollment.Status.CANCELLED).exists():
+            raise serializers.ValidationError(
+                'Students are enrolled in this batch, so its branch cannot change.'
             )
         return value
 
