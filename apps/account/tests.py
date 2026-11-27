@@ -446,3 +446,60 @@ class BranchRequiredTests(APITestCase):
         user.save(update_fields=['branch'])
         self.assertEqual(self.client.get('/api/users/me/').status_code, 401)
         self.assertEqual(self.client.post('/api/auth/refresh/', {}, format='json').status_code, 401)
+
+
+class SessionCookieTests(APITestCase):
+    """Refresh and sign out with a good, used, bad or missing refresh token."""
+
+    def setUp(self):
+        from apps.branch.models import Branch
+
+        branch = Branch.objects.create(name='Kathmandu', code='KTM')
+        User.objects.create_user(email='session@test.com', name='S', password='pass', branch=branch)
+        response = self.client.post(
+            '/api/auth/login/', {'email': 'session@test.com', 'password': 'pass'}, format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def _refresh(self):
+        return self.client.post('/api/auth/refresh/', {}, format='json')
+
+    def _logout(self):
+        return self.client.post('/api/auth/logout/', {}, format='json')
+
+    def _assert_cookies_cleared(self, response):
+        self.assertEqual(response.cookies['access_token'].value, '')
+        self.assertEqual(response.cookies['refresh_token'].value, '')
+
+    def test_refresh_gives_new_cookies(self):
+        response = self._refresh()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.cookies['access_token'].value)
+
+    def test_bad_refresh_token_is_refused(self):
+        self.client.cookies['refresh_token'] = 'not-a-token'
+        self.assertEqual(self._refresh().status_code, 401)
+
+    def test_used_refresh_token_is_refused(self):
+        old = self.client.cookies['refresh_token'].value
+        self.assertEqual(self._refresh().status_code, 200)
+        self.client.cookies['refresh_token'] = old  # rotated out, so blacklisted
+        self.assertEqual(self._refresh().status_code, 401)
+
+    def test_sign_out_blacklists_the_token_and_clears_cookies(self):
+        refresh = self.client.cookies['refresh_token'].value
+        response = self._logout()
+        self.assertEqual(response.status_code, 200)
+        self._assert_cookies_cleared(response)
+        self.client.cookies['refresh_token'] = refresh
+        self.assertEqual(self._refresh().status_code, 401)
+
+    def test_sign_out_with_a_bad_or_missing_token_still_clears_cookies(self):
+        self.client.cookies['refresh_token'] = 'not-a-token'
+        response = self._logout()
+        self.assertEqual(response.status_code, 200)
+        self._assert_cookies_cleared(response)
+        del self.client.cookies['refresh_token']
+        response = self._logout()
+        self.assertEqual(response.status_code, 200)
+        self._assert_cookies_cleared(response)

@@ -7,6 +7,7 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.views import (
     TokenObtainPairView,
     TokenRefreshView,
@@ -79,7 +80,11 @@ class CookieTokenRefreshView(TokenRefreshView):
             data['refresh'] = request.COOKIES['refresh_token']
 
         serializer = self.get_serializer(data=data)
-        serializer.is_valid(raise_exception=True)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except TokenError as e:
+            # Expired, blacklisted or malformed: 401, as simplejwt's own view does.
+            raise InvalidToken(e.args[0]) from e
 
         response = Response(
             {'message': 'Token refreshed'},
@@ -109,9 +114,14 @@ class CookieTokenBlacklistView(TokenBlacklistView):
         if 'refresh' not in data and 'refresh_token' in request.COOKIES:
             data['refresh'] = request.COOKIES['refresh_token']
 
+        # Validating the token is what blacklists it. Signing out always
+        # clears the cookies, even when the token is missing, expired or
+        # already blacklisted, as there is nothing left to blacklist then.
         serializer = self.get_serializer(data=data)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
+        try:
+            serializer.is_valid()
+        except TokenError:
+            pass
 
         response = Response(
             {'message': 'Logged out successfully'},
