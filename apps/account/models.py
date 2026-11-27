@@ -71,8 +71,19 @@ class User(AbstractBaseUser, PermissionsMixin):
 
 
 NO_BRANCH_MESSAGE = 'Your account has no branch yet. Ask an admin to add one.'
+INACTIVE_BRANCH_MESSAGE = 'Your branch is inactive. Ask an admin.'
 
 
-def has_no_branch(user):
-    """Everyone but staff works inside one branch; without one they can't sign in."""
-    return not (user.is_staff or user.is_superuser) and user.branch_id is None
+def branch_refusal(user):
+    """Why this user can't sign in, or None.
+
+    Everyone but staff works inside one branch: without one, or while it is
+    inactive, they can't sign in.
+    """
+    if user.is_staff or user.is_superuser:
+        return None
+    if user.branch_id is None:
+        return NO_BRANCH_MESSAGE
+    if not user.branch.is_active:
+        return INACTIVE_BRANCH_MESSAGE
+    return None

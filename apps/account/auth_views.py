@@ -8,6 +8,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import (
     TokenObtainPairView,
     TokenRefreshView,
@@ -19,6 +20,7 @@ from apps.account.serializers.auth_serializers import (
 )
 from apps.account.serializers.user_serializer import UserSerializer, UserMiniSerializer
 from apps.account.tasks import send_password_changed_email_task, send_reset_link_email_task
+from apps.account.tokens import set_auth_cookies, sign_out_everywhere
 from apps.global_config.permissions import IsStaffOrHasPermission
 from apps.global_config.throttles import LoginThrottle, PasswordResetThrottle
 
@@ -53,22 +55,10 @@ class CookieTokenObtainPairView(TokenObtainPairView):
             {'message': 'Login successful', 'user': UserMiniSerializer(serializer.user).data},
             status=status.HTTP_200_OK,
         )
-        self._set_cookies(response, serializer.validated_data)
+        set_auth_cookies(
+            response, serializer.validated_data.get('access'), serializer.validated_data.get('refresh'),
+        )
         return response
-
-    def _set_cookies(self, response, data):
-        access = data.get('access')
-        refresh = data.get('refresh')
-        if access:
-            response.set_cookie(
-                'access_token', access,
-                httponly=True, samesite='Lax', path='/',
-            )
-        if refresh:
-            response.set_cookie(
-                'refresh_token', refresh,
-                httponly=True, samesite='Lax', path='/',
-            )
 
 
 class CookieTokenRefreshView(TokenRefreshView):
@@ -90,21 +80,9 @@ class CookieTokenRefreshView(TokenRefreshView):
             {'message': 'Token refreshed'},
             status=status.HTTP_200_OK,
         )
-
-        access = serializer.validated_data.get('access')
-        if access:
-            response.set_cookie(
-                'access_token', access,
-                httponly=True, samesite='Lax', path='/',
-            )
-
-        refresh = serializer.validated_data.get('refresh')
-        if refresh:
-            response.set_cookie(
-                'refresh_token', refresh,
-                httponly=True, samesite='Lax', path='/',
-            )
-
+        set_auth_cookies(
+            response, serializer.validated_data.get('access'), serializer.validated_data.get('refresh'),
+        )
         return response
 
 
@@ -160,13 +138,18 @@ class ChangePasswordView(APIView):
 
         user.set_password(new_password)
         user.save()
+        # Every other device is signed out; this one gets new cookies.
+        sign_out_everywhere(user)
 
         send_password_changed_email_task.delay(user.email, user.name)
 
-        return Response(
+        response = Response(
             {'detail': 'Password changed successfully.'},
             status=status.HTTP_200_OK,
         )
+        refresh = RefreshToken.for_user(user)
+        set_auth_cookies(response, refresh.access_token, refresh)
+        return response
 
 
 class ForgotPasswordView(APIView):
@@ -237,6 +220,7 @@ class ResetPasswordView(APIView):
 
         user.set_password(new_password)
         user.save()
+        sign_out_everywhere(user)
         send_password_changed_email_task.delay(user.email, user.name)
 
         return Response(
