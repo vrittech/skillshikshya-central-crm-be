@@ -7,17 +7,20 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.views import (
     TokenObtainPairView,
     TokenRefreshView,
     TokenBlacklistView,
 )
 from apps.account.models import User
-from apps.account.serializers.auth_serializers import CustomTokenObtainPairSerializer
+from apps.account.serializers.auth_serializers import (
+    BranchCheckedRefreshSerializer, CustomTokenObtainPairSerializer,
+)
 from apps.account.serializers.user_serializer import UserSerializer, UserMiniSerializer
 from apps.account.tasks import send_password_changed_email_task, send_reset_link_email_task
 from apps.global_config.permissions import IsStaffOrHasPermission
+from apps.global_config.throttles import LoginThrottle, PasswordResetThrottle
 
 
 class RegisterView(APIView):
@@ -25,32 +28,22 @@ class RegisterView(APIView):
     queryset = User.objects.none()
 
     def post(self, request):
-        serializer = UserSerializer(data=request.data)
+        """Add a user. The person adding stays signed in as themselves."""
+        serializer = UserSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
-
-        refresh = RefreshToken.for_user(user)
-
-        response = Response(
+        return Response(
             {
                 'message': 'Registration successful',
                 'user': UserSerializer(user).data,
             },
             status=status.HTTP_201_CREATED,
         )
-        response.set_cookie(
-            'access_token', str(refresh.access_token),
-            httponly=True, samesite='Lax', path='/',
-        )
-        response.set_cookie(
-            'refresh_token', str(refresh),
-            httponly=True, samesite='Lax', path='/',
-        )
-        return response
 
 
 class CookieTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+    throttle_classes = [LoginThrottle]
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -79,13 +72,19 @@ class CookieTokenObtainPairView(TokenObtainPairView):
 
 
 class CookieTokenRefreshView(TokenRefreshView):
+    serializer_class = BranchCheckedRefreshSerializer
+
     def post(self, request, *args, **kwargs):
         data = request.data.copy()
         if 'refresh' not in data and 'refresh_token' in request.COOKIES:
             data['refresh'] = request.COOKIES['refresh_token']
 
         serializer = self.get_serializer(data=data)
-        serializer.is_valid(raise_exception=True)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except TokenError as e:
+            # Expired, blacklisted or malformed: 401, as simplejwt's own view does.
+            raise InvalidToken(e.args[0]) from e
 
         response = Response(
             {'message': 'Token refreshed'},
@@ -115,9 +114,14 @@ class CookieTokenBlacklistView(TokenBlacklistView):
         if 'refresh' not in data and 'refresh_token' in request.COOKIES:
             data['refresh'] = request.COOKIES['refresh_token']
 
+        # Validating the token is what blacklists it. Signing out always
+        # clears the cookies, even when the token is missing, expired or
+        # already blacklisted, as there is nothing left to blacklist then.
         serializer = self.get_serializer(data=data)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
+        try:
+            serializer.is_valid()
+        except TokenError:
+            pass
 
         response = Response(
             {'message': 'Logged out successfully'},
@@ -167,6 +171,7 @@ class ChangePasswordView(APIView):
 
 class ForgotPasswordView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [PasswordResetThrottle]
 
     def post(self, request):
         email = request.data.get('email')

@@ -101,7 +101,7 @@ def _upsert_from_public(item, requested_name, full_amount):
     return course, created
 
 
-def match_or_create_course(raw_name, full_amount=None):
+def match_or_create_course(raw_name, full_amount=None, create_unknown=True):
     """
     Resolve a plain-text inbound course name to a Course without duplicating.
 
@@ -110,7 +110,8 @@ def match_or_create_course(raw_name, full_amount=None):
       2. Match against the public SkillShikshya catalog by normalized tokens.
          On a hit, get-or-create the Course using the public amount (or 0.00)
          and attach its categories.
-      3. Otherwise get-or-create a new Course with amount 0.00.
+      3. Otherwise get-or-create a new Course with amount 0.00, unless
+         create_unknown is False: then (None, False).
     """
     name = (raw_name or '').strip()
     if not name:
@@ -145,6 +146,8 @@ def match_or_create_course(raw_name, full_amount=None):
             return _upsert_from_public(best, name, full_amount)
 
     # 3. Not in API: get-or-create with amount 0.00 (no duplicates).
+    if not create_unknown:
+        return None, False
     course, created = Course.objects.get_or_create(
         name=name,
         defaults={'full_amount': '0.00'},

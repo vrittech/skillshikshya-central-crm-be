@@ -11,6 +11,8 @@ class UserFilter(django_filters.FilterSet):
     group = django_filters.ModelChoiceFilter(
         field_name='groups', queryset=Group.objects.all(),
     )
+    # ?group__in=1,2 - users in any of these roles, each listed once.
+    group__in = django_filters.BaseInFilter(field_name='groups', lookup_expr='in', distinct=True)
     branch_id = django_filters.NumberFilter(field_name='branch')
     branch__in = django_filters.BaseInFilter(field_name='branch', lookup_expr='in')
     is_active = django_filters.BooleanFilter()

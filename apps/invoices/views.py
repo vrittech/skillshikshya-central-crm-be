@@ -1,3 +1,4 @@
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 
 from rest_framework import generics, status
@@ -13,10 +14,13 @@ from apps.invoices.models import Invoice, InvoiceEmailConfig
 from apps.invoices.serializers import (
     InvoiceEmailConfigSerializer, InvoiceSerializer,
 )
-from apps.invoices.tasks import send_invoice_email_task
+from apps.invoices.services import cancel_invoice as cancel_invoice_service
+from apps.lead.serializers import ReasonSerializer
+from apps.global_config.permissions import ReadRights
 
 
-class InvoiceListAPIView(generics.ListAPIView):
+class InvoiceListAPIView(ReadRights, generics.ListAPIView):
+    read_perm = 'invoices.view_invoice'
     serializer_class = InvoiceSerializer
     pagination_class = CustomPagination
     permission_classes = [IsAuthenticated]
@@ -29,6 +33,28 @@ class InvoiceListAPIView(generics.ListAPIView):
         return Invoice.objects.select_related(
             'enrollment', 'student', 'payment', 'branch',
         )
+
+
+class InvoicePdfAPIView(ReadRights, generics.RetrieveAPIView):
+    """GET invoices/{id}/pdf/: the invoice or receipt as a PDF, for anyone who can see it."""
+    read_perm = 'invoices.view_invoice'
+
+    permission_classes = [IsAuthenticated]
+    filter_backends = [BranchFilterBackend]
+
+    def get_queryset(self):
+        return Invoice.objects.select_related(
+            'enrollment__lead', 'enrollment__course', 'enrollment__branch', 'enrollment__batch__batch',
+            'student', 'payment__received_by', 'branch',
+        )
+
+    def retrieve(self, request, *args, **kwargs):
+        from apps.invoices.pdf import invoice_pdf
+
+        invoice = self.get_object()
+        response = HttpResponse(invoice_pdf(invoice), content_type='application/pdf')
+        response['Content-Disposition'] = f'inline; filename="{invoice.invoice_number}.pdf"'
+        return response
 
 
 class StudentInvoiceListAPIView(InvoiceListAPIView):
@@ -44,21 +70,37 @@ def resend_invoice(request, pk):
     invoice = get_object_or_404(
         Invoice.objects.select_related('enrollment', 'student'), pk=pk,
     )
-    recipient = (
-        invoice.emailed_to
-        or (invoice.student.email if invoice.student and invoice.student.email else None)
-        or invoice.enrollment.lead.email
-    )
-    if not recipient:
+    if invoice.status == Invoice.Status.CANCELLED:
+        return Response(
+            {'detail': 'A cancelled invoice is not sent again.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    from apps.global_config.models import EmailLog
+    from apps.lead.emails import invoice_again
+
+    log = invoice_again(invoice, user=request.user)
+    if log.status == EmailLog.Status.SKIPPED:
         return Response(
             {'detail': 'Cannot resend: student/lead has no email address.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    send_invoice_email_task.delay(invoice.id)
     return Response({
         'detail': f'Invoice {invoice.invoice_number} queued for re-send.',
-        'to': recipient,
+        'to': log.to_email,
     })
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def cancel_invoice(request, pk):
+    """Cancel a wrong invoice with a reason. Invoices are never edited or deleted."""
+    invoice = get_object_or_404(Invoice, pk=pk)
+    reason = ReasonSerializer(data=request.data)
+    reason.is_valid(raise_exception=True)
+    invoice = cancel_invoice_service(
+        invoice, reason=reason.validated_data['reason'], user=request.user,
+    )
+    return Response(InvoiceSerializer(invoice).data)
 
 
 @api_view(['GET', 'PUT'])

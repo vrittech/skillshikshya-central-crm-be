@@ -1,0 +1,11 @@
+{% extends "emails/base.html" %}
+{% block subject %}New lead assigned: {{ lead.full_name }}{% endblock %}
+{% block preheader %}{{ lead.full_name }} ({{ lead.phone }}) is now your lead.{% endblock %}
+{% block title %}New lead assigned to you{% endblock %}
+{% block content %}
+<p style="margin:0 0 12px;">Dear {{ counselor_name }},</p>
+<p style="margin:0;">{% if assigned_by %}{{ assigned_by }} has assigned{% else %}You have been assigned{% endif %} a new lead{% if assigned_by %} to you{% endif %}. Please get in touch with them soon.</p>
+{% include "emails/_details.html" with rows=rows %}
+{% if frontend_url %}{% include "emails/_button.html" with url=lead_url label="Open lead" %}{% endif %}
+{% endblock %}
+{% block signoff %}{{ org.name }} CRM{% endblock %}

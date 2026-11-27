@@ -1,0 +1,11 @@
+{% extends "emails/base.html" %}
+{% block subject %}Payment received: {{ amount }}{% endblock %}
+{% block preheader %}We have received {{ amount }} for {{ course }}.{% endblock %}
+{% block title %}Payment received{% endblock %}
+{% block content %}
+<p style="margin:0 0 12px;">Dear {{ name }},</p>
+<p style="margin:0;">Thank you. We have received your payment of <strong>{{ amount }}</strong> for <strong>{{ course }}</strong>.</p>
+{% include "emails/_details.html" with rows=rows %}
+{% if next_due %}<p style="margin:0 0 12px;">Next payment: <strong>{{ next_due.amount }}</strong>{% if next_due.due_on %} due on <strong>{{ next_due.due_on }}</strong>{% endif %}.</p>{% else %}<p style="margin:0 0 12px;">Your course fee is fully paid.</p>{% endif %}
+{% if receipt %}<p style="margin:0;">Your receipt <strong>{{ receipt.invoice_number }}</strong> is attached to this email. Please keep it for your records.</p>{% endif %}
+{% endblock %}

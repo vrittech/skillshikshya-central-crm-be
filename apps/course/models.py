@@ -1,5 +1,7 @@
-from django.db import models
 from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
+from django.db import models
 from django.utils import timezone
 
 
@@ -76,8 +78,16 @@ class CourseCategory(models.Model):
 
 
 class Batch(models.Model):
+    """A shift (Morning, Day, Evening) that course batches run in.
+
+    start_time and end_time are a time of day, on the same day. Older shifts
+    may have only the time written in description.
+    """
+
     name = models.CharField(max_length=100)
     description = models.TextField(null=True, blank=True)
+    start_time = models.TimeField(null=True, blank=True)
+    end_time = models.TimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -93,12 +103,33 @@ class Batch(models.Model):
     class Meta:
         db_table = 'batches'
         ordering = ['name']
+        verbose_name = 'shift'
+        verbose_name_plural = 'shifts'
 
     def __str__(self):
         return self.name
 
+    @property
+    def duration_minutes(self):
+        if self.start_time is None or self.end_time is None:
+            return None
+        return (self.end_time.hour * 60 + self.end_time.minute) - (
+            self.start_time.hour * 60 + self.start_time.minute
+        )
+
 
 class CourseBatch(models.Model):
+    class Mode(models.TextChoices):
+        PHYSICAL = 'physical', 'Physical'
+        ONLINE = 'online', 'Online'
+
+    class Status(models.TextChoices):
+        # Upcoming and running batches take students. A closed batch takes no
+        # one new; its figures freeze at close (step 5).
+        UPCOMING = 'upcoming', 'Upcoming'
+        RUNNING = 'running', 'Running'
+        CLOSED = 'closed', 'Closed'
+
     name = models.CharField(max_length=255)
     coursebatch_id = models.CharField(max_length=50, unique=True, editable=False)
     course = models.ForeignKey(
@@ -110,6 +141,14 @@ class CourseBatch(models.Model):
     )
     start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)
+    # Required for every new batch. Older batches made before seats were
+    # required may still have none: they take no student until seats are set.
+    capacity = models.PositiveIntegerField(
+        null=True, validators=[MinValueValidator(1)], help_text='Number of seats.',
+    )
+    mode = models.CharField(max_length=10, choices=Mode.choices, default=Mode.PHYSICAL)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.UPCOMING)
+    trainer = models.CharField(max_length=255, null=True, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -143,3 +182,158 @@ class CourseBatch(models.Model):
 
     def __str__(self):
         return self.coursebatch_id or self.name
+
+    def count_seats_taken(self, exclude=None):
+        """Students sitting in this batch now. Paused, left and cancelled ones don't count."""
+        from apps.lead.models import Enrollment
+
+        seated = self.seated_enrollments.filter(status__in=Enrollment.SEAT_STATUSES)
+        if exclude is not None:
+            seated = seated.exclude(pk=exclude.pk)
+        return seated.count()
+
+    def seat_refusal(self, exclude=None):
+        """Why a student can't sit in this batch now, or None when they can.
+
+        The seat count is the limit: a closed batch, a batch with no seats set
+        and a full batch take no one.
+        """
+        if self.status == self.Status.CLOSED:
+            return f'{self.name} is closed. Pick an upcoming or running batch.'
+        if self.capacity is None:
+            return f'{self.name} has no seats set. Edit the batch and set its seats first.'
+        taken = self.count_seats_taken(exclude=exclude)
+        if taken >= self.capacity:
+            return (
+                f'{self.name} is full ({taken} of {self.capacity} seats). '
+                'Pick another batch or add seats to it.'
+            )
+        return None
+
+
+class BatchCost(models.Model):
+    """A cost of running a batch: trainer, venue, licences or other.
+
+    Rows are only ever added. A wrong cost is voided with a reason
+    (services.void_cost) and a new one added; it is never edited or deleted.
+    """
+
+    class Kind(models.TextChoices):
+        TRAINER = 'trainer', 'Trainer'
+        VENUE = 'venue', 'Venue'
+        LICENCES = 'licences', 'Licences'
+        OTHER = 'other', 'Other'
+
+    # The only fields a void may set, once.
+    VOID_FIELDS = {'voided_at', 'voided_by', 'void_reason'}
+
+    course_batch = models.ForeignKey(
+        CourseBatch, on_delete=models.PROTECT, related_name='costs',
+    )
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    spent_on = models.DateField()
+    note = models.TextField(blank=True, default='')
+    branch = models.ForeignKey(
+        'branch.Branch', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='batch_costs',
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='batch_costs_added',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    voided_at = models.DateTimeField(null=True, blank=True)
+    voided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        null=True, blank=True, related_name='batch_costs_voided',
+    )
+    void_reason = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'course_batch_costs'
+        ordering = ['-spent_on', '-id']
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(amount__gt=0), name='batch_cost_amount_positive',
+            ),
+            models.CheckConstraint(
+                check=models.Q(voided_at__isnull=True) | (
+                    models.Q(void_reason__isnull=False) & ~models.Q(void_reason='')
+                ),
+                name='batch_cost_void_reason_required',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.get_kind_display()} {self.amount} on {self.course_batch_id}'
+
+    def save(self, *args, **kwargs):
+        update_fields = kwargs.get('update_fields')
+        if self.pk is not None and not (update_fields and set(update_fields) <= self.VOID_FIELDS):
+            raise ValidationError('Costs cannot be changed. Void it with a reason and add a new one.')
+        self.note = (self.note or '').strip()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Costs cannot be deleted. Void it with a reason.')
+
+
+class BatchClosing(models.Model):
+    """One row each time a batch is closed or reopened, with the reason.
+
+    A close row keeps the batch's figures as they were that day (see
+    apps.course.money). The newest close row of a closed batch holds its
+    figures at close. Rows are only ever added.
+    """
+
+    class Kind(models.TextChoices):
+        CLOSE = 'close', 'Closed'
+        REOPEN = 'reopen', 'Reopened'
+
+    course_batch = models.ForeignKey(
+        CourseBatch, on_delete=models.PROTECT, related_name='closings',
+    )
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    reason = models.TextField()
+    # The figures at close. Empty on reopen rows.
+    students = models.PositiveIntegerField(null=True, blank=True)
+    fees = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    collected = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    owed = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    costs = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    profit = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    # What the close checklist still had open at close (apps.course.closing.check_record).
+    checklist = models.JSONField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='batch_closings',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'course_batch_closings'
+        ordering = ['-created_at', '-id']
+        constraints = [
+            models.CheckConstraint(
+                check=~models.Q(reason=''), name='batch_closing_reason_required',
+            ),
+            models.CheckConstraint(
+                check=models.Q(kind='reopen') | models.Q(
+                    students__isnull=False, fees__isnull=False, collected__isnull=False,
+                    owed__isnull=False, costs__isnull=False, profit__isnull=False,
+                ),
+                name='batch_close_keeps_figures',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.get_kind_display()} {self.course_batch_id}'
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValidationError('Close and reopen rows cannot be changed.')
+        self.reason = (self.reason or '').strip()
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Close and reopen rows cannot be deleted.')

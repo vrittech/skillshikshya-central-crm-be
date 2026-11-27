@@ -1,7 +1,6 @@
-from datetime import datetime
-
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 class Invoice(models.Model):
@@ -9,19 +8,31 @@ class Invoice(models.Model):
         ENROLLMENT = 'enrollment', 'Enrollment (Course Fee)'
         PAYMENT = 'payment', 'Payment Receipt'
 
+    class Status(models.TextChoices):
+        ACTIVE = 'active', 'Active'
+        CANCELLED = 'cancelled', 'Cancelled'
+
     invoice_number = models.CharField(max_length=20, unique=True, editable=False)
     enrollment = models.ForeignKey(
-        'lead.Enrollment', on_delete=models.CASCADE, related_name='invoices',
+        'lead.Enrollment', on_delete=models.PROTECT, related_name='invoices',
     )
     student = models.ForeignKey(
         'student.Student', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='invoices',
     )
     payment = models.ForeignKey(
-        'lead.Payment', on_delete=models.SET_NULL,
+        'lead.Payment', on_delete=models.PROTECT,
         null=True, blank=True, related_name='invoices',
     )
     type = models.CharField(max_length=12, choices=Type.choices)
+    # An invoice is never edited or deleted: a wrong one is cancelled with a reason.
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.ACTIVE)
+    cancel_reason = models.TextField(null=True, blank=True)
+    cancelled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+        null=True, blank=True, related_name='invoices_cancelled',
+    )
+    cancelled_at = models.DateTimeField(null=True, blank=True)
     course_name = models.CharField(max_length=255)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     total_paid_so_far = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -48,8 +59,9 @@ class Invoice(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.invoice_number:
-            year = datetime.now().year
-            prefix = f'INV-{year}'
+            # Invoices and receipts are numbered apart: INV-2026-000001, RCT-2026-000001.
+            year = timezone.localdate().year
+            prefix = f"{'RCT' if self.type == self.Type.PAYMENT else 'INV'}-{year}"
             last = Invoice.objects.filter(
                 invoice_number__startswith=prefix,
             ).order_by('invoice_number').last()

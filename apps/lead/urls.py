@@ -4,10 +4,11 @@ from apps.lead.views import (
     LearningModeViewSet, InstitutionViewSet,
     ProvinceViewSet, CityViewSet,
     LeadSourceViewSet, CampaignViewSet, LeadStatusViewSet,
-    LeadPriorityViewSet, LeadTagViewSet, LeadTypeViewSet, LeadViewSet,
-    LeadCourseInterestViewSet, EnrollmentViewSet, PaymentViewSet,
+    LeadPriorityViewSet, LeadTagViewSet, LeadViewSet,
+    LeadCourseInterestViewSet, EnrollmentViewSet, PaymentViewSet, EnrollmentHistoryViewSet,
+    AdjustmentViewSet, EnrollmentReminderViewSet, TeamsLicenceViewSet, TeamsAccountViewSet,
     GlobalCallViewSet,
-    LeadCallViewSet, LeadActivityViewSet, FollowUpViewSet, LeadDocumentViewSet,
+    LeadCallViewSet, LeadActivityViewSet, FollowUpViewSet, LeadDocumentViewSet, VoiceNoteViewSet,
     NotificationViewSet,
     GlobalFollowUpViewSet, GlobalEnrollmentViewSet, GlobalPaymentViewSet,
     GlobalCallViewSet,
@@ -23,24 +24,29 @@ router.register(r'campaigns', CampaignViewSet)
 router.register(r'lead-statuses', LeadStatusViewSet)
 router.register(r'lead-priorities', LeadPriorityViewSet)
 router.register(r'lead-tags', LeadTagViewSet)
-router.register(r'lead-types', LeadTypeViewSet)
 router.register(r'notifications', NotificationViewSet)
 router.register(r'leads', LeadViewSet)
 router.register(r'followups', GlobalFollowUpViewSet)
 router.register(r'enrollments', GlobalEnrollmentViewSet)
 router.register(r'payments', GlobalPaymentViewSet)
 router.register(r'calls', GlobalCallViewSet)
+router.register(r'teams-licences', TeamsLicenceViewSet, basename='teams-licence')
+router.register(r'teams-accounts', TeamsAccountViewSet, basename='teams-account')
 
 lead_router = DefaultRouter()
 lead_router.register(r'calls', LeadCallViewSet, basename='lead-call')
 lead_router.register(r'activities', LeadActivityViewSet, basename='lead-activity')
 lead_router.register(r'followups', FollowUpViewSet, basename='lead-followup')
 lead_router.register(r'documents', LeadDocumentViewSet, basename='lead-document')
+lead_router.register(r'voice-notes', VoiceNoteViewSet, basename='lead-voice-note')
 lead_router.register(r'course-interests', LeadCourseInterestViewSet, basename='lead-course-interest')
 lead_router.register(r'enrollments', EnrollmentViewSet, basename='lead-enrollment')
 
 enrollment_router = DefaultRouter()
 enrollment_router.register(r'payments', PaymentViewSet, basename='enrollment-payment')
+enrollment_router.register(r'history', EnrollmentHistoryViewSet, basename='enrollment-history')
+enrollment_router.register(r'adjustments', AdjustmentViewSet, basename='enrollment-adjustment')
+enrollment_router.register(r'reminders', EnrollmentReminderViewSet, basename='enrollment-reminder')
 
 urlpatterns = [
     path('', include(router.urls)),

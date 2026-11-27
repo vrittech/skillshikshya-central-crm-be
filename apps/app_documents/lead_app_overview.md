@@ -45,7 +45,6 @@ GET /api/students/?branch_id=1&status=active
 - `lead.add_leadstatus`, `lead.change_leadstatus`, `lead.delete_leadstatus`, `lead.view_leadstatus`
 - `lead.add_leadpriority`, `lead.change_leadpriority`, `lead.delete_leadpriority`, `lead.view_leadpriority`
 - `lead.add_leadtag`, `lead.change_leadtag`, `lead.delete_leadtag`, `lead.view_leadtag`
-- `lead.add_leadtype`, `lead.change_leadtype`, `lead.delete_leadtype`, `lead.view_leadtype`
 - `lead.add_learningmode`, `lead.change_learningmode`, `lead.delete_learningmode`, `lead.view_learningmode`
 - `lead.add_institution`, `lead.change_institution`, `lead.delete_institution`, `lead.view_institution`
 - `lead.add_province`, `lead.change_province`, `lead.delete_province`, `lead.view_province`
@@ -138,18 +137,6 @@ Lead score uses `sort_order` — priority 1 (highest) gives the most points.
 | GET/PUT/PATCH/DELETE | `/api/lead-tags/{id}/` | CRUD |
 
 **Fields:** `id`, `name`, `color` (hex), `is_active`
-
-### Lead Types
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/lead-types/` | List types |
-| POST | `/api/lead-types/` | Create type |
-| GET/PUT/PATCH/DELETE | `/api/lead-types/{id}/` | CRUD |
-
-**Fields:** `id`, `name`, `description`, `is_active`
-
-**Default types:** Course Inquiry (1), Master Class (2), Corporate (3), General Inquiry (4)
 
 **Query params:** `?search=course&is_active=true`
 
@@ -353,7 +340,6 @@ In steady state with hourly polling this means each run fetches **today's contac
 | `created_at` | `custom_data.created_at` |
 | `id` | `custom_data.orbitchat_id` |
 | `channel_type` | `source` (mapped below) |
-| — | `lead_type` = first LeadType |
 
 ### Channel → Source mapping
 

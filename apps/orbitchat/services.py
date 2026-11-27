@@ -1,7 +1,9 @@
 import logging
 
 from apps.course.matching import match_or_create_course
-from apps.lead.models import Lead, LeadSource, LeadType, LeadCourseInterest
+from apps.lead.enquiries import add_enquiry
+from apps.lead.models import Lead, LeadSource
+from apps.lead.phones import phone_matches
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +32,7 @@ def _lead_exists(contact):
     if contact.get('id') and Lead.objects.filter(custom_data__orbitchat_id=contact['id']).exists():
         return True
     phone = contact.get('phone')
-    if phone and Lead.objects.filter(phone=phone).exists():
+    if phone and phone_matches(phone).exists():
         return True
     return False
 
@@ -58,7 +60,6 @@ def create_lead_from_orbitchat_contact(contact):
         email=contact.get('email') or '',
         source=source,
         heard_from=CHANNEL_SOURCE_NAMES.get(contact.get('channel_type')),
-        lead_type=LeadType.objects.first(),
         notes=contact.get('notes') or '',
         custom_data=custom_data,
     )
@@ -66,12 +67,8 @@ def create_lead_from_orbitchat_contact(contact):
     notes = contact.get('notes')
     if notes:
         course, _ = match_or_create_course(notes.strip())
-        LeadCourseInterest.objects.create(
-            lead=lead,
-            course=course,
-            course_name=notes.strip() if not course else None,
-            is_primary=True,
-            interest_level='high',
+        add_enquiry(
+            lead, course=course, course_name=notes.strip(), is_primary=True, interest_level='high',
         )
         if course and lead.primary_course_id is None:
             lead.primary_course = course

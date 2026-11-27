@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ title }} {{ invoice.invoice_number }}</title>
+<style>
+  @page {
+    size: A4;
+    margin: 16mm 16mm 20mm;
+    @bottom-center {
+      content: "{{ title }} {{ invoice.invoice_number }} · Page " counter(page) " of " counter(pages);
+      font-family: "Liberation Sans", Arial, sans-serif; font-size: 8pt; color: #7a8580;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { font-family: "Liberation Sans", Arial, "DejaVu Sans", sans-serif; font-size: 9.5pt; color: #1c2421; margin: 0; }
+  table { border-collapse: collapse; width: 100%; }
+  .muted { color: #5f6b66; }
+  .brand { color: #00694c; }
+  .head td { vertical-align: top; }
+  .logo { display: block; max-width: 150px; max-height: 46px; width: auto; height: auto; }
+  .org-name { font-size: 15pt; font-weight: bold; margin: 0 0 3px; }
+  .org-line { font-size: 8.5pt; line-height: 1.45; }
+  .doc-title { font-size: 20pt; font-weight: bold; color: #00694c; text-transform: uppercase; letter-spacing: 1px; margin: 0 0 6px; text-align: right; }
+  .meta td { padding: 1.5px 0; font-size: 9pt; }
+  .meta td:first-child { color: #5f6b66; padding-right: 12px; text-align: right; }
+  .meta td:last-child { text-align: right; font-weight: bold; }
+  .rule { border-top: 2px solid #00694c; margin: 14px 0 16px; }
+  .parties td { vertical-align: top; width: 50%; }
+  .label { font-size: 7.5pt; font-weight: bold; text-transform: uppercase; letter-spacing: 0.8px; color: #5f6b66; margin-bottom: 5px; }
+  .party-name { font-size: 11pt; font-weight: bold; margin-bottom: 2px; }
+  .party-line { line-height: 1.5; }
+  .items { margin-top: 18px; }
+  .items th { background: #00694c; color: #fff; font-size: 8.5pt; text-align: left; padding: 7px 10px; }
+  .items th.num, .items td.num { text-align: right; }
+  .items td { padding: 8px 10px; border-bottom: 1px solid #e3e6e4; }
+  .totals { width: 46%; margin-left: auto; margin-top: 10px; }
+  .totals td { padding: 5px 10px; }
+  .totals td.num { text-align: right; font-weight: bold; }
+  .totals .grand td { background: #eef5f2; font-size: 11pt; font-weight: bold; border-top: 1px solid #00694c; }
+  .words { margin-top: 12px; padding: 8px 10px; background: #f8f9f8; border-left: 3px solid #00694c; font-size: 9pt; }
+  .section { margin-top: 18px; }
+  .box td { padding: 6px 10px; border: 1px solid #e3e6e4; }
+  .box td.k { width: 30%; background: #f8f9f8; color: #5f6b66; }
+  .sign { margin-top: 42px; }
+  .sign td { width: 50%; vertical-align: bottom; }
+  .sign-line { border-top: 1px solid #1c2421; width: 180px; margin-left: auto; padding-top: 4px; text-align: center; font-size: 8.5pt; }
+  .note { margin-top: 22px; font-size: 8.5pt; color: #5f6b66; line-height: 1.5; }
+  .stamp { position: fixed; top: 38%; left: 12%; transform: rotate(-24deg); font-size: 72pt; font-weight: bold; color: rgba(185, 28, 28, 0.13); letter-spacing: 6px; }
+  .paid { display: inline-block; margin-top: 6px; padding: 2px 9px; border: 1.5px solid #00694c; border-radius: 3px; color: #00694c; font-weight: bold; font-size: 8.5pt; letter-spacing: 1px; }
+</style>
+</head>
+<body>
+{% if cancelled %}<div class="stamp">CANCELLED</div>{% endif %}
+
+<table class="head">
+  <tr>
+    <td style="width:58%;">
+      <table>
+        <tr>
+          {% if org.logo_url %}<td style="width:1%; padding-right:14px; vertical-align:top;"><img class="logo" src="{{ org.logo_url }}" alt=""></td>{% endif %}
+          <td style="vertical-align:top;">
+            <p class="org-name">{{ org.name }}</p>
+            <div class="org-line muted">
+              {% if branch and branch.address %}{{ branch.address }}{% elif org.address %}{{ org.address }}{% endif %}<br>
+              {% with phone=branch.phone|default:org.phone email=branch.email|default:org.email %}
+              {% if phone %}Phone: {{ phone }}{% endif %}{% if phone and email %} · {% endif %}{% if email %}{{ email }}{% endif %}{% if phone or email %}<br>{% endif %}
+              {% endwith %}
+              {% if org.website %}{{ org.website }}<br>{% endif %}
+              {% if org.pan_number %}<strong style="color:#1c2421;">PAN/VAT No: {{ org.pan_number }}</strong>{% endif %}
+            </div>
+          </td>
+        </tr>
+      </table>
+    </td>
+    <td style="width:42%;">
+      <p class="doc-title">{{ title }}</p>
+      <table class="meta">
+        <tr><td>{% if is_receipt %}Receipt No.{% else %}Invoice No.{% endif %}</td><td>{{ invoice.invoice_number }}</td></tr>
+        <tr><td>Date</td><td>{{ issued_on }}</td></tr>
+        {% if branch %}<tr><td>Branch</td><td>{{ branch.name }}</td></tr>{% endif %}
+      </table>
+      {% if is_receipt and not cancelled %}<div style="text-align:right;"><span class="paid">PAID</span></div>{% endif %}
+    </td>
+  </tr>
+</table>
+
+<div class="rule"></div>
+
+<table class="parties">
+  <tr>
+    <td>
+      <div class="label">{% if is_receipt %}Received from{% else %}Billed to{% endif %}</div>
+      <div class="party-name">{{ bill_to.name }}</div>
+      <div class="party-line">
+        {% if bill_to.student_id %}Student ID: {{ bill_to.student_id }}<br>{% endif %}
+        {% if bill_to.phone %}{{ bill_to.phone }}<br>{% endif %}
+        {% if bill_to.email %}{{ bill_to.email }}<br>{% endif %}
+        {% if bill_to.address %}{{ bill_to.address }}{% endif %}
+      </div>
+    </td>
+    <td>
+      <div class="label">Course</div>
+      <div class="party-name">{{ course }}</div>
+      <div class="party-line">{% if batch %}Batch: {{ batch }}{% endif %}</div>
+    </td>
+  </tr>
+</table>
+
+<table class="items">
+  <thead>
+    <tr><th style="width:8%;">#</th><th>Description</th><th class="num" style="width:26%;">Amount (NPR)</th></tr>
+  </thead>
+  <tbody>
+    {% for line in lines %}
+    <tr><td>{{ forloop.counter }}</td><td>{{ line.text }}</td><td class="num">{{ line.amount }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<table class="totals">
+  <tr class="grand"><td>{% if is_receipt %}Amount received{% else %}Total fee{% endif %}</td><td class="num">NPR {{ total }}</td></tr>
+  <tr><td class="muted">Paid to date</td><td class="num">NPR {{ paid_so_far }}</td></tr>
+  <tr><td class="muted">Balance due</td><td class="num">NPR {{ balance }}</td></tr>
+</table>
+
+<div class="words"><strong>In words:</strong> {{ total_words }}</div>
+
+{% if payment %}
+<div class="section">
+  <div class="label">Payment details</div>
+  <table class="box">
+    <tr><td class="k">Paid on</td><td>{{ payment.paid_on }}</td></tr>
+    <tr><td class="k">Method</td><td>{{ payment.method }}</td></tr>
+    {% if payment.reference %}<tr><td class="k">Reference</td><td>{{ payment.reference }}</td></tr>{% endif %}
+    {% if payment.received_by %}<tr><td class="k">Received by</td><td>{{ payment.received_by }}</td></tr>{% endif %}
+  </table>
+</div>
+{% endif %}
+
+{% if plan %}
+<div class="section">
+  <div class="label">Payment schedule</div>
+  <table class="box">
+    {% for part in plan %}<tr><td class="k">{{ part.due_on|default:"On joining" }}</td><td>NPR {{ part.amount }}</td></tr>{% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{% if cancelled %}
+<div class="section">
+  <div class="label">Cancelled</div>
+  <div>{{ invoice.cancel_reason }}</div>
+</div>
+{% endif %}
+
+<table class="sign">
+  <tr>
+    <td class="muted" style="font-size:8.5pt;">Thank you for learning with us.</td>
+    <td><div class="sign-line">Authorised signature</div></td>
+  </tr>
+</table>
+
+<div class="note">
+  {% if org.receipt_note %}{{ org.receipt_note|linebreaksbr }}<br>{% endif %}
+  This is a computer-generated {% if is_receipt %}receipt{% else %}invoice{% endif %}.
+</div>
+</body>
+</html>

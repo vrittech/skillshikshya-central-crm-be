@@ -209,7 +209,6 @@ Base URL: `http://localhost:8188`
 | `/api/lead-statuses/` | GET/POST | Lead statuses (config) |
 | `/api/lead-priorities/` | GET/POST | Lead priorities (config) |
 | `/api/lead-tags/` | GET/POST | Lead tags (config) |
-| `/api/lead-types/` | GET/POST | Lead types (config, dynamic) |
 | `/api/leads/{id}/calls/` | GET/POST | Lead calls |
 | `/api/leads/{id}/activities/` | GET/POST | Lead activities |
 | `/api/leads/{id}/followups/` | GET/POST | Lead followups |

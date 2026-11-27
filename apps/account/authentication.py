@@ -1,8 +1,16 @@
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, AuthenticationFailed
 
+from apps.account.models import NO_BRANCH_MESSAGE, has_no_branch
+
 
 class CookieJWTAuthentication(JWTAuthentication):
+    def get_user(self, validated_token):
+        user = super().get_user(validated_token)
+        if has_no_branch(user):
+            raise AuthenticationFailed(NO_BRANCH_MESSAGE)
+        return user
+
     def authenticate(self, request):
         raw_token = request.COOKIES.get('access_token')
         if raw_token:

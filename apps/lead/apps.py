@@ -7,3 +7,4 @@ class LeadConfig(AppConfig):
 
     def ready(self):
         import apps.lead.signals  # noqa: F401
+        import apps.lead.voice_notes  # noqa: F401

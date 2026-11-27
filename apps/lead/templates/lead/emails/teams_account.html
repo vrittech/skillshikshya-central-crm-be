@@ -1,0 +1,34 @@
+{% extends "emails/base.html" %}
+{% block subject %}Your Microsoft Teams account{% endblock %}
+{% block preheader %}Your Teams sign-in for {{ course }}.{% endblock %}
+{% block title %}Your Microsoft Teams account{% endblock %}
+{% block content %}
+<p style="margin:0 0 12px;">Dear {{ name }},</p>
+<p style="margin:0;">Your classes for <strong>{{ course }}</strong> run on Microsoft Teams. Use this account to join them.</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%; margin:18px 0; background:#f3f8f6; border:1px solid #cfe3db; border-radius:8px; border-collapse:separate; border-spacing:0;">
+  <tr>
+    <td style="padding:12px 16px 4px; font-size:12px; color:#5f6b66;">Teams email</td>
+  </tr>
+  <tr>
+    <td style="padding:0 16px 10px; font-size:15px; font-weight:bold; font-family:'SFMono-Regular',Consolas,'Liberation Mono',monospace; color:#16201c;">{{ account }}</td>
+  </tr>
+  <tr>
+    <td style="padding:6px 16px 4px; font-size:12px; color:#5f6b66; border-top:1px solid #dcebe5;">Temporary password</td>
+  </tr>
+  <tr>
+    <td style="padding:0 16px 12px; font-size:15px; font-weight:bold; font-family:'SFMono-Regular',Consolas,'Liberation Mono',monospace; color:#16201c;">{{ password }}</td>
+  </tr>
+</table>
+{% include "emails/_button.html" with url=sign_in_url label="Sign in to Teams" %}
+<p style="margin:0 0 8px; font-weight:bold;">Before your first class</p>
+<ol style="margin:0 0 12px; padding-left:20px;">
+  <li style="margin:0 0 6px;">Sign in at <a href="{{ sign_in_url }}" style="color:#00694c;">teams.microsoft.com</a> or in the Microsoft Teams app.</li>
+  <li style="margin:0 0 6px;">Set a new password when asked. Only you should know it.</li>
+  <li style="margin:0;">Keep this account for your classes only, and do not share it.</li>
+</ol>
+{% include "emails/_details.html" with rows=rows %}
+<p style="margin:0 0 12px;">The account is for the length of your course. It is removed after the course ends.</p>
+{% if counselor %}
+<p style="margin:0;">If you cannot sign in, contact your counselor <strong>{{ counselor.name }}</strong>{% if counselor.phone %} on {{ counselor.phone }}{% endif %}{% if counselor.email %} or at <a href="mailto:{{ counselor.email }}" style="color:#00694c;">{{ counselor.email }}</a>{% endif %}.</p>
+{% endif %}
+{% endblock %}

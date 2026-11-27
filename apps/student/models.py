@@ -1,8 +1,10 @@
-from datetime import date, timedelta
+from datetime import timedelta
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Count, Q
+from django.utils import timezone
 
 
 class Student(models.Model):
@@ -71,6 +73,7 @@ class Student(models.Model):
     class Meta:
         db_table = 'students'
         ordering = ['-created_at']
+        permissions = [('move_branch', 'Can move student to another branch')]
 
     def __str__(self):
         return f'{self.student_id} - {self.full_name}'
@@ -107,7 +110,7 @@ class Student(models.Model):
         longest_streak = 0
 
         if present_dates:
-            today = date.today()
+            today = timezone.localdate()
             check = today
             while check in present_dates:
                 current_streak += 1
@@ -208,3 +211,37 @@ class Attendance(models.Model):
 
     def __str__(self):
         return f'{self.student.full_name} - {self.date} ({self.get_status_display()})'
+
+class BranchMove(models.Model):
+    """One row each time a student moves to another branch. Rows are only added."""
+
+    student = models.ForeignKey(Student, on_delete=models.PROTECT, related_name='branch_moves')
+    from_branch = models.ForeignKey(
+        'branch.Branch', on_delete=models.PROTECT, null=True, blank=True, related_name='+',
+    )
+    to_branch = models.ForeignKey('branch.Branch', on_delete=models.PROTECT, related_name='+')
+    reason = models.TextField()
+    moved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='student_branch_moves',
+    )
+    moved_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'student_branch_moves'
+        ordering = ['-moved_at', '-id']
+        constraints = [
+            models.CheckConstraint(check=~models.Q(reason=''), name='student_branch_move_reason_required'),
+        ]
+
+    def __str__(self):
+        return f'{self.student_id}: {self.from_branch_id} -> {self.to_branch_id}'
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValidationError('Branch moves cannot be changed.')
+        self.reason = (self.reason or '').strip()
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Branch moves cannot be deleted.')

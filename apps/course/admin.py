@@ -1,5 +1,7 @@
 from django.contrib import admin
-from apps.course.models import Course, Batch, CourseBatch, CourseCategory
+
+from apps.course.models import Batch, BatchClosing, BatchCost, Course, CourseBatch, CourseCategory
+from apps.lead.admin import ReadOnlyAdmin
 
 
 class CourseAdmin(admin.ModelAdmin):
@@ -15,8 +17,11 @@ class BatchAdmin(admin.ModelAdmin):
 
 
 class CourseBatchAdmin(admin.ModelAdmin):
-    list_display = ['coursebatch_id', 'name', 'course', 'batch', 'start_date', 'end_date', 'is_active']
-    list_filter = ['is_active', 'course', 'batch']
+    list_display = [
+        'coursebatch_id', 'name', 'course', 'batch', 'status', 'mode', 'capacity',
+        'start_date', 'end_date', 'is_active',
+    ]
+    list_filter = ['status', 'mode', 'is_active', 'course', 'batch']
     search_fields = ['coursebatch_id', 'name']
 
 
@@ -26,7 +31,21 @@ class CourseCategoryAdmin(admin.ModelAdmin):
     search_fields = ['name']
 
 
+class BatchCostAdmin(ReadOnlyAdmin):
+    list_display = ['course_batch', 'kind', 'amount', 'spent_on', 'created_by', 'voided_at']
+    list_filter = ['kind']
+    search_fields = ['course_batch__coursebatch_id', 'course_batch__name', 'note']
+
+
+class BatchClosingAdmin(ReadOnlyAdmin):
+    list_display = ['course_batch', 'kind', 'collected', 'costs', 'profit', 'created_by', 'created_at']
+    list_filter = ['kind']
+    search_fields = ['course_batch__coursebatch_id', 'course_batch__name', 'reason']
+
+
 admin.site.register(Course, CourseAdmin)
 admin.site.register(Batch, BatchAdmin)
 admin.site.register(CourseBatch, CourseBatchAdmin)
 admin.site.register(CourseCategory, CourseCategoryAdmin)
+admin.site.register(BatchCost, BatchCostAdmin)
+admin.site.register(BatchClosing, BatchClosingAdmin)

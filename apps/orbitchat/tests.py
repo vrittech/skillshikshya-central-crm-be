@@ -3,7 +3,7 @@ from io import StringIO
 from unittest import mock
 
 from django.core.management import call_command
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APITestCase
 from django.utils import timezone
 
@@ -45,10 +45,11 @@ class PublicIntakePrimaryCourseTests(TestCase):
         self.python = Course.objects.create(name='Python Advanced')
         Course.objects.create(name='Flutter')
 
+    @override_settings(LEAD_INTAKE_TOKEN='t')
     def test_first_course_becomes_primary_course(self):
         from rest_framework.test import APIClient
 
-        response = APIClient().post('/api/public/lead-intake/', {
+        response = APIClient(HTTP_X_INTAKE_TOKEN='t').post('/api/public/lead-intake/', {
             'name': 'Intake Person',
             'phone_number': '9812340000',
             'course_interests': ['Python Advanced', 'Flutter'],

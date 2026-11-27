@@ -1,0 +1,216 @@
+name: CI/CD
+
+# Pull request to main: run the tests.
+# Push to main (or "Run workflow"): test, build the image, push it to GitHub
+# Container Registry (ghcr.io/vrittech/skillshikshya-crm-backend), then pull and
+# restart it on the server over SSH.
+#
+# Repository secrets are listed in DEPLOY.md. A secret left as CHANGE_ME counts as
+# not set: required ones stop the deploy with their names, optional ones are skipped.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || 'deploy' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/skillshikshya-crm-backend
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: skillshikshya
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+    env:
+      DB_ENGINE: django.db.backends.postgresql
+      DB_NAME: skillshikshya
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      CELERY_BROKER_URL: redis://localhost:6379/0
+      CELERY_RESULT_BACKEND: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install PDF libraries (WeasyPrint)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 fonts-liberation fonts-dejavu-core
+      - run: pip install -r requirements.txt
+      - name: No model change is missing a migration
+        run: python manage.py makemigrations --check --dry-run
+      - run: python manage.py test apps
+
+  build:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets and write the server .env
+        id: settings
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+          SETTINGS_ENCRYPTION_KEY: ${{ secrets.SETTINGS_ENCRYPTION_KEY }}
+          ALLOWED_HOSTS: ${{ secrets.ALLOWED_HOSTS }}
+          FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          EMAIL_HOST: ${{ secrets.EMAIL_HOST }}
+          EMAIL_PORT: ${{ secrets.EMAIL_PORT }}
+          EMAIL_USE_TLS: ${{ secrets.EMAIL_USE_TLS }}
+          EMAIL_HOST_USER: ${{ secrets.EMAIL_HOST_USER }}
+          EMAIL_HOST_PASSWORD: ${{ secrets.EMAIL_HOST_PASSWORD }}
+          DEFAULT_FROM_EMAIL: ${{ secrets.DEFAULT_FROM_EMAIL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          PUBLIC_DEVELOPMENT_URL: ${{ secrets.PUBLIC_DEVELOPMENT_URL }}
+          ORBITCHAT_API_URL: ${{ secrets.ORBITCHAT_API_URL }}
+          ORBITCHAT_EMAIL: ${{ secrets.ORBITCHAT_EMAIL }}
+          ORBITCHAT_PASSWORD: ${{ secrets.ORBITCHAT_PASSWORD }}
+          PUBLIC_COURSE_API_URL: ${{ secrets.PUBLIC_COURSE_API_URL }}
+          LEAD_INTAKE_TOKEN: ${{ secrets.LEAD_INTAKE_TOKEN }}
+          GUNICORN_WORKERS: ${{ secrets.GUNICORN_WORKERS }}
+        run: |
+          is_set() { [ -n "$1" ] && [ "$1" != "CHANGE_ME" ]; }
+
+          required="SSH_HOST SSH_USER SSH_PRIVATE_KEY SECRET_KEY ALLOWED_HOSTS FRONTEND_URL DB_NAME DB_USER DB_PASSWORD"
+          app="SECRET_KEY SETTINGS_ENCRYPTION_KEY ALLOWED_HOSTS FRONTEND_URL DB_NAME DB_USER DB_PASSWORD
+            EMAIL_HOST EMAIL_PORT EMAIL_USE_TLS EMAIL_HOST_USER EMAIL_HOST_PASSWORD DEFAULT_FROM_EMAIL
+            R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ACCOUNT_ID R2_BUCKET_NAME PUBLIC_DEVELOPMENT_URL
+            ORBITCHAT_API_URL ORBITCHAT_EMAIL ORBITCHAT_PASSWORD PUBLIC_COURSE_API_URL LEAD_INTAKE_TOKEN
+            GUNICORN_WORKERS"
+
+          missing=""
+          for name in $required; do is_set "${!name}" || missing="$missing $name"; done
+          if [ -n "$missing" ]; then
+            echo "::error::Set these repository secrets (Settings > Secrets and variables > Actions):$missing"
+            exit 1
+          fi
+          for name in $app; do
+            case "${!name}" in
+              *"'"* | *$'\n'*) echo "::error::Secret $name can't contain a single quote or a line break"; exit 1 ;;
+            esac
+          done
+
+          # Single quotes: values are taken as they are ($ and # included).
+          umask 077
+          {
+            for name in $app; do
+              is_set "${!name}" && printf "%s='%s'\n" "$name" "${!name}"
+            done
+            printf "BACKEND_IMAGE='%s'\n" "$IMAGE:$GITHUB_SHA"
+          } > server.env
+
+          if is_set "$DEPLOY_PATH"; then path="$DEPLOY_PATH"; else path="~/skillshikshya-crm-backend"; fi
+          if is_set "$SSH_PORT"; then port="$SSH_PORT"; else port=22; fi
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "port=$port" >> "$GITHUB_OUTPUT"
+
+      - name: Copy the compose file and .env to the server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ steps.settings.outputs.port }}
+          source: docker-compose.prod.yml,server.env
+          target: ${{ steps.settings.outputs.path }}
+
+      - name: Pull the image and restart
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ steps.settings.outputs.port }}
+          envs: GHCR_USER,GHCR_TOKEN
+          script: |
+            set -e
+            cd ${{ steps.settings.outputs.path }}
+            docker compose version > /dev/null || { echo "Install Docker with the compose plugin on the server"; exit 1; }
+            install -m 600 server.env .env && rm -f server.env
+            docker network inspect skillshikshya > /dev/null 2>&1 || docker network create skillshikshya
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            docker compose -f docker-compose.prod.yml pull
+            docker logout ghcr.io
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+
+            # The API migrates on start; wait until it answers.
+            up=""
+            for i in $(seq 1 36); do
+              if docker compose -f docker-compose.prod.yml exec -T web python -c "import urllib.request as u; u.urlopen('http://localhost:8188/admin/login/', timeout=3)" > /dev/null 2>&1; then
+                up=1; break
+              fi
+              sleep 5
+            done
+            if [ -z "$up" ]; then
+              echo "The API did not start. Last log lines:"
+              docker compose -f docker-compose.prod.yml logs --tail=80 web
+              exit 1
+            fi
+            echo "API is up"
+            docker image prune -f

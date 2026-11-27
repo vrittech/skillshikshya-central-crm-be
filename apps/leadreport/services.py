@@ -1,15 +1,21 @@
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, F, Prefetch, Q, Sum
 from django.db.models.functions import Coalesce, TruncDate, TruncMonth, TruncWeek
 from django.utils import timezone
 
 from apps.lead.models import (
     Enrollment, FollowUp, Lead, LeadActivity, LeadCall,
-    LeadCourseInterest, Payment,
+    LeadCourseInterest, Payment, PaymentPlan,
+)
+from apps.lead.services import (
+    SEAT_STATES, annotated_seat_state, due_rows, filter_seat, with_seat,
 )
 from apps.callminutes.models import CallMinutesTransaction
+from apps.course.models import CourseBatch
+from apps.course.money import MONEY_FIELDS, batch_figures, empty_figures, figures_json
 from apps.student.models import Student
 
 User = get_user_model()
@@ -17,7 +23,7 @@ User = get_user_model()
 DATE_PARSE_ERROR = 'Invalid date. Use YYYY-MM-DD format.'
 
 LEAD_FILTER_PARAMS = [
-    'status', 'source', 'campaign', 'lead_type', 'priority',
+    'status', 'source', 'campaign', 'priority',
     'assigned_counselor', 'primary_course', 'is_converted', 'is_archived',
 ]
 
@@ -63,8 +69,8 @@ def _branch_scope(request):
     if user is None:
         return None
     if user.is_staff or user.is_superuser:
-        branch_id = _query_param(request, 'branch_id')
-        return int(branch_id) if branch_id else None
+        branch_id = _query_param(request, 'branch_id') or ''
+        return int(branch_id) if branch_id.isdigit() else None
     return getattr(user, 'branch_id', None)
 
 
@@ -121,12 +127,6 @@ def _lead_dimension_breakdown(request, qs, dimension, dimension_label):
     elif dimension == 'campaign':
         rows = (
             qs.values(dimension_label, 'campaign__name')
-            .annotate(count=Count('id'))
-            .order_by('-count')
-        )
-    elif dimension == 'lead_type':
-        rows = (
-            qs.values(dimension_label, 'lead_type__name')
             .annotate(count=Count('id'))
             .order_by('-count')
         )
@@ -260,11 +260,6 @@ def leads_by_source_report(request):
     return _lead_dimension_breakdown(request, qs, 'source', 'source')
 
 
-def leads_by_type_report(request):
-    qs, _ = _scoped_leads(request)
-    return _lead_dimension_breakdown(request, qs, 'lead_type', 'lead_type')
-
-
 def leads_by_branch_report(request):
     qs, _ = _scoped_leads(request)
     return _lead_dimension_breakdown(request, qs, 'branch', 'branch')
@@ -375,11 +370,18 @@ def revenue_report(request):
             Sum('payments__amount', filter=Q(payments__status='successful')),
             Decimal('0'),
         ),
-    )
+    ).prefetch_related('adjustments')
 
-    outstanding = 0
+    # Same rule as Enrollment.remaining_amount. A credit (we owe them) is not
+    # money to collect, so only positive balances count.
+    outstanding = Decimal('0')
     for enrollment in enrollments:
-        outstanding += (enrollment.agreed_amount - enrollment.paid)
+        t = enrollment.adjustment_totals()
+        owed = (
+            enrollment.agreed_amount + t['extra_charge'] - t['discount']
+            - t['write_off'] - enrollment.paid + t['refund']
+        )
+        outstanding += max(owed, Decimal('0'))
 
     return {
         'date_range': {
@@ -586,3 +588,410 @@ def counselor_performance_report(request):
         },
         'results': results,
     }
+
+# ---------------------------------------------------------------- money owed
+
+# How late a late part is, for the Who owes totals: (key, first day, last day).
+LATE_BUCKETS = [
+    ('days_1_30', 1, 30),
+    ('days_31_60', 31, 60),
+    ('days_61_90', 61, 90),
+    ('over_90', 91, None),
+]
+
+
+def _owing_enrollments(request):
+    """Confirmed, active and completed enrollments in the user's branch, ready for due_rows()."""
+    branch_id = _branch_scope(request)
+    qs = Enrollment.objects.filter(status__in=Enrollment.SEAT_STATUSES)
+    if branch_id:
+        qs = qs.filter(branch_id=branch_id)
+    for name in ('course', 'batch'):
+        value = _query_param(request, name)
+        if value and str(value).isdigit():
+            qs = qs.filter(**{f'{name}_id': int(value)})
+    # The counselor who chases the money: the lead's counselor, the same person
+    # the payment reminders hand the call to. 'none' = students with nobody.
+    counselor = _query_param(request, 'counselor')
+    if counselor == 'none':
+        qs = qs.filter(lead__assigned_counselor__isnull=True)
+    elif counselor and str(counselor).isdigit():
+        qs = qs.filter(lead__assigned_counselor_id=int(counselor))
+    qs = with_seat(qs)
+    seat = _query_param(request, 'seat')
+    if seat in SEAT_STATES:
+        qs = filter_seat(qs, seat)
+    return qs.select_related(
+        'lead', 'lead__assigned_counselor', 'student', 'course', 'batch', 'branch',
+    ).annotate(
+        paid_total=Coalesce(
+            Sum('payments__amount', filter=Q(payments__status='successful')),
+            Decimal('0'),
+        ),
+    ).prefetch_related(
+        'adjustments',
+        Prefetch('payment_plans', queryset=PaymentPlan.objects.prefetch_related('installments')),
+    )
+
+
+def _who(enrollment):
+    student = enrollment.student
+    counselor = enrollment.lead.assigned_counselor
+    return {
+        'enrollment': enrollment.id,
+        'lead': enrollment.lead_id,
+        'name': student.full_name if student else enrollment.lead.full_name,
+        'phone': (student.phone if student else None) or enrollment.lead.phone,
+        'student_id': student.student_id if student else None,
+        'course_name': enrollment.course.name,
+        'batch': enrollment.batch_id,
+        'batch_name': enrollment.batch.name if enrollment.batch else None,
+        'branch_name': enrollment.branch.name if enrollment.branch else None,
+        'counselor': counselor.id if counselor else None,
+        'counselor_name': counselor.name if counselor else None,
+        'seat_state': annotated_seat_state(enrollment),
+        'paused_on': (
+            enrollment.seat_on.isoformat()
+            if annotated_seat_state(enrollment) == 'paused' and enrollment.seat_on else None
+        ),
+    }
+
+
+def _owed_groups(results, key, name):
+    """Who owes, added up per counselor or per batch: students, owed, late, longest late.
+
+    Rows with no counselor (or no batch) make one group with id None.
+    Biggest amount owed first.
+    """
+    groups = {}
+    for r in results:
+        g = groups.setdefault(r[key], {
+            key: r[key], name: r[name], 'students': 0,
+            'owed': Decimal('0'), 'late': Decimal('0'), 'days_late': 0,
+        })
+        g['students'] += 1
+        g['owed'] += r['owed']
+        g['late'] += r['late']
+        g['days_late'] = max(g['days_late'], r['days_late'])
+    rows = sorted(groups.values(), key=lambda g: (-g['owed'], g[name] or ''))
+    return [{**g, 'owed': str(g['owed']), 'late': str(g['late'])} for g in rows]
+
+
+def who_owes_report(request):
+    """Every student who owes money: how much, how much is late, and how late.
+
+    Optional filters: course, batch (the money batch), counselor (an id, or
+    'none'), seat (seated, paused or none), late_only. by_counselor and by_batch
+    add the rows up.
+    """
+    today = timezone.localdate()
+    late_only = _to_bool(_query_param(request, 'late_only'))
+    results = []
+    totals = {'owed': Decimal('0'), 'late': Decimal('0')}
+    buckets = {key: Decimal('0') for key, _, _ in LATE_BUCKETS}
+
+    for enrollment in _owing_enrollments(request):
+        rows = due_rows(enrollment, today=today, paid=enrollment.paid_total)
+        open_rows = [r for r in rows if r['left'] > 0]
+        late_rows = [r for r in open_rows if r['status'] == 'late']
+        owed = sum((r['left'] for r in open_rows), Decimal('0'))
+        if owed <= 0 or (late_only and not late_rows):
+            continue
+        late = sum((r['left'] for r in late_rows), Decimal('0'))
+        upcoming = next((r for r in open_rows if r['status'] != 'late'), None)
+        results.append({
+            **_who(enrollment),
+            'owed': owed,
+            'late': late,
+            'days_late': max((r['days_late'] for r in late_rows), default=0),
+            'next_due_on': upcoming['due_on'] if upcoming else None,
+            'next_due_amount': upcoming['left'] if upcoming else None,
+        })
+        totals['owed'] += owed
+        totals['late'] += late
+        for row in late_rows:
+            for key, first, last in LATE_BUCKETS:
+                if row['days_late'] >= first and (last is None or row['days_late'] <= last):
+                    buckets[key] += row['left']
+
+    results.sort(key=lambda r: (-r['days_late'], -r['owed'], r['name']))
+    return {
+        'as_of': today.isoformat(),
+        'summary': {
+            'students': len(results),
+            'total_owed': str(totals['owed']),
+            'total_late': str(totals['late']),
+            'not_late': str(totals['owed'] - totals['late']),
+            **{key: str(amount) for key, amount in buckets.items()},
+        },
+        'by_counselor': _owed_groups(results, 'counselor', 'counselor_name'),
+        'by_batch': _owed_groups(results, 'batch', 'batch_name'),
+        'results': [
+            {
+                **r,
+                'owed': str(r['owed']),
+                'late': str(r['late']),
+                'next_due_on': r['next_due_on'].isoformat() if r['next_due_on'] else None,
+                'next_due_amount': (
+                    str(r['next_due_amount']) if r['next_due_amount'] is not None else None
+                ),
+            }
+            for r in results
+        ],
+    }
+
+
+def _month_range(value, today):
+    """First and last day of 'YYYY-MM', or of next month when value is empty."""
+    if value:
+        try:
+            year, month = (int(part) for part in str(value).split('-'))
+            first = date(year, month, 1)
+        except (TypeError, ValueError):
+            return None, None, 'Invalid month. Use YYYY-MM format.'
+    else:
+        first = date(today.year + today.month // 12, today.month % 12 + 1, 1)
+    following = date(first.year + first.month // 12, first.month % 12 + 1, 1)
+    return first, following - timedelta(days=1), None
+
+
+def due_in_month_report(request):
+    """Every unpaid part due in a month (next month by default), less what is paid on it.
+
+    Optional filters: month (YYYY-MM), course, batch (the money batch), seat.
+    """
+    today = timezone.localdate()
+    first, last, error = _month_range(_query_param(request, 'month'), today)
+    if error:
+        return {'error': error}
+
+    results = []
+    for enrollment in _owing_enrollments(request):
+        rows = due_rows(enrollment, today=today, paid=enrollment.paid_total)
+        for row in rows:
+            if row['left'] > 0 and row['due_on'] and first <= row['due_on'] <= last:
+                results.append({
+                    **_who(enrollment),
+                    'kind': row['kind'],
+                    'due_on': row['due_on'],
+                    'amount': row['amount'],
+                    'paid': row['paid'],
+                    'left': row['left'],
+                })
+
+    results.sort(key=lambda r: (r['due_on'], r['name']))
+    total = sum((r['left'] for r in results), Decimal('0'))
+    return {
+        'month': first.strftime('%Y-%m'),
+        'start_date': first.isoformat(),
+        'end_date': last.isoformat(),
+        'summary': {
+            'total_due': str(total),
+            'parts': len(results),
+            'students': len({r['enrollment'] for r in results}),
+        },
+        'results': [
+            {
+                **r,
+                'due_on': r['due_on'].isoformat(),
+                'amount': str(r['amount']),
+                'paid': str(r['paid']),
+                'left': str(r['left']),
+            }
+            for r in results
+        ],
+    }
+
+
+# ---------------------------------------------------------------- batch profit
+
+
+def _batch_row(batch, figures, closing):
+    from apps.course.services import close_figures
+
+    return {
+        'batch': batch.pk,
+        'coursebatch_id': batch.coursebatch_id,
+        'name': batch.name,
+        'course_name': batch.course.name,
+        'status': batch.status,
+        'status_display': batch.get_status_display(),
+        'start_date': batch.start_date.isoformat() if batch.start_date else None,
+        'end_date': batch.end_date.isoformat() if batch.end_date else None,
+        **figures_json(figures),
+        'closed_at': closing.created_at.isoformat() if closing else None,
+        'at_close': figures_json(close_figures(closing)) if closing else None,
+    }
+
+
+def batch_profit_report(request):
+    """Each batch's fees, collected, owed, costs and profit, newest batch first.
+
+    Money counts on the batch the student first joined. A closed batch also
+    has its figures at close. Optional filters: course, status, and
+    start_date / end_date for batches that start in that range.
+    """
+    start_date, end_date, error = _resolve_date_range(request)
+    if error:
+        return {'error': error}
+    branch_id = _branch_scope(request)
+    batches = CourseBatch.objects.select_related('course')
+    if start_date:
+        batches = batches.filter(start_date__gte=start_date)
+    if end_date:
+        batches = batches.filter(start_date__lte=end_date)
+    if branch_id:
+        batches = batches.filter(branch_id=branch_id)
+    course = _query_param(request, 'course')
+    if course and str(course).isdigit():
+        batches = batches.filter(course_id=int(course))
+    status = _query_param(request, 'status')
+    if status:
+        if status not in CourseBatch.Status.values:
+            return {'error': f'Unknown status: {status}.'}
+        batches = batches.filter(status=status)
+    batches = list(batches.order_by(F('start_date').desc(nulls_last=True), '-id'))
+
+    figures = batch_figures([b.pk for b in batches])
+    total = empty_figures()
+    for f in figures.values():
+        total['students'] += f['students']
+        for name in MONEY_FIELDS:
+            total[name] += f[name]
+    closings = _last_closings(batches)
+    return {
+        'summary': {'batches': len(batches), **figures_json(total)},
+        'results': [_batch_row(b, figures[b.pk], closings.get(b.pk)) for b in batches],
+    }
+
+
+def _last_closings(batches):
+    """{batch id: its last close row}, for closed batches whose last row is a close."""
+    from apps.course.models import BatchClosing
+
+    closed = [b.pk for b in batches if b.status == CourseBatch.Status.CLOSED]
+    last = {}
+    for row in BatchClosing.objects.filter(course_batch_id__in=closed).order_by('created_at', 'id'):
+        last[row.course_batch_id] = row
+    return {pk: row for pk, row in last.items() if row.kind == BatchClosing.Kind.CLOSE}
+
+
+# An open enquiry with no stage change for this many days is stale.
+STALE_DAYS = 14
+
+
+def _rate(part, whole):
+    return round(part * 100 / whole, 1) if whole else 0.0
+
+
+def _enquiry_depth(row):
+    """How far down the funnel the enquiry got: 0 New … 3 Won. Lost counts where it died."""
+    funnel = list(LeadCourseInterest.FUNNEL)
+    stage = row['lost_at_stage'] if row['stage'] == LeadCourseInterest.Stage.LOST else row['stage']
+    return funnel.index(stage) if stage in funnel else 0
+
+
+def _enquiry_breakdown(rows, key, name, empty_name):
+    groups = {}
+    for row in rows:
+        group = groups.setdefault(row[key], {
+            'id': row[key], 'name': name(row) or empty_name,
+            'enquiries': 0, 'won': 0, 'lost': 0, 'open': 0,
+        })
+        group['enquiries'] += 1
+        if row['stage'] == LeadCourseInterest.Stage.WON:
+            group['won'] += 1
+        elif row['stage'] == LeadCourseInterest.Stage.LOST:
+            group['lost'] += 1
+        else:
+            group['open'] += 1
+    result = sorted(groups.values(), key=lambda g: (-g['enquiries'], g['name']))
+    for group in result:
+        group['win_rate'] = _rate(group['won'], group['enquiries'])
+    return result
+
+
+def enquiry_funnel_report(request):
+    """Where enquiries die: how many reach each stage, where the lost ones stopped and why.
+
+    Counts enquiries taken in the date range (start_date, end_date on the
+    day the enquiry was made), in the branch where it was taken. Optional
+    filters: course, source, counselor.
+    """
+    start_date, end_date, error = _resolve_date_range(request)
+    if error:
+        return {'error': error}
+    enquiries = LeadCourseInterest.objects.filter(lead__is_deleted=False)
+    branch_id = _branch_scope(request)
+    if branch_id:
+        enquiries = enquiries.filter(branch_id=branch_id)
+    if start_date:
+        enquiries = enquiries.filter(created_at__date__gte=start_date)
+    if end_date:
+        enquiries = enquiries.filter(created_at__date__lte=end_date)
+    for param, field in (('course', 'course_id'), ('source', 'source_id'), ('counselor', 'counselor_id')):
+        value = _query_param(request, param)
+        if value and str(value).isdigit():
+            enquiries = enquiries.filter(**{field: int(value)})
+
+    rows = list(enquiries.values(
+        'stage', 'lost_at_stage', 'lost_reason', 'stage_changed_at',
+        'course_id', 'course__name', 'course_name', 'source_id', 'source__name',
+        'counselor_id', 'counselor__name',
+    ))
+    Stage = LeadCourseInterest.Stage
+    stale_before = timezone.now() - timedelta(days=STALE_DAYS)
+    total = len(rows)
+    won = sum(1 for r in rows if r['stage'] == Stage.WON)
+    lost = sum(1 for r in rows if r['stage'] == Stage.LOST)
+    open_rows = [r for r in rows if r['stage'] in LeadCourseInterest.OPEN_STAGES]
+    depths = [_enquiry_depth(r) for r in rows]
+
+    funnel = []
+    for index, stage in enumerate(LeadCourseInterest.FUNNEL):
+        reached = sum(1 for d in depths if d >= index)
+        lost_here = sum(1 for r in rows if r['stage'] == Stage.LOST and r['lost_at_stage'] == stage)
+        funnel.append({
+            'stage': stage,
+            'label': Stage(stage).label,
+            'reached': reached,
+            'reached_rate': _rate(reached, total),
+            'open': sum(1 for r in open_rows if r['stage'] == stage),
+            'lost': lost_here,
+            'lost_rate': _rate(lost_here, reached),
+        })
+
+    reasons = {}
+    for r in rows:
+        if r['stage'] == Stage.LOST:
+            reasons[r['lost_reason']] = reasons.get(r['lost_reason'], 0) + 1
+    lost_by_reason = sorted(
+        (
+            {'reason': reason, 'label': LeadCourseInterest.LostReason(reason).label,
+             'count': count, 'rate': _rate(count, lost)}
+            for reason, count in reasons.items()
+        ),
+        key=lambda x: (-x['count'], x['label']),
+    )
+
+    return {
+        'summary': {
+            'enquiries': total,
+            'won': won,
+            'lost': lost,
+            'open': len(open_rows),
+            'stale': sum(1 for r in open_rows if r['stage_changed_at'] < stale_before),
+            'stale_days': STALE_DAYS,
+            'win_rate': _rate(won, total),
+        },
+        'funnel': funnel,
+        'lost_by_reason': lost_by_reason,
+        'by_course': _enquiry_breakdown(
+            rows, 'course_id', lambda r: r['course__name'] or r['course_name'], 'No course',
+        ),
+        'by_source': _enquiry_breakdown(rows, 'source_id', lambda r: r['source__name'], 'No source'),
+        'by_counselor': _enquiry_breakdown(
+            rows, 'counselor_id', lambda r: r['counselor__name'], 'Not assigned',
+        ),
+    }
+

@@ -21,12 +21,19 @@ CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'redis://redis:6
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
+# Beat times below are in UTC, whatever TIME_ZONE is.
 CELERY_TIMEZONE = 'UTC'
 
 CELERY_BEAT_SCHEDULE = {
     'send-followup-reminders-every-5-minutes': {
         'task': 'apps.lead.tasks.send_followup_reminders_task',
         'schedule': 300,  # every 5 minutes
+    },
+    # Payment reminders: daily at UTC 03:15 == NPT 09:00. Off until turned on
+    # in Django Admin -> Lead -> Payment reminder settings.
+    'send-payment-reminders-daily': {
+        'task': 'apps.lead.tasks.send_payment_reminders_task',
+        'schedule': crontab(hour=3, minute=15),
     },
     # OrbitChat lead sync — runs hourly on NPT hour boundaries.
     # minute=15 UTC == minute 0 Nepal time (UTC+5:45).
@@ -36,12 +43,22 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.orbitchat.tasks.poll_orbitchat_leads_task',
         'schedule': crontab(minute=15),  # UTC 07:15 == NPT 13:00
     },
+    # Voice note recordings that no voice note points to: nightly at
+    # UTC 20:15 == NPT 02:00, when nobody is recording. See apps/lead/voice_sweep.py.
+    'sweep-voice-note-files-nightly': {
+        'task': 'apps.lead.tasks.sweep_voice_note_files_task',
+        'schedule': crontab(hour=20, minute=15),
+    },
 }
 
 
 # Email
 
 EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+# SMTP goes through the server saved on the CRM Settings page (falls back to
+# the values below). Console/test backends are left as they are.
+if EMAIL_BACKEND == 'django.core.mail.backends.smtp.EmailBackend':
+    EMAIL_BACKEND = 'apps.global_config.mail.SavedSettingsEmailBackend'
 EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
 EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 587))
 EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True').lower() in ('true', '1', 'yes')
@@ -58,6 +75,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-change-me')
+# Encrypts passwords and keys saved on the Settings page. Uses SECRET_KEY when blank.
+SETTINGS_ENCRYPTION_KEY = os.environ.get('SETTINGS_ENCRYPTION_KEY', '')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'True').lower() in ('true', '1', 'yes')
@@ -168,7 +187,8 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+# Days, dates and reports follow Nepal time. Times are still stored in UTC.
+TIME_ZONE = 'Asia/Kathmandu'
 
 USE_I18N = True
 
@@ -234,7 +254,19 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PAGINATION_CLASS': 'apps.global_config.pagination.CustomPagination',
     'PAGE_SIZE': 10,
+    'EXCEPTION_HANDLER': 'apps.global_config.exceptions.exception_handler',
+    # Rate limits for sign in, password reset and the lead intake (apps/global_config/throttles.py).
+    'NUM_PROXIES': int(os.environ['NUM_PROXIES']) if os.environ.get('NUM_PROXIES') else None,
+    'DEFAULT_THROTTLE_RATES': {
+        'login': '10/minute',
+        'password_reset': '5/hour',
+        'lead_intake': '120/hour',
+    },
 }
+
+# The public lead intake (POST /api/public/lead-intake/) needs this value in an
+# X-Intake-Token header. Unset: the intake only works while DEBUG is on.
+LEAD_INTAKE_TOKEN = os.environ.get('LEAD_INTAKE_TOKEN', '')
 
 
 # SimpleJWT

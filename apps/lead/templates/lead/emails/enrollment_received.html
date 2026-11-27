@@ -1,0 +1,14 @@
+{% extends "emails/base.html" %}
+{% block subject %}Enrollment received: {{ course }}{% endblock %}
+{% block preheader %}We have received your enrollment for {{ course }}.{% endblock %}
+{% block title %}We have received your enrollment{% endblock %}
+{% block content %}
+<p style="margin:0 0 12px;">Dear {{ name }},</p>
+<p style="margin:0;">Thank you for choosing us. We have received your enrollment for <strong>{{ course }}</strong>. Our team will confirm your seat shortly.</p>
+{% include "emails/_details.html" with rows=rows %}
+{% if counselor %}
+<p style="margin:0;">For any questions, contact your counselor <strong>{{ counselor.name }}</strong>{% if counselor.phone %} on {{ counselor.phone }}{% endif %}{% if counselor.email %} or at <a href="mailto:{{ counselor.email }}" style="color:#00694c;">{{ counselor.email }}</a>{% endif %}.</p>
+{% else %}
+<p style="margin:0;">For any questions, reply to this email.</p>
+{% endif %}
+{% endblock %}

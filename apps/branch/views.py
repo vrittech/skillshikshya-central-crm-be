@@ -8,10 +8,11 @@ from apps.branch.models import Branch
 from apps.branch.filters import BranchFilter
 from apps.branch.serializers import BranchSerializer
 from apps.global_config.pagination import CustomPagination
-from apps.global_config.permissions import IsStaffOrHasPermission
+from apps.global_config.permissions import IsStaffOrHasPermission, OPEN, ReadRights
 
 
-class BranchViewSet(viewsets.ModelViewSet):
+class BranchViewSet(ReadRights, viewsets.ModelViewSet):
+    read_perm = OPEN
     queryset = Branch.objects.all()
     serializer_class = BranchSerializer
     pagination_class = CustomPagination

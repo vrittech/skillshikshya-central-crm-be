@@ -32,7 +32,12 @@ class CourseBatchFilter(django_filters.FilterSet):
     coursebatch_id = django_filters.CharFilter(lookup_expr='icontains')
     start_date = django_filters.DateFilter()
     end_date = django_filters.DateFilter()
+    status = django_filters.MultipleChoiceFilter(choices=CourseBatch.Status.choices)
+    mode = django_filters.ChoiceFilter(choices=CourseBatch.Mode.choices)
 
     class Meta:
         model = CourseBatch
-        fields = ['name', 'coursebatch_id', 'course', 'batch', 'start_date', 'end_date', 'is_active']
+        fields = [
+            'name', 'coursebatch_id', 'course', 'batch', 'start_date', 'end_date',
+            'is_active', 'status', 'mode',
+        ]

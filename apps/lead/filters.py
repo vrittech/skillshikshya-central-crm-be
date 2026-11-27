@@ -1,8 +1,14 @@
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
 import django_filters
+from django.db.models import Exists, OuterRef, Q
+from django.utils import timezone
+
 from apps.lead.models import (
     LearningMode, Institution, Province, City, LeadSource, Campaign, LeadStatus, LeadPriority,
-    LeadTag, LeadType, Lead, LeadCourseInterest, Enrollment, Payment,
-    LeadCall, LeadActivity, FollowUp, LeadDocument, Notification,
+    LeadTag, Lead, LeadCourseInterest, Enrollment, Payment,
+    LeadCall, LeadActivity, FollowUp, LeadDocument, Notification, TeamsLicence,
 )
 
 
@@ -78,12 +84,22 @@ class LeadTagFilter(django_filters.FilterSet):
         fields = ['name', 'is_active']
 
 
-class LeadTypeFilter(django_filters.FilterSet):
-    name = django_filters.CharFilter(lookup_expr='icontains')
+def has_enrollment_in(status, request=None):
+    """Condition for leads with an enrollment in `status`.
 
-    class Meta:
-        model = LeadType
-        fields = ['name', 'is_active']
+    A branch user counts only enrollments taken at their branch; staff count
+    every branch, or the one picked with ?branch_id.
+    """
+    enrollments = Enrollment.objects.filter(lead=OuterRef('pk'), status=status)
+    user = getattr(request, 'user', None)
+    if user is not None and user.is_authenticated:
+        if user.is_staff or user.is_superuser:
+            branch_id = request.query_params.get('branch_id')
+        else:
+            branch_id = getattr(user, 'branch_id', None)
+        if branch_id:
+            enrollments = enrollments.filter(branch_id=branch_id)
+    return Exists(enrollments)
 
 
 class LeadFilter(django_filters.FilterSet):
@@ -102,11 +118,17 @@ class LeadFilter(django_filters.FilterSet):
     created_date = django_filters.DateFilter(field_name='created_at', lookup_expr='date')
     from_date = django_filters.DateFilter(field_name='created_at', lookup_expr='date__gte')
     to_date = django_filters.DateFilter(field_name='created_at', lookup_expr='date__lte')
+    # Leads with at least one enrollment in this status: ?enrollment_status=pending.
+    enrollment_status = django_filters.ChoiceFilter(
+        choices=Enrollment.Status.choices, method='filter_enrollment_status',
+    )
+
+    def filter_enrollment_status(self, queryset, name, value):
+        return queryset.filter(has_enrollment_in(value, self.request))
 
     class Meta:
         model = Lead
         fields = {
-            'lead_type': ['exact', 'in'],
             'source': ['exact', 'in'],
             'campaign': ['exact', 'in'],
             'branch': ['exact', 'in'],
@@ -125,7 +147,7 @@ class LeadFilter(django_filters.FilterSet):
 class LeadCourseInterestFilter(django_filters.FilterSet):
     class Meta:
         model = LeadCourseInterest
-        fields = ['course', 'is_primary', 'interest_level']
+        fields = ['course', 'is_primary', 'interest_level', 'stage']
 
 
 class EnrollmentFilter(django_filters.FilterSet):
@@ -138,6 +160,7 @@ class EnrollmentFilter(django_filters.FilterSet):
             'course': ['exact'],
             'status': ['exact', 'in'],
             'batch': ['exact'],
+            'current_batch': ['exact'],
         }
 
 
@@ -169,6 +192,9 @@ class GlobalCallFilter(django_filters.FilterSet):
     notes = django_filters.CharFilter(lookup_expr='icontains')
     call_timestamp__gte = django_filters.DateTimeFilter(field_name='call_timestamp', lookup_expr='gte')
     call_timestamp__lte = django_filters.DateTimeFilter(field_name='call_timestamp', lookup_expr='lte')
+    # Whole days, in local time: date_from=2026-11-01&date_to=2026-11-30.
+    date_from = django_filters.DateFilter(field_name='call_timestamp', lookup_expr='date__gte')
+    date_to = django_filters.DateFilter(field_name='call_timestamp', lookup_expr='date__lte')
     created_by = django_filters.NumberFilter(field_name='created_by')
     student = django_filters.NumberFilter(field_name='lead__students')
 
@@ -185,9 +211,60 @@ class LeadActivityFilter(django_filters.FilterSet):
         fields = ['lead', 'activity_type', 'performed_by']
 
 
+NEPAL = ZoneInfo('Asia/Kathmandu')
+
+
+def nepal_today_bounds(now=None):
+    """Start of today and start of tomorrow in Nepal time."""
+    today = timezone.localtime(now or timezone.now(), NEPAL).date()
+    start = datetime.combine(today, time.min, tzinfo=NEPAL)
+    return start, start + timedelta(days=1)
+
+
+def due_bucket(scheduled_at, bounds):
+    """'overdue' (before today), 'today' or 'upcoming' (after today), by Nepal days."""
+    start, end = bounds
+    if scheduled_at < start:
+        return 'overdue'
+    return 'today' if scheduled_at < end else 'upcoming'
+
+
+def due_q(bucket, bounds):
+    start, end = bounds
+    return {
+        'overdue': Q(scheduled_at__lt=start),
+        'today': Q(scheduled_at__gte=start, scheduled_at__lt=end),
+        'upcoming': Q(scheduled_at__gte=end),
+    }[bucket]
+
+
+DUE_BUCKETS = ('overdue', 'today', 'upcoming')
+OPEN_FOLLOWUP = Q(status__in=[FollowUp.Status.PENDING, FollowUp.Status.MISSED])
+
+
 class FollowUpFilter(django_filters.FilterSet):
     scheduled_at__gte = django_filters.DateTimeFilter(field_name='scheduled_at', lookup_expr='gte')
     scheduled_at__lte = django_filters.DateTimeFilter(field_name='scheduled_at', lookup_expr='lte')
+    # payment=true: only payment follow-ups (made by the reminder job); false: only the others.
+    payment = django_filters.BooleanFilter(method='filter_payment')
+    # open=true: still to do (pending or missed); false: completed or cancelled.
+    open = django_filters.BooleanFilter(method='filter_open')
+    due = django_filters.ChoiceFilter(
+        choices=[(b, b.title()) for b in DUE_BUCKETS], method='filter_due',
+    )
+
+    def filter_payment(self, queryset, name, value):
+        if value is None:
+            return queryset
+        return queryset.filter(enrollment__isnull=not value)
+
+    def filter_open(self, queryset, name, value):
+        if value is None:
+            return queryset
+        return queryset.filter(OPEN_FOLLOWUP) if value else queryset.exclude(OPEN_FOLLOWUP)
+
+    def filter_due(self, queryset, name, value):
+        return queryset.filter(due_q(value, nepal_today_bounds()))
 
     class Meta:
         model = FollowUp
@@ -203,6 +280,16 @@ class LeadDocumentFilter(django_filters.FilterSet):
 class GlobalEnrollmentFilter(django_filters.FilterSet):
     enrollment_date__gte = django_filters.DateFilter(field_name='enrollment_date', lookup_expr='gte')
     enrollment_date__lte = django_filters.DateFilter(field_name='enrollment_date', lookup_expr='lte')
+    # seated = in a batch now, paused = paused out of one, none = never placed or left.
+    seat = django_filters.ChoiceFilter(
+        choices=[('seated', 'Seated'), ('paused', 'Paused'), ('none', 'No seat')],
+        method='filter_seat',
+    )
+
+    def filter_seat(self, queryset, name, value):
+        from apps.lead.services import filter_seat
+
+        return filter_seat(queryset, value)
 
     class Meta:
         model = Enrollment
@@ -211,6 +298,7 @@ class GlobalEnrollmentFilter(django_filters.FilterSet):
             'course': ['exact'],
             'status': ['exact', 'in'],
             'batch': ['exact'],
+            'current_batch': ['exact'],
         }
 
 
@@ -232,3 +320,14 @@ class NotificationFilter(django_filters.FilterSet):
     class Meta:
         model = Notification
         fields = ['recipient', 'is_read']
+
+
+class TeamsLicenceFilter(django_filters.FilterSet):
+    # open=true: licences in use now; false: freed ones.
+    open = django_filters.BooleanFilter(field_name='released_at', lookup_expr='isnull')
+    batch = django_filters.NumberFilter(field_name='enrollment__current_batch')
+    student = django_filters.NumberFilter(field_name='enrollment__student')
+
+    class Meta:
+        model = TeamsLicence
+        fields = ['enrollment']

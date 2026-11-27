@@ -36,8 +36,6 @@
 | `city` | int (FK) | City ID — see `/api/cities/` |
 | `city_name` | string (read-only) | City display name |
 | `landmark` | string | Nearby landmark or area |
-| `lead_type` | int (FK) | Lead type ID — see `/api/lead-types/` |
-| `lead_type_name` | string (read-only) | Lead type display name |
 | `source` | int (FK) | Lead source ID — see `/api/lead-sources/` |
 | `source_name` | string (read-only) | Source display name |
 | `campaign` | int (FK) | Campaign ID — see `/api/campaigns/` |
@@ -106,7 +104,6 @@ Total clamped to 0–100. New leads start at 0; score updates on the next `PATCH
     "province": 1,
     "city": 1,
     "landmark": "Near Durbar Square",
-    "lead_type": 1,
     "source": 1,
     "campaign": 1,
     "priority": 1,
@@ -141,8 +138,6 @@ Total clamped to 0–100. New leads start at 0; score updates on the next `PATCH
 }
 ```
 
-`lead_type` is FK to `/api/lead-types/`. Send the integer ID (e.g., 1 for Course Inquiry).
-
 ---
 
 ## GET `/api/leads/` — List Leads
@@ -170,8 +165,6 @@ Total clamped to 0–100. New leads start at 0; score updates on the next `PATCH
 | `is_converted` | bool | Filter by conversion status |
 | `is_archived` | bool | Filter by archive status |
 | `tags` | int | Filter by tag ID |
-| `lead_type` | int | Filter by lead type ID |
-| `lead_type__in` | string | Filter by multiple lead types |
 | `lead_score__gte` | int | Min lead score |
 | `lead_score__lte` | int | Max lead score |
 | `expected_revenue__gte` | number | Min expected revenue |
@@ -256,8 +249,6 @@ Full response includes `call_count`, `next_followup` object, `enrollment_summary
     "city": 1,
     "city_name": "Kathmandu",
     "landmark": "Near Durbar Square",
-    "lead_type": 1,
-    "lead_type_name": "Course Inquiry",
     "source": 1,
     "source_name": "Website",
     "campaign": 1,
