@@ -759,6 +759,14 @@ def void_payment(payment, *, reason, user):
         raise ActionRefused(
             f'A {payment.get_status_display().lower()} payment can\'t be voided.'
         )
+    if payment.status == Payment.Status.SUCCESSFUL:
+        # Refunds can't be more than what was paid, the same as for a new refund.
+        enrollment = _lock(payment.enrollment)
+        if payment.amount > enrollment.total_paid - enrollment.refunds_total:
+            raise ActionRefused(
+                f"This payment can't be voided: the refunds ({_npr(enrollment.refunds_total)}) "
+                'would be more than what was paid.'
+            )
     old_status = payment.status
     payment.status = Payment.Status.VOIDED
     payment.void_reason = reason

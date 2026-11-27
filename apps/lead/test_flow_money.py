@@ -360,13 +360,12 @@ class RevenueReportTests(MoneyFlowBase):
 class VoidAndRefundTests(MoneyFlowBase):
     """Voids and refunds on the same enrollment."""
 
-    # BUG: void_payment (lead/services.py:755) skips the refund rule, so refunds end up above what was paid and the student owes more than the fee.
-    @unittest.expectedFailure
     def test_voiding_a_refunded_payment_keeps_refunds_within_what_was_paid(self):
         enrollment = self.confirmed(paid='30000')
         self.added(enrollment, 'discount', '10000', 'Course price dropped')
         self.added(enrollment, 'refund', '10000', 'Gave back the difference')
-        self.void(enrollment, self.first_payment(enrollment).id, reason='Payment was entered twice')
+        response = self.void(enrollment, self.first_payment(enrollment).id, reason='Payment was entered twice')
+        self.assertEqual(response.status_code, 400)
         card = self.card(enrollment)
         self.assertGreaterEqual(money(card['total_paid']), money(card['refunds_total']))
         self.assertLessEqual(money(card['remaining_amount']), 20000)  # never more than the fee after the discount
