@@ -8,7 +8,6 @@ and check that every screen shows the same money.
 
 A test marked expectedFailure shows a bug; its # BUG: line says what is wrong.
 """
-import unittest
 from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from unittest import mock
@@ -636,11 +635,10 @@ class PaymentAmountTests(MoneyFlowBase):
         self.assertIsNone(self.owed_row(enrollment))
         self.assertEqual(money(self.report('revenue')['summary']['outstanding_to_collect']), 0)
 
-    # BUG: an extra charge has no cap, and a 13-digit balance overflows the 12-digit remaining_amount field (lead/serializers.py:262): 500.
-    @unittest.expectedFailure
     def test_a_huge_extra_charge_does_not_break_the_enrollment_screens(self):
         enrollment = self.confirmed(paid='5000')
-        self.entry(enrollment, 'extra_charge', '9999999999.99', 'Typed too many nines')
+        response = self.entry(enrollment, 'extra_charge', '9999999999.99', 'Typed too many nines')
+        self.assertEqual(response.status_code, 400)
         self.client.raise_request_exception = False
         self.assertEqual(self.client.get(self.url(enrollment)).status_code, 200)
         self.assertEqual(self.client.get('/api/enrollments/').status_code, 200)

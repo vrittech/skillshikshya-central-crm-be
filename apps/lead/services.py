@@ -791,6 +791,10 @@ def void_payment(payment, *, reason, user):
     return payment
 
 
+# The most a money field (12 digits, 2 of them decimals) holds, such as the balance.
+MAX_AMOUNT = Decimal('9999999999.99')
+
+
 @transaction.atomic
 def add_adjustment(enrollment, *, kind, amount, reason, user):
     """Add an extra charge, discount, write-off or refund, with a history row.
@@ -798,10 +802,15 @@ def add_adjustment(enrollment, *, kind, amount, reason, user):
     A refund can't be more than what was paid and not yet refunded. A write-off
     can't be more than what is owed. A discount can't be more than the fee
     (after earlier discounts and write-offs); when the student already paid,
-    it may leave a credit we owe them, to be refunded.
+    it may leave a credit we owe them, to be refunded. An extra charge can't
+    take what is owed above MAX_AMOUNT.
     """
     enrollment = _lock(enrollment)
     balance_before = enrollment.remaining_amount
+    if kind == Adjustment.Kind.EXTRA_CHARGE and balance_before + amount > MAX_AMOUNT:
+        raise ActionRefused(
+            f"An extra charge can't take what is owed above {_npr(MAX_AMOUNT)}. Check the amount."
+        )
     if kind == Adjustment.Kind.DISCOUNT:
         t = enrollment.adjustment_totals()
         fee = (
