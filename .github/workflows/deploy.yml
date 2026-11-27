@@ -203,10 +203,11 @@ jobs:
             docker logout ghcr.io
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
 
-            # The API migrates on start; wait until it answers.
+            # The API migrates on start; wait until it answers. Django answers only for
+            # ALLOWED_HOSTS (localhost gets a 400), so ask as the first of them.
             up=""
             for i in $(seq 1 36); do
-              if docker compose -f docker-compose.prod.yml exec -T web python -c "import urllib.request as u; u.urlopen('http://localhost:8188/admin/login/', timeout=3)" > /dev/null 2>&1; then
+              if docker compose -f docker-compose.prod.yml exec -T web python -c "import os, urllib.request as u; host = os.environ['ALLOWED_HOSTS'].split(',')[0].strip().lstrip('.'); u.urlopen(u.Request('http://localhost:8188/admin/login/', headers={'Host': host}), timeout=3)" > /dev/null 2>&1; then
                 up=1; break
               fi
               sleep 5
