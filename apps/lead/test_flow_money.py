@@ -416,8 +416,6 @@ class BranchAndRightsTests(MoneyFlowBase):
         payment.refresh_from_db()
         self.assertEqual(payment.status, 'successful')
 
-    # BUG: PaymentViewSet.perform_create (lead/views.py:964) finds the enrollment by lead only, not inside the user's branch.
-    @unittest.expectedFailure
     def test_branch_user_cannot_pay_into_another_branchs_enrollment(self):
         enrollment = self.pokhara_enrollment()
         self.client.force_authenticate(self.role_user('Accountant', branch=self.ktm))

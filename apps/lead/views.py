@@ -953,17 +953,22 @@ class PaymentViewSet(ReadRights, viewsets.ModelViewSet):
     # still count each payment at the branch that took it.
     branch_field = 'enrollment__branch'
 
+    def _enrollments(self, enrollments=Enrollment.objects):
+        """The enrollment in the address, if it is in this user's branch (any branch for staff)."""
+        return branch_enrollments(self.request, self.kwargs['lead_pk'], enrollments).filter(
+            pk=self.kwargs['enrollment_pk'],
+        )
+
     def get_queryset(self):
-        return Payment.objects.filter(
-            enrollment_id=self.kwargs['enrollment_pk'],
-            enrollment__lead_id=self.kwargs['lead_pk'],
-        ).select_related('received_by', 'voided_by').prefetch_related('invoices')
+        return Payment.objects.filter(enrollment__in=self._enrollments()).select_related(
+            'received_by', 'voided_by',
+        ).prefetch_related('invoices')
 
     @transaction.atomic
     def perform_create(self, serializer):
+        lead = visible_lead(self.request, self.kwargs['lead_pk'])
         enrollment = get_object_or_404(
-            Enrollment.objects.select_for_update(),
-            pk=self.kwargs['enrollment_pk'], lead=visible_lead(self.request, self.kwargs['lead_pk']),
+            self._enrollments(Enrollment.objects.select_for_update().filter(lead=lead)),
         )
         refusal = services.payment_refusal(enrollment, serializer.validated_data['amount'])
         if refusal:
@@ -1031,10 +1036,7 @@ class AdjustmentViewSet(ReadRights,
         return [IsAuthenticated()]
 
     def _enrollment(self):
-        enrollments = Enrollment.objects.filter(lead_id=self.kwargs['lead_pk'])
-        user = self.request.user
-        if not (user.is_staff or user.is_superuser) and getattr(user, 'branch', None):
-            enrollments = enrollments.filter(branch=user.branch)
+        enrollments = branch_enrollments(self.request, self.kwargs['lead_pk'])
         return get_object_or_404(enrollments, pk=self.kwargs['enrollment_pk'])
 
     def create(self, request, *args, **kwargs):
@@ -1257,6 +1259,15 @@ def visible_lead(request, lead_pk):
         request, Lead.objects.filter(is_deleted=False), view=None,
     )
     return get_object_or_404(leads, pk=lead_pk)
+
+
+def branch_enrollments(request, lead_pk, enrollments=Enrollment.objects):
+    """The lead's enrollments in this user's branch (in every branch for staff)."""
+    enrollments = enrollments.filter(lead_id=lead_pk)
+    user = request.user
+    if not (user.is_staff or user.is_superuser) and getattr(user, 'branch', None):
+        enrollments = enrollments.filter(branch=user.branch)
+    return enrollments
 
 
 class VoiceNoteViewSet(ReadRights, 
