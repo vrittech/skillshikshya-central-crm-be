@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from apps.branch.models import Branch
 from apps.student.models import BranchMove, Student, StudentDocument, Attendance
+from apps.global_config.permissions import can
 from apps.lead.models import Payment
 
 
@@ -66,6 +67,16 @@ class StudentSerializer(serializers.ModelSerializer):
 
     def get_enrollment_count(self, obj):
         return obj.enrollments.count()
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        user = request.user if request else None
+        if not can(user, 'lead.view_enrollment'):
+            data['total_paid'] = None
+        if not can(user, 'lead.view_payment'):
+            data['recent_payments'] = []
+        return data
 
 
 class StudentDocumentSerializer(serializers.ModelSerializer):

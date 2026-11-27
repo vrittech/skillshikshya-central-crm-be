@@ -22,7 +22,7 @@ from apps.lead.models import (
 from apps.lead import services
 from apps.lead.seat_backfill import backfill_seats
 from apps.student.models import Student
-from apps.global_config.testing import give_rights, give_view_rights
+from apps.global_config.testing import give_rights, give_view_rights, view_rights_except
 
 User = get_user_model()
 
@@ -4708,3 +4708,77 @@ class LeadSummaryCardTests(APITestCase):
         self.assertEqual(data['enrolled_last_month'], 1)
         self.assertEqual(data['new_last_week'], 1)
         self.assertEqual(data['new_this_week'], 7)
+
+
+class MoneyNeedsPaymentRightTests(SeatTestBase):
+    """Without view_payment, money is left out of the History tab, the
+    enrollment history and the student record."""
+
+    def setUp(self):
+        super().setUp()
+        self.enrollment = self._enroll(self.batch)
+        self.assertEqual(self._confirm(self.enrollment).status_code, 200)
+        for action in (EnrollmentHistory.Action.DISCOUNT, EnrollmentHistory.Action.COMPLETE):
+            EnrollmentHistory.record(
+                enrollment=self.enrollment, action=action, reason='Test', performed_by=self.admin,
+            )
+        self.counselor = view_rights_except(
+            User.objects.create_user(email='counselor@test.com', name='Counselor', password='pass'),
+            'lead.view_payment',
+        )
+        self.timeline_url = f'/api/leads/{self.enrollment.lead_id}/timeline/'
+
+    def _timeline(self, user, **params):
+        self.client.force_authenticate(user)
+        response = self.client.get(self.timeline_url, params)
+        self.assertEqual(response.status_code, 200)
+        return response.data['results']
+
+    def test_history_tab_leaves_out_money(self):
+        self.assertIn('money', {i['kind'] for i in self._timeline(self.admin)})
+        items = self._timeline(self.counselor)
+        self.assertNotIn('money', {i['kind'] for i in items})
+        self.assertIn('enrollment', {i['kind'] for i in items})
+        self.assertEqual(self._timeline(self.counselor, kind='money'), [])
+
+    def test_completed_is_an_enrollment_row_not_money(self):
+        items = self._timeline(self.counselor)
+        self.assertIn('Completed', {i['title'] for i in items if i['kind'] == 'enrollment'})
+
+    def test_each_kind_needs_its_own_right(self):
+        reader = give_rights(
+            User.objects.create_user(email='reader@test.com', name='Reader', password='pass'),
+            'lead.view_lead',
+        )
+        self.assertEqual({i['kind'] for i in self._timeline(reader)}, {'lead'})
+
+    def test_enrollment_history_leaves_out_money_rows(self):
+        url = self._url(self.enrollment, 'history/')
+
+        def actions():
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, 200)
+            return {row['action'] for row in response.data['results']}
+
+        self.assertIn('discount', actions())
+        self.client.force_authenticate(self.counselor)
+        seen = actions()
+        self.assertNotIn('discount', seen)
+        self.assertTrue({'confirm', 'complete'} <= seen, seen)
+
+    def test_student_record_shows_payments_only_with_the_right(self):
+        self.enrollment.refresh_from_db()
+        url = f'/api/students/{self.enrollment.student_id}/'
+        self.assertEqual(len(self.client.get(url).data['recent_payments']), 1)
+
+        self.client.force_authenticate(self.counselor)
+        data = self.client.get(url).data
+        self.assertIsNotNone(data['total_paid'])
+        self.assertEqual(data['recent_payments'], [])
+
+        clerk = give_rights(
+            User.objects.create_user(email='clerk@test.com', name='Clerk', password='pass'),
+            'student.view_student',
+        )
+        self.client.force_authenticate(clerk)
+        self.assertIsNone(self.client.get(url).data['total_paid'])

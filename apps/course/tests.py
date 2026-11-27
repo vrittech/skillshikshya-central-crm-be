@@ -643,6 +643,28 @@ class CloseChecklistTests(ClosingTestBase):
         confirmed.refresh_from_db()
         self.assertEqual(confirmed.status, 'completed')
 
+    def test_who_owes_and_batch_money_need_their_rights(self):
+        self._student(paid=10000)
+        clerk = give_rights(
+            User.objects.create_user(email='clerk4@test.com', name='Clerk', password='pass'),
+            'course.view_coursebatch', 'course.change_coursebatch',
+        )
+        self.client.force_authenticate(clerk)
+        self.assertIsNone(self._check()['owing'])
+        blocked = self.client.post(f'{self.url}close/', {'reason': 'Over'}, format='json')
+        self.assertEqual(blocked.status_code, 400)
+        self.assertIsNone(blocked.data['checklist']['owing'])
+
+        clerk = give_rights(clerk, 'lead.view_payment')
+        self.client.force_authenticate(clerk)
+        self.assertEqual(self._check()['owing']['count'], 1)
+
+        closed = self.client.post(
+            f'{self.url}close/', {'reason': 'Over', 'close_anyway': True}, format='json',
+        )
+        self.assertEqual(closed.status_code, 200, closed.data)
+        self.assertEqual(closed.data, {'batch': self.batch.id, 'status': 'closed'})
+
     def test_close_check_is_open_to_anyone_who_can_see_the_batch(self):
         clerk = User.objects.create_user(email='clerk3@test.com', name='Clerk', password='pass')
         self.client.force_authenticate(clerk)

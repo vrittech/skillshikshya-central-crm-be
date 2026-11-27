@@ -56,7 +56,7 @@ from apps.lead.filters import (
     GlobalEnrollmentFilter, GlobalPaymentFilter, GlobalCallFilter, TeamsLicenceFilter,
 )
 from apps.global_config.pagination import CustomPagination
-from apps.global_config.permissions import IsStaffOrHasPermission, OPEN, ReadRights, needs
+from apps.global_config.permissions import IsStaffOrHasPermission, OPEN, ReadRights, can, needs
 from apps.global_config.filters import BranchFilterBackend, LeadBranchFilterBackend, walled_branch_id
 
 
@@ -405,9 +405,11 @@ class LeadViewSet(ReadRights, viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def timeline(self, request, pk=None):
         """Everything about the person, newest first. ?kind= shows one kind."""
-        from apps.lead.timeline import lead_timeline
+        from apps.lead.timeline import lead_timeline, visible_kinds
 
         items = lead_timeline(self.get_object(), branch_id=walled_branch_id(request.user))
+        kinds = visible_kinds(request.user)
+        items = [i for i in items if i['kind'] in kinds]
         kind = request.query_params.get('kind')
         if kind:
             items = [i for i in items if i['kind'] == kind]
@@ -1057,10 +1059,15 @@ class EnrollmentHistoryViewSet(ReadRights, viewsets.ReadOnlyModelViewSet):
     branch_field = 'enrollment__branch'
 
     def get_queryset(self):
-        return EnrollmentHistory.objects.filter(
+        from apps.lead.timeline import MONEY_ACTIONS
+
+        rows = EnrollmentHistory.objects.filter(
             enrollment_id=self.kwargs['enrollment_pk'],
             enrollment__lead_id=self.kwargs['lead_pk'],
         ).select_related('performed_by').order_by('-created_at', '-id')
+        if not can(self.request.user, 'lead.view_payment'):
+            rows = rows.exclude(action__in=MONEY_ACTIONS)
+        return rows
 
 
 class EnrollmentReminderViewSet(ReadRights, viewsets.ReadOnlyModelViewSet):

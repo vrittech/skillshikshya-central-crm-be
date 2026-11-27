@@ -37,7 +37,39 @@ HISTORY_KIND = {
     Action.FREE_LICENCE: 'teams',
     Action.PAUSE_LICENCE: 'teams',
     Action.RESUME_LICENCE: 'teams',
+    Action.COMPLETE: 'enrollment',
+    Action.UNDO_COMPLETE: 'enrollment',
+    Action.CHANGE_STATUS: 'enrollment',
+    Action.MOVE_BRANCH: 'enrollment',
 }  # everything else is money: fee changes, charges, discounts, refunds, voids, invoices, due dates
+
+# History rows about money: shown only to users who can see payments.
+MONEY_ACTIONS = [action for action in Action.values if action not in HISTORY_KIND]
+
+# The right each kind needs. Fees, paid and left on an enrollment come with
+# the enrollment; single payments, refunds and invoices need view_payment.
+KIND_RIGHTS = {
+    'lead': 'lead.view_lead',
+    'enquiry': 'lead.view_leadcourseinterest',
+    'call': 'lead.view_leadcall',
+    'note': 'lead.view_leadactivity',
+    'follow_up': 'lead.view_followup',
+    'voice_note': 'lead.view_voicenote',
+    'enrollment': 'lead.view_enrollment',
+    'batch': 'lead.view_enrollment',
+    'teams': 'lead.view_enrollment',
+    'reminder': 'lead.view_enrollment',
+    'money': 'lead.view_payment',
+    'document': 'lead.view_leaddocument',
+}
+assert set(KIND_RIGHTS) == set(KINDS)
+
+
+def visible_kinds(user):
+    """The kinds of history this user may see."""
+    from apps.global_config.permissions import can
+
+    return {kind for kind, right in KIND_RIGHTS.items() if can(user, right)}
 
 INVOICE_TITLE = {Invoice.Type.ENROLLMENT: 'Fee invoice', Invoice.Type.PAYMENT: 'Receipt'}
 

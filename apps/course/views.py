@@ -18,7 +18,7 @@ from apps.course.serializers import (
     RegisterSerializer,
 )
 from apps.global_config.pagination import CustomPagination
-from apps.global_config.permissions import IsStaffOrHasPermission, OPEN, ReadRights, needs
+from apps.global_config.permissions import IsStaffOrHasPermission, OPEN, ReadRights, can, needs
 from apps.global_config.filters import BranchFilterBackend
 
 
@@ -153,7 +153,12 @@ class CourseBatchViewSet(ReadRights, viewsets.ModelViewSet):
         return [p() for p in permission_classes]
 
     def _money_reply(self, batch):
-        """Figures now and, for a closed batch, at close and after close."""
+        """Figures now and, for a closed batch, at close and after close.
+
+        Without view_batchcost the reply carries only the batch and its status.
+        """
+        if not can(self.request.user, 'course.view_batchcost'):
+            return Response({'batch': batch.pk, 'status': batch.status})
         now = batch_figures([batch.pk])[batch.pk]
         closing = services.last_close(batch)
         at_close = services.close_figures(closing) if closing else None
@@ -169,6 +174,12 @@ class CourseBatchViewSet(ReadRights, viewsets.ModelViewSet):
             'costs': BatchCostSerializer(costs, many=True).data,
             'closings': BatchClosingSerializer(closings, many=True).data,
         })
+
+    def _checklist(self, check):
+        """Who owes on the batch is shown only with view_payment."""
+        if not can(self.request.user, 'lead.view_payment'):
+            check = {**check, 'owing': None}
+        return check
 
     def _reason(self, request):
         from apps.lead.serializers import ReasonSerializer
@@ -191,14 +202,14 @@ class CourseBatchViewSet(ReadRights, viewsets.ModelViewSet):
             batch = services.close_batch(self.get_object(), user=request.user, **body.validated_data)
         except closing.CloseBlocked as blocked:
             return Response(
-                {'detail': str(blocked.detail), 'checklist': blocked.check}, status=400,
+                {'detail': str(blocked.detail), 'checklist': self._checklist(blocked.check)}, status=400,
             )
         return self._money_reply(batch)
 
     @action(detail=True, methods=['get'], url_path='close-check')
     def close_check(self, request, *args, **kwargs):
         """What is still open before the batch can close: students, attendance, Teams, who owes."""
-        return Response(closing.close_check(self.get_object()))
+        return Response(self._checklist(closing.close_check(self.get_object())))
 
     @action(detail=True, methods=['get'])
     def attendance(self, request, *args, **kwargs):

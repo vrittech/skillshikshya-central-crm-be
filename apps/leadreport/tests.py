@@ -9,7 +9,7 @@ from apps.lead.models import (
     Enrollment, Lead, LeadSource, LeadStatus, Payment,
 )
 from apps.leadreport import services
-from apps.global_config.testing import give_view_rights
+from apps.global_config.testing import give_rights, give_view_rights
 
 
 class LeadReportServiceTests(TestCase):
@@ -124,6 +124,26 @@ class LeadReportViewTests(APITestCase):
         client = self.client_class(force=False)
         response = client.get(self._path('overview'))
         self.assertIn(response.status_code, (401, 403))
+
+    def test_money_figures_need_view_payment(self):
+        Lead.objects.create(full_name='Ram', phone='9800000300', assigned_counselor=self.user)
+        counselor = give_rights(
+            get_user_model().objects.create_user(email='c@test.com', name='C', password='pass'),
+            'lead.view_lead',
+        )
+        for user, hidden in ((self.user, False), (counselor, True)):
+            self.client.force_authenticate(user)
+            overview = self.client.get(self._path('overview')).data
+            trend = self.client.get(self._path('lead-trend')).data['results']
+            people = self.client.get(self._path('counselor-performance')).data['results']
+            self.assertTrue(trend and people)
+            figures = [
+                overview['pipeline']['expected_revenue'], overview['enrollments']['revenue_collected'],
+                *[r['revenue'] for r in trend], *[r['revenue_collected'] for r in people],
+            ]
+            self.assertEqual({f is None for f in figures}, {hidden}, user)
+            self.assertEqual(overview['leads']['total'], 1)
+        self.assertEqual(self.client.get(self._path('revenue')).status_code, 403)
 
     def test_overview_endpoint(self):
         response = self.client.get(self._path('overview'))
