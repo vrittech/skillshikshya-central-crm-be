@@ -901,8 +901,6 @@ class UserAdminTests(FlowTestCase):
         self.assertNotIn(self.admin.id, listed)
         self.assertEqual(self.client.get(f'/api/users/{pkr_user.id}/').status_code, 404)
 
-    # BUG: UserViewSet.destroy skips the serializer's rules, so a branch user with delete_user removes a superuser.
-    @unittest.expectedFailure
     def test_branch_user_cannot_delete_a_superuser(self):
         manager = give_rights(self._user(), 'account.view_user', 'account.delete_user')
         boss = User.objects.create_superuser(email='boss@flow.test', name='Boss', password='pass', branch=self.ktm)
