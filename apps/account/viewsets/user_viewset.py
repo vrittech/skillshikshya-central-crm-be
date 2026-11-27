@@ -4,6 +4,7 @@ from django.http import HttpResponse
 
 from rest_framework import viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -39,6 +40,15 @@ class UserViewSet(ReadRights, viewsets.ModelViewSet):
         if user.is_staff or user.has_perm('account.view_user'):
             return User.objects.all()
         return User.objects.filter(id=user.id)
+
+    def perform_destroy(self, instance):
+        # The same rights as changing the user (UserSerializer._check_rights).
+        actor = self.request.user
+        if instance.is_superuser and not actor.is_superuser:
+            raise PermissionDenied('Only a superuser can delete a superuser.')
+        if instance.is_staff and not (actor.is_staff or actor.is_superuser):
+            raise PermissionDenied('Only staff can delete a staff user.')
+        instance.delete()
 
     def get_permissions(self):
         if self.action in ['update', 'partial_update', 'destroy']:

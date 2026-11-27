@@ -18,6 +18,31 @@ from apps.lead.models import (
 )
 
 
+def _walled_branch_id(field):
+    """The branch the requesting user is kept inside (None for staff). Takes a serializer or field."""
+    request = field.context.get('request')
+    return walled_branch_id(request.user) if request else None
+
+
+def can_pick_course(field, course):
+    """A branch user picks their branch's courses and the shared ones; staff pick any."""
+    branch_id = _walled_branch_id(field)
+    return branch_id is None or course.branch_id in (None, branch_id)
+
+
+def check_assignee(user, branch, field):
+    """A lead or follow-up goes to an active user of its branch, as in the import.
+
+    A user with no branch (an admin) can take one of any branch.
+    """
+    if user is None:
+        return
+    if not user.is_active:
+        raise ValidationError({field: [f'{user.name} is not an active user.']})
+    if branch is not None and user.branch_id and user.branch_id != branch.pk:
+        raise ValidationError({field: [f'{user.name} is not in {branch.name}.']})
+
+
 class PrimaryCourseField(serializers.Field):
     """Nested {id, name, price} on read; accepts an int pk or {id} on write."""
 
@@ -33,9 +58,14 @@ class PrimaryCourseField(serializers.Field):
     def to_internal_value(self, data):
         course_id = data.get('id') if isinstance(data, dict) else data
         try:
-            return Course.objects.get(pk=course_id)
+            course = Course.objects.get(pk=course_id)
         except (Course.DoesNotExist, TypeError, ValueError):
             raise ValidationError(f'Invalid pk "{course_id}" - course does not exist.')
+        # A course of another branch is hidden from a branch user, unless the lead has it already.
+        lead = getattr(self.parent, 'instance', None)
+        if course.pk != getattr(lead, 'primary_course_id', None) and not can_pick_course(self, course):
+            raise ValidationError(f'Invalid pk "{course_id}" - course does not exist.')
+        return course
 
 
 class LeadSourceSerializer(serializers.ModelSerializer):
@@ -123,6 +153,8 @@ class LeadCourseInterestSerializer(serializers.ModelSerializer):
 
     def validate_course(self, value):
         enquiry = self.instance
+        if value is not None and value != getattr(enquiry, 'course', None) and not can_pick_course(self, value):
+            raise serializers.ValidationError(f'Invalid pk "{value.pk}" - object does not exist.')
         if enquiry is not None and value != enquiry.course and enquiry.stage != 'new':
             raise serializers.ValidationError(
                 'The course of an enquiry that has moved past New cannot change. '
@@ -638,6 +670,31 @@ class LeadSerializer(serializers.ModelSerializer):
             'lead_score',
         ]
 
+    def validate_expected_revenue(self, value):
+        if value is not None and value < 0:
+            raise serializers.ValidationError("Expected revenue can't be below 0.")
+        return value
+
+    def validate(self, attrs):
+        # The branch, as in the import: a branch user adds leads to their own
+        # branch only, and only staff move a lead to another branch.
+        lead = self.instance
+        branch_id = _walled_branch_id(self)
+        if branch_id is not None:
+            if lead is None:
+                if attrs.get('branch') is not None and attrs['branch'].pk != branch_id:
+                    raise ValidationError({'branch': ['You can add leads only to your own branch.']})
+                attrs['branch'] = self.context['request'].user.branch
+            elif 'branch' in attrs and attrs['branch'] != lead.branch:
+                raise ValidationError({'branch': ['Only staff can move a lead to another branch.']})
+
+        # A new counselor, or a new branch, is checked; an unchanged one is kept.
+        branch = attrs['branch'] if 'branch' in attrs else getattr(lead, 'branch', None)
+        counselor = attrs.get('assigned_counselor', getattr(lead, 'assigned_counselor', None))
+        if lead is None or counselor != lead.assigned_counselor or branch != lead.branch:
+            check_assignee(counselor, branch, 'assigned_counselor')
+        return attrs
+
     def update(self, instance, validated_data):
         # The form sends only its own custom data: keep the file an import came from.
         imported = (instance.custom_data or {}).get('import_file')
@@ -647,11 +704,21 @@ class LeadSerializer(serializers.ModelSerializer):
             }
         return super().update(instance, validated_data)
 
+    # A branch user sees only their branch's calls, follow-ups and enrollments, as in every list.
+
     def get_call_count(self, obj):
-        return obj.calls.count()
+        calls = obj.calls.all()
+        branch_id = _walled_branch_id(self)
+        if branch_id:
+            calls = calls.filter(branch_id=branch_id)
+        return calls.count()
 
     def get_next_followup(self, obj):
-        followup = obj.followups.filter(status='pending').order_by('scheduled_at').first()
+        followups = obj.followups.filter(status='pending')
+        branch_id = _walled_branch_id(self)
+        if branch_id:
+            followups = followups.filter(branch_id=branch_id)
+        followup = followups.order_by('scheduled_at').first()
         if followup:
             return {
                 'id': followup.id,
@@ -663,10 +730,8 @@ class LeadSerializer(serializers.ModelSerializer):
         return None
 
     def get_enrollment_summary(self, obj):
-        # A branch user sees only their branch's enrollments, as in every list.
         enrollments = obj.enrollments.all()
-        request = self.context.get('request')
-        branch_id = walled_branch_id(request.user) if request else None
+        branch_id = _walled_branch_id(self)
         if branch_id:
             enrollments = enrollments.filter(branch_id=branch_id)
         enrollment = enrollments.order_by('-enrollment_date').first()
@@ -680,7 +745,15 @@ class LeadSerializer(serializers.ModelSerializer):
         return {'is_enrolled': False, 'latest_status': None, 'course': None, 'batch': None}
 
 
-class LeadCallSerializer(serializers.ModelSerializer):
+class BranchSetOnCreate:
+    """The branch is set when the record is added (views.new_record_branch) and never changes."""
+
+    def update(self, instance, validated_data):
+        validated_data.pop('branch', None)
+        return super().update(instance, validated_data)
+
+
+class LeadCallSerializer(BranchSetOnCreate, serializers.ModelSerializer):
     caller_name = serializers.CharField(source='caller', read_only=True)
     created_by_name = serializers.CharField(source='created_by.name', read_only=True)
     duration_input = serializers.CharField(write_only=True, required=False)
@@ -693,6 +766,11 @@ class LeadCallSerializer(serializers.ModelSerializer):
 
     def get_duration_formatted(self, obj):
         return format_duration(obj.duration_seconds)
+
+    def validate_duration_seconds(self, value):
+        if value is not None and value < 0:
+            raise serializers.ValidationError("The duration can't be below 0.")
+        return value
 
     def to_internal_value(self, data):
         if 'duration_input' in data and data.get('duration_input'):
@@ -738,16 +816,17 @@ class GlobalCallSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-class LeadActivitySerializer(serializers.ModelSerializer):
+class LeadActivitySerializer(BranchSetOnCreate, serializers.ModelSerializer):
     performed_by_name = serializers.CharField(source='performed_by.name', read_only=True)
 
     class Meta:
         model = LeadActivity
         fields = '__all__'
-        read_only_fields = ['lead', 'created_at']
+        # performed_by is who added it, set when it is added.
+        read_only_fields = ['lead', 'performed_by', 'created_at']
 
 
-class FollowUpSerializer(serializers.ModelSerializer):
+class FollowUpSerializer(BranchSetOnCreate, serializers.ModelSerializer):
     assigned_to_name = serializers.CharField(source='assigned_to.name', read_only=True)
     created_by_name = serializers.CharField(source='created_by.name', read_only=True)
     updated_by_name = serializers.CharField(source='updated_by.name', read_only=True)
@@ -765,7 +844,7 @@ class FollowUpSerializer(serializers.ModelSerializer):
         ]
 
 
-class LeadDocumentSerializer(serializers.ModelSerializer):
+class LeadDocumentSerializer(BranchSetOnCreate, serializers.ModelSerializer):
     uploaded_by_name = serializers.CharField(source='uploaded_by.name', read_only=True)
 
     class Meta:

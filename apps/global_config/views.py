@@ -2,6 +2,7 @@ import logging
 import re
 
 from botocore.exceptions import ClientError
+from django.apps import apps
 from django.db.models import Q
 from django.http import HttpResponse, HttpResponseNotFound
 
@@ -58,41 +59,57 @@ def upload_file(request):
     return Response(result, status=status.HTTP_201_CREATED)
 
 
-def _documents(key):
-    """(view right, branch id) of each lead and student document stored under this key."""
-    from apps.lead.models import LeadDocument
-    from apps.student.models import StudentDocument
+# Records that can hold a stored file's address: (model, field, the right to
+# see the record, its branch field or None, shared with every branch when it
+# has no branch).
+FILE_HOLDERS = (
+    ('lead.LeadDocument', 'file', 'lead.view_leaddocument', 'branch', False),
+    ('lead.LeadCall', 'recording_url', 'lead.view_leadcall', 'branch', False),
+    ('student.StudentDocument', 'file', 'student.view_studentdocument', 'branch', False),
+    ('student.Student', 'photo_url', 'student.view_student', 'branch', False),
+    ('course.Course', 'syllabus', OPEN, 'branch', True),
+    ('global_config.OrganisationSettings', 'logo_url', OPEN, None, False),
+)
 
-    url = f'/api/files/{key}'
-    found = []
-    for model, right in (
-        (LeadDocument, 'lead.view_leaddocument'),
-        (StudentDocument, 'student.view_studentdocument'),
-    ):
-        branches = model.objects.filter(Q(file=url) | Q(file__endswith=f'/{key}')).values_list(
-            'branch_id', flat=True,
-        )
-        found += [(right, branch) for branch in branches]
-    return found
+
+def _held_by_visible_record(request, key):
+    """True when the user can see a record that holds exactly this file.
+
+    A record holds it as the address /api/upload/ gives (/api/files/<key>),
+    or as that address on this server.
+    """
+    path = f'/api/files/{key}'
+    host = request.get_host()
+    addresses = [path, f'https://{host}{path}', f'http://{host}{path}']
+    user = request.user
+    branch_id = walled_branch_id(user)
+    for label, field, right, branch_field, shared in FILE_HOLDERS:
+        if not can(user, right):
+            continue
+        records = apps.get_model(label).objects.filter(**{f'{field}__in': addresses})
+        if branch_id is not None and branch_field:
+            mine = Q(**{f'{branch_field}_id': branch_id})
+            if shared:
+                mine |= Q(**{f'{branch_field}__isnull': True})
+            records = records.filter(mine)
+        if records.exists():
+            return True
+    return False
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, reads(OPEN)])
 def serve_file(request, key):
-    """A stored file, for signed-in users only.
+    """A stored file, for signed-in users who can see a record that holds it.
 
     Voice notes are never served here (they have their own checked address).
-    A file attached to a document needs the right to see that kind of
-    document, and one of another branch is hidden from branch users.
+    A file on a document needs the right to see that kind of document, and
+    one of another branch is hidden from branch users. A file no record holds
+    is not served.
     """
     if key.startswith(PRIVATE_PREFIXES) or '..' in key:
         return HttpResponseNotFound('File not found.')
-    documents = _documents(key)
-    branch_id = walled_branch_id(request.user)
-    if documents and not any(
-        can(request.user, right) and (branch_id is None or branch == branch_id)
-        for right, branch in documents
-    ):
+    if not _held_by_visible_record(request, key):
         return HttpResponseNotFound('File not found.')
     try:
         cfg = r2_config()

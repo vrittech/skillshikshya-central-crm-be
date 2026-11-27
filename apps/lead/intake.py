@@ -16,7 +16,7 @@ from rest_framework.response import Response
 from apps.global_config.throttles import LeadIntakeThrottle
 
 from apps.lead.enquiries import add_enquiry, open_enquiry_for
-from apps.lead.models import LeadSource, Lead
+from apps.lead.models import LeadCourseInterest, LeadSource, Lead
 from apps.lead.phones import phone_matches
 from apps.course.matching import match_or_create_course
 
@@ -42,6 +42,32 @@ def _course(name):
     return match_or_create_course(name, create_unknown=False)
 
 
+def _has_laptop(value):
+    """A form's "false", "0", "no", "off" or "" is False."""
+    if isinstance(value, str):
+        return value.strip().lower() not in ('false', '0', 'no', 'off', '')
+    return bool(value)
+
+
+def _too_long(*, full_name, phone, email, heard_from, course_names):
+    """Field errors for values longer than the CRM keeps (a 400, not a database error)."""
+    def limit(model, field):
+        return model._meta.get_field(field).max_length
+
+    checks = [
+        ('name', 'Name', [full_name], limit(Lead, 'full_name')),
+        ('phone_number', 'Phone number', [phone], limit(Lead, 'phone')),
+        ('email', 'Email', [email], limit(Lead, 'email')),
+        ('heard_from', 'Heard from', [heard_from], limit(Lead, 'heard_from')),
+        ('course_interests', 'A course name', course_names, limit(LeadCourseInterest, 'course_name')),
+    ]
+    return {
+        key: [f'{label} is longer than {most} characters.']
+        for key, label, texts, most in checks
+        if any(len(str(text or '')) > most for text in texts)
+    }
+
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
 @throttle_classes([LeadIntakeThrottle])
@@ -60,13 +86,19 @@ def lead_intake(request):
 
     email = data.get('email', '')
     address = data.get('address', '')
+    heard_from = data.get('heard_from', '')
+
+    errors = _too_long(
+        full_name=full_name, phone=phone, email=email, heard_from=heard_from,
+        course_names=_course_names(data),
+    )
+    if errors:
+        return Response(errors, status=status.HTTP_400_BAD_REQUEST)
 
     source_name = data.get('source_name') or data.get('source', '')
     source = None
     if source_name:
         source = LeadSource.objects.filter(name__iexact=source_name.strip()).first()
-
-    heard_from = data.get('heard_from', '')
 
     custom_data = {}
     if data.get('education_level'):
@@ -74,7 +106,7 @@ def lead_intake(request):
     if data.get('learning_format'):
         custom_data['preferred_learning_mode'] = data['learning_format']
     if data.get('has_laptop') is not None:
-        custom_data['has_laptop'] = bool(data['has_laptop'])
+        custom_data['has_laptop'] = _has_laptop(data['has_laptop'])
     if data.get('referred_by'):
         custom_data['referral'] = {
             'referred_by_name': data['referred_by'],
@@ -86,7 +118,7 @@ def lead_intake(request):
         # The same person asking again: add the new courses to their lead.
         for name in _course_names(data):
             course, _ = _course(name)
-            if course is not None and open_enquiry_for(existing, course):
+            if open_enquiry_for(existing, course, name):
                 continue
             add_enquiry(existing, course=course, course_name=name, source=source, interest_level='high')
         return Response(
@@ -107,7 +139,7 @@ def lead_intake(request):
 
     for i, name in enumerate(_course_names(data)):
         course, _ = _course(name)
-        if course is not None and open_enquiry_for(lead, course):
+        if open_enquiry_for(lead, course, name):
             continue
         add_enquiry(lead, course=course, course_name=name, is_primary=(i == 0), interest_level='high')
         if i == 0 and course and lead.primary_course_id is None:
