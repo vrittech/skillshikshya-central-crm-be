@@ -336,8 +336,6 @@ class SeatCountTests(FlowBase):
         self.assertEqual(self._money(nov)['figures']['students'], 1)
         self.assertEqual(self._money(pokhara)['figures']['students'], 0)
 
-    # BUG: nothing stops a lead's second enrollment in the same batch (apps/lead/serializers.py:383), so one person takes two seats.
-    @unittest.expectedFailure
     def test_one_person_cannot_hold_two_seats_in_the_same_batch(self):
         nov = self._batch('Python Nov', seats=3)
         lead = self._lead()
@@ -346,6 +344,18 @@ class SeatCountTests(FlowBase):
         again = self._enroll_response(nov, lead=lead)
         if again.status_code == 201:
             self._confirm(Enrollment.objects.get(pk=again.data['id']))
+        self.assertEqual(self._seats(nov)[0], 1)
+
+    def test_one_person_cannot_move_or_resume_into_a_batch_they_are_in(self):
+        nov, dec = self._batch('Python Nov', seats=3), self._batch('Python Dec', seats=3)
+        lead = self._lead()
+        self._student(nov, lead=lead)
+        other = self._student(dec, lead=lead)
+
+        taken = 'already has an enrollment in Python Nov'
+        self._refused(self._act(other, 'move', batch=nov.id, reason='Morning'), taken)
+        self._ok(self._act(other, 'pause', reason='Exams'))
+        self._refused(self._act(other, 'resume', batch=nov.id, reason='Back'), taken)
         self.assertEqual(self._seats(nov)[0], 1)
 
 
@@ -373,8 +383,6 @@ class BatchStudentListTests(FlowBase):
             (ram.id, dec.id, nov.id, True),
         )
 
-    # BUG: batch_students (apps/lead/services.py:343) counts only Move rows as moving out, so a student paused out of a batch and resumed into another vanishes from the old batch's lists.
-    @unittest.expectedFailure
     def test_a_student_resumed_into_another_batch_shows_as_moved_out_of_the_old_one(self):
         nov, dec = self._batch('Python Nov'), self._batch('Python Dec')
         ram = self._student(nov)

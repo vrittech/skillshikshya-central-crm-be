@@ -767,6 +767,7 @@ class EnrollmentViewSet(ReadRights, viewsets.ModelViewSet):
         given = data.get('branch') or (batch.branch if batch is not None else None)
         branch = new_record_branch(self.request, lead, given)
         self._batch_must_be_of(batch, branch)
+        self._one_place_in(batch, lead)
         enrollment = serializer.save(lead=lead, created_by=self.request.user, branch=branch)
         enrollment_received(enrollment, user=self.request.user)
 
@@ -778,8 +779,19 @@ class EnrollmentViewSet(ReadRights, viewsets.ModelViewSet):
                 'batch': [f'{batch.name} is a batch of {batch.branch.name}. Pick a batch of {branch.name}.'],
             })
 
+    @staticmethod
+    def _one_place_in(batch, lead, exclude=None):
+        """One person has one open enrollment in a batch."""
+        if batch is None:
+            return
+        refusal = services.same_batch_refusal(lead.pk, batch, exclude=exclude)
+        if refusal:
+            raise ValidationError({'batch': [refusal]})
+
     def perform_update(self, serializer):
         data = serializer.validated_data
+        if data.get('batch') is not None and data['batch'] != serializer.instance.batch:
+            self._one_place_in(data['batch'], serializer.instance.lead, exclude=serializer.instance)
         if 'batch' in data or 'branch' in data:
             self._batch_must_be_of(
                 data['batch'] if 'batch' in data else serializer.instance.batch,
