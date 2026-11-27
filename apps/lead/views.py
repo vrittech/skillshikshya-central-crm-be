@@ -824,11 +824,14 @@ class EnrollmentViewSet(ReadRights, viewsets.ModelViewSet):
 
         Something must be paid first. Optional body: {"due_dates": [{"due_on",
         "amount"}, ...], "first_payment": {"amount", "payment_method",
-        "payment_date", "transaction_reference", "notes"}}.
+        "payment_date", "transaction_reference", "notes"}}. A first payment
+        also needs add_payment.
         """
         enrollment = self.get_object()
         body = DueDatesSerializer(data=request.data, for_confirm=True)
         body.is_valid(raise_exception=True)
+        if body.validated_data.get('first_payment') and not can(request.user, 'lead.add_payment'):
+            self.permission_denied(request, message="You don't have permission to add payments.")
         enrollment = services.confirm_enrollment(
             enrollment, user=request.user, due_dates=body.validated_data.get('due_dates'),
             first_payment=body.validated_data.get('first_payment'),

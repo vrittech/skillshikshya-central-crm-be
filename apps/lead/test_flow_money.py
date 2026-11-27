@@ -436,13 +436,11 @@ class BranchAndRightsTests(MoneyFlowBase):
         self.assertEqual(self.entry(enrollment, 'discount', '1000').status_code, 403)
         self.assertEqual(self.void(enrollment, payment_id).status_code, 403)
 
-    # BUG: confirm needs only change_enrollment (lead/views.py:810) but records first_payment; Counselor has no add_payment.
-    @unittest.expectedFailure
     def test_counselor_cannot_take_money_through_confirm(self):
         self.client.force_authenticate(self.role_user('Counselor'))
         enrollment = self.enroll()
         response = self.confirm(enrollment, paid='5000')
-        self.assertIn(response.status_code, (400, 403))
+        self.assertEqual(response.status_code, 403)
         self.assertFalse(Payment.objects.filter(enrollment=enrollment).exists())
 
     def test_only_money_roles_add_money_entries_or_void(self):
