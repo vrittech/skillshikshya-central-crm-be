@@ -32,6 +32,28 @@ def _lock(instance):
 
 # ---------------------------------------------------------------- seats
 
+# Enrollments that no longer hold a place anywhere.
+ENDED_STATUSES = (
+    Enrollment.Status.CANCELLED, Enrollment.Status.DROPPED_OUT, Enrollment.Status.TRANSFERRED,
+)
+
+
+def same_batch_refusal(lead_id, batch, *, exclude=None):
+    """Why this lead can't have one more enrollment in the batch, or None.
+
+    One person has one place in a batch: another open enrollment (not
+    cancelled, dropped out or transferred) that waits for the batch, counts
+    its money there or sits in it blocks a second one.
+    """
+    others = Enrollment.objects.filter(
+        Q(batch=batch) | Q(current_batch=batch), lead_id=lead_id,
+    ).exclude(status__in=ENDED_STATUSES)
+    if exclude is not None:
+        others = others.exclude(pk=exclude.pk)
+    if others.exists():
+        return f'This person already has an enrollment in {batch.name}.'
+    return None
+
 
 def _take_seat(enrollment, batch, *, kind, reason, user, on=None, from_batch=None):
     """Seat the (locked) enrollment in a batch and add a seat history row.
@@ -51,7 +73,9 @@ def _take_seat(enrollment, batch, *, kind, reason, user, on=None, from_batch=Non
             f'{batch.name} is a batch of {batch.branch.name}. To study there, move the '
             'student to that branch first.'
         )
-    refusal = batch.seat_refusal(exclude=enrollment)
+    refusal = batch.seat_refusal(exclude=enrollment) or same_batch_refusal(
+        enrollment.lead_id, batch, exclude=enrollment,
+    )
     if refusal:
         raise ActionRefused(refusal)
     Placement.objects.create(
@@ -340,7 +364,10 @@ def batch_students(batch):
     paused = list(enrollments.filter(
         current_batch__isnull=True, seat_kind=Placement.Kind.PAUSE, last_from=batch.pk,
     ))
-    moves_out = Placement.objects.filter(from_batch=batch, kind=Placement.Kind.MOVE)
+    # Moving out: a move to another batch, or a pause here and a resume into another batch.
+    moves_out = Placement.objects.filter(
+        from_batch=batch, kind__in=(Placement.Kind.MOVE, Placement.Kind.RESUME),
+    ).exclude(course_batch=batch)
     last_move_out = moves_out.filter(enrollment=OuterRef('pk')).order_by('-created_at', '-id')
     paused_ids = {e.id for e in paused}
     moved_out = [
@@ -349,6 +376,7 @@ def batch_students(batch):
         ).annotate(
             out_on=Subquery(last_move_out.values('started_on')[:1]),
             out_to=Subquery(last_move_out.values('course_batch')[:1]),
+            out_how=Subquery(last_move_out.values('kind')[:1]),
         )
         if e.id not in paused_ids
     ]
@@ -383,8 +411,8 @@ def batch_students(batch):
         return {
             **row(e),
             'since': e.out_on,
-            'how': Placement.Kind.MOVE,
-            'how_display': kinds[Placement.Kind.MOVE],
+            'how': e.out_how,
+            'how_display': kinds[e.out_how],
             'from_batch': batch.pk,
             'from_batch_name': batch.name,
             'moved_in': False,
@@ -609,10 +637,11 @@ def confirm_enrollment(enrollment, *, user, due_dates=None, first_payment=None):
     made, the enrollment is linked to it, the lead is marked converted, a
     history row is written and the fee invoice is made.
 
-    Something must be paid first (unless the agreed amount is 0); the rest
-    can be paid later or in parts. first_payment ({'amount', 'payment_method',
-    'payment_date', 'transaction_reference', 'notes'}) records that payment in
-    the same step, so a refused confirm keeps no payment either.
+    Something must be paid first (unless discounts leave nothing of the
+    agreed amount to pay); the rest can be paid later or in parts.
+    first_payment ({'amount', 'payment_method', 'payment_date',
+    'transaction_reference', 'notes'}) records that payment in the same step,
+    so a refused confirm keeps no payment either.
 
     due_dates is a list of {'due_on', 'amount'} that adds up to the agreed
     amount. Without it, the whole amount is due on the confirm day.
@@ -634,7 +663,8 @@ def confirm_enrollment(enrollment, *, user, due_dates=None, first_payment=None):
             transaction_reference=first_payment.get('transaction_reference') or None,
             notes=first_payment.get('notes') or None,
         )
-    if enrollment.agreed_amount > 0 and net_paid(enrollment) <= 0:
+    to_pay = enrollment.agreed_amount - enrollment.discounts_total
+    if to_pay > 0 and net_paid(enrollment) <= 0:
         raise ActionRefused('Record a payment first. An enrollment is confirmed once something is paid.')
     if due_dates:
         due_dates = _clean_parts(enrollment, due_dates)
@@ -759,6 +789,14 @@ def void_payment(payment, *, reason, user):
         raise ActionRefused(
             f'A {payment.get_status_display().lower()} payment can\'t be voided.'
         )
+    if payment.status == Payment.Status.SUCCESSFUL:
+        # Refunds can't be more than what was paid, the same as for a new refund.
+        enrollment = _lock(payment.enrollment)
+        if payment.amount > enrollment.total_paid - enrollment.refunds_total:
+            raise ActionRefused(
+                f"This payment can't be voided: the refunds ({_npr(enrollment.refunds_total)}) "
+                'would be more than what was paid.'
+            )
     old_status = payment.status
     payment.status = Payment.Status.VOIDED
     payment.void_reason = reason
@@ -781,6 +819,10 @@ def void_payment(payment, *, reason, user):
     return payment
 
 
+# The most a money field (12 digits, 2 of them decimals) holds, such as the balance.
+MAX_AMOUNT = Decimal('9999999999.99')
+
+
 @transaction.atomic
 def add_adjustment(enrollment, *, kind, amount, reason, user):
     """Add an extra charge, discount, write-off or refund, with a history row.
@@ -788,10 +830,15 @@ def add_adjustment(enrollment, *, kind, amount, reason, user):
     A refund can't be more than what was paid and not yet refunded. A write-off
     can't be more than what is owed. A discount can't be more than the fee
     (after earlier discounts and write-offs); when the student already paid,
-    it may leave a credit we owe them, to be refunded.
+    it may leave a credit we owe them, to be refunded. An extra charge can't
+    take what is owed above MAX_AMOUNT.
     """
     enrollment = _lock(enrollment)
     balance_before = enrollment.remaining_amount
+    if kind == Adjustment.Kind.EXTRA_CHARGE and balance_before + amount > MAX_AMOUNT:
+        raise ActionRefused(
+            f"An extra charge can't take what is owed above {_npr(MAX_AMOUNT)}. Check the amount."
+        )
     if kind == Adjustment.Kind.DISCOUNT:
         t = enrollment.adjustment_totals()
         fee = (

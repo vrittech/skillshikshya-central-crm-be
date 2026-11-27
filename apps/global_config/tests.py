@@ -350,7 +350,11 @@ class FileAccessTests(APITestCase):
     def test_needs_sign_in(self):
         self.assertIn(self._get('uploads/loose.pdf').status_code, (401, 403))
 
-    def test_branch_user_sees_own_and_loose_files_only(self):
+    def test_branch_user_sees_files_of_records_they_can_see_only(self):
+        from apps.global_config.models import OrganisationSettings
+
+        self.files.objects['uploads/logo.png'] = b'logo'
+        OrganisationSettings.objects.create(logo_url='http://testserver/api/files/uploads/logo.png')
         user = User.objects.create_user(email='k@test.com', name='K', password='pass', branch=self.ktm)
         give_view_rights(user)
         self.client.force_authenticate(user)
@@ -358,7 +362,9 @@ class FileAccessTests(APITestCase):
         self.assertEqual(ok.status_code, 200)
         self.assertEqual(ok.content, b'ktm')
         self.assertEqual(ok['Cache-Control'], 'private, no-store')
-        self.assertEqual(self._get('uploads/loose.pdf').status_code, 200)
+        self.assertEqual(self._get('uploads/logo.png').status_code, 200)
+        # A file no record holds is not served.
+        self.assertEqual(self._get('uploads/loose.pdf').status_code, 404)
         self.assertEqual(self._get('uploads/pkr.pdf').status_code, 404)
 
     def test_voice_notes_and_missing_files_are_not_found(self):

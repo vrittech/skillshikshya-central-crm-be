@@ -33,11 +33,17 @@ def _change(enquiry, to_stage, *, user, note='', fields=()):
     return enquiry
 
 
-def open_enquiry_for(lead, course):
-    """The lead's open enquiry for the course, if any."""
-    return lead.course_interests.filter(
-        course=course, stage__in=LeadCourseInterest.OPEN_STAGES,
-    ).first()
+def open_enquiry_for(lead, course, course_name=None):
+    """The lead's open enquiry for the course, if any.
+
+    With no course, the open enquiry for the course name kept as text.
+    """
+    enquiries = lead.course_interests.filter(stage__in=LeadCourseInterest.OPEN_STAGES)
+    if course is not None:
+        return enquiries.filter(course=course).first()
+    if course_name:
+        return enquiries.filter(course__isnull=True, course_name__iexact=course_name.strip()).first()
+    return None
 
 
 @transaction.atomic

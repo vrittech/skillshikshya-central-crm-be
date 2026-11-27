@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.validators import URLValidator
 from django.db import models
 from django.db.models import Sum, Count, Max
 from django.db.models.fields.json import KeyTextTransform
@@ -1266,6 +1267,9 @@ class FollowUp(models.Model):
     def save(self, *args, **kwargs):
         if self.status == self.Status.COMPLETED and self.completed_at is None:
             self.completed_at = timezone.now()
+        elif self.status != self.Status.COMPLETED:
+            # Reopened (or never done): it has no done time.
+            self.completed_at = None
         update_fields = kwargs.get('update_fields')
         if update_fields is not None and 'status' in update_fields:
             kwargs['update_fields'] = {*update_fields, 'completed_at'}
@@ -1370,6 +1374,19 @@ class ReminderLog(models.Model):
         return f'{self.get_step_display()} for enrollment {self.enrollment_id} ({self.due_on})'
 
 
+FILE_ADDRESS = '/api/files/'
+
+
+def validate_file_address(value):
+    """A stored file: the /api/files/<key> address /api/upload/ gives, or a web address."""
+    if value.startswith(FILE_ADDRESS) and len(value) > len(FILE_ADDRESS):
+        return
+    URLValidator(
+        schemes=['http', 'https'],
+        message='Enter the address the upload gave, or a web address starting with https://.',
+    )(value)
+
+
 class LeadDocument(models.Model):
     lead = models.ForeignKey(
         Lead, on_delete=models.CASCADE, related_name='documents',
@@ -1379,7 +1396,7 @@ class LeadDocument(models.Model):
         'branch.Branch', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='lead_documents',
     )
-    file = models.URLField(max_length=500)
+    file = models.CharField(max_length=500, validators=[validate_file_address])
     uploaded_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='documents_uploaded',

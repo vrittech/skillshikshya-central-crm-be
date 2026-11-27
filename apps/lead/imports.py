@@ -669,7 +669,11 @@ def export_rows(leads, *, branch_id=None):
             e for e in lead.enrollments.all() if branch_id is None or e.branch_id == branch_id
         ]
         followups = sorted(
-            (f for f in lead.followups.all() if f.status == 'pending'), key=lambda f: f.scheduled_at,
+            (
+                f for f in lead.followups.all()
+                if f.status == 'pending' and (branch_id is None or f.branch_id == branch_id)
+            ),
+            key=lambda f: f.scheduled_at,
         )
         yield [
             lead.reference_number,

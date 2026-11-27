@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, OuterRef, Q, Subquery, Sum
 from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -43,7 +43,7 @@ from apps.lead.serializers import (
     LeadDocumentSerializer, NotificationSerializer, VoiceNoteSerializer,
     LeadListSerializer, LeadMinSerializer,
     GlobalFollowUpSerializer, GlobalEnrollmentSerializer, GlobalPaymentSerializer,
-    GlobalCallSerializer,
+    GlobalCallSerializer, check_assignee,
 )
 from apps.lead.filters import (
     LearningModeFilter, InstitutionFilter,
@@ -66,6 +66,10 @@ class ConfigViewSet(ReadRights, viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter, BranchFilterBackend]
     # Statuses, sources and the rest with no branch are shared by every branch.
     shared_when_no_branch = True
+
+    def perform_create(self, serializer):
+        # A branch user's new item is their branch's; staff may share it with every branch.
+        serializer.save(branch=new_record_branch(self.request, given=serializer.validated_data.get('branch')))
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
@@ -287,14 +291,22 @@ class LeadViewSet(ReadRights, viewsets.ModelViewSet):
         """Counts for the cards on the lead list, over every lead the user can see.
 
         Days and months are Nepal days and months. A follow-up is the lead's
-        next pending one.
+        next pending one, of the branch the user sees (as in the follow-up list).
         """
-        from apps.lead.filters import has_enrollment_in, nepal_today_bounds
+        from apps.lead.filters import has_enrollment_in, nepal_today_bounds, viewer_branch_id
 
         visible = LeadBranchFilterBackend().filter_queryset(request, self.get_queryset(), self)
         pending = visible.filter(has_enrollment_in(Enrollment.Status.PENDING, request))
         # One row per lead: the branch filter can join enquiries.
         leads = Lead.objects.filter(pk__in=visible.values('pk'))
+        branch_id = viewer_branch_id(request)
+        if branch_id is not None:
+            leads = leads.annotate(next_followup_at_branch=Subquery(
+                FollowUp.objects.filter(
+                    lead=OuterRef('pk'), status=FollowUp.Status.PENDING, branch_id=branch_id,
+                ).order_by('scheduled_at').values('scheduled_at')[:1]
+            ))
+        next_at = 'next_followup_at' if branch_id is None else 'next_followup_at_branch'
         today, tomorrow = nepal_today_bounds()
         month = today.replace(day=1)
         last_month = (month - timedelta(days=1)).replace(day=1)
@@ -304,10 +316,10 @@ class LeadViewSet(ReadRights, viewsets.ModelViewSet):
             new_last_week=Count('id', filter=Q(
                 created_at__gte=week_ago - timedelta(days=7), created_at__lt=week_ago,
             )),
-            followups_today=Count('id', filter=Q(
-                next_followup_at__gte=today, next_followup_at__lt=tomorrow,
-            )),
-            followups_overdue=Count('id', filter=Q(next_followup_at__lt=today, is_converted=False)),
+            followups_today=Count('id', filter=Q(**{
+                f'{next_at}__gte': today, f'{next_at}__lt': tomorrow,
+            })),
+            followups_overdue=Count('id', filter=Q(**{f'{next_at}__lt': today}, is_converted=False)),
             enrolled_this_month=Count('id', filter=Q(is_converted=True, converted_at__gte=month)),
             enrolled_last_month=Count('id', filter=Q(
                 is_converted=True, converted_at__gte=last_month, converted_at__lt=month,
@@ -767,6 +779,7 @@ class EnrollmentViewSet(ReadRights, viewsets.ModelViewSet):
         given = data.get('branch') or (batch.branch if batch is not None else None)
         branch = new_record_branch(self.request, lead, given)
         self._batch_must_be_of(batch, branch)
+        self._one_place_in(batch, lead)
         enrollment = serializer.save(lead=lead, created_by=self.request.user, branch=branch)
         enrollment_received(enrollment, user=self.request.user)
 
@@ -778,8 +791,19 @@ class EnrollmentViewSet(ReadRights, viewsets.ModelViewSet):
                 'batch': [f'{batch.name} is a batch of {batch.branch.name}. Pick a batch of {branch.name}.'],
             })
 
+    @staticmethod
+    def _one_place_in(batch, lead, exclude=None):
+        """One person has one open enrollment in a batch."""
+        if batch is None:
+            return
+        refusal = services.same_batch_refusal(lead.pk, batch, exclude=exclude)
+        if refusal:
+            raise ValidationError({'batch': [refusal]})
+
     def perform_update(self, serializer):
         data = serializer.validated_data
+        if data.get('batch') is not None and data['batch'] != serializer.instance.batch:
+            self._one_place_in(data['batch'], serializer.instance.lead, exclude=serializer.instance)
         if 'batch' in data or 'branch' in data:
             self._batch_must_be_of(
                 data['batch'] if 'batch' in data else serializer.instance.batch,
@@ -824,11 +848,14 @@ class EnrollmentViewSet(ReadRights, viewsets.ModelViewSet):
 
         Something must be paid first. Optional body: {"due_dates": [{"due_on",
         "amount"}, ...], "first_payment": {"amount", "payment_method",
-        "payment_date", "transaction_reference", "notes"}}.
+        "payment_date", "transaction_reference", "notes"}}. A first payment
+        also needs add_payment.
         """
         enrollment = self.get_object()
         body = DueDatesSerializer(data=request.data, for_confirm=True)
         body.is_valid(raise_exception=True)
+        if body.validated_data.get('first_payment') and not can(request.user, 'lead.add_payment'):
+            self.permission_denied(request, message="You don't have permission to add payments.")
         enrollment = services.confirm_enrollment(
             enrollment, user=request.user, due_dates=body.validated_data.get('due_dates'),
             first_payment=body.validated_data.get('first_payment'),
@@ -953,17 +980,22 @@ class PaymentViewSet(ReadRights, viewsets.ModelViewSet):
     # still count each payment at the branch that took it.
     branch_field = 'enrollment__branch'
 
+    def _enrollments(self, enrollments=Enrollment.objects):
+        """The enrollment in the address, if it is in this user's branch (any branch for staff)."""
+        return branch_enrollments(self.request, self.kwargs['lead_pk'], enrollments).filter(
+            pk=self.kwargs['enrollment_pk'],
+        )
+
     def get_queryset(self):
-        return Payment.objects.filter(
-            enrollment_id=self.kwargs['enrollment_pk'],
-            enrollment__lead_id=self.kwargs['lead_pk'],
-        ).select_related('received_by', 'voided_by').prefetch_related('invoices')
+        return Payment.objects.filter(enrollment__in=self._enrollments()).select_related(
+            'received_by', 'voided_by',
+        ).prefetch_related('invoices')
 
     @transaction.atomic
     def perform_create(self, serializer):
+        lead = visible_lead(self.request, self.kwargs['lead_pk'])
         enrollment = get_object_or_404(
-            Enrollment.objects.select_for_update(),
-            pk=self.kwargs['enrollment_pk'], lead=visible_lead(self.request, self.kwargs['lead_pk']),
+            self._enrollments(Enrollment.objects.select_for_update().filter(lead=lead)),
         )
         refusal = services.payment_refusal(enrollment, serializer.validated_data['amount'])
         if refusal:
@@ -1031,10 +1063,7 @@ class AdjustmentViewSet(ReadRights,
         return [IsAuthenticated()]
 
     def _enrollment(self):
-        enrollments = Enrollment.objects.filter(lead_id=self.kwargs['lead_pk'])
-        user = self.request.user
-        if not (user.is_staff or user.is_superuser) and getattr(user, 'branch', None):
-            enrollments = enrollments.filter(branch=user.branch)
+        enrollments = branch_enrollments(self.request, self.kwargs['lead_pk'])
         return get_object_or_404(enrollments, pk=self.kwargs['enrollment_pk'])
 
     def create(self, request, *args, **kwargs):
@@ -1193,15 +1222,18 @@ class FollowUpViewSet(ReadRights, viewsets.ModelViewSet):
         )
 
     # Saving a follow-up updates the lead's next follow-up and last contacted
-    # dates (FollowUp.save).
+    # dates (FollowUp.save). It goes to an active user of its branch.
     def perform_create(self, serializer):
         lead = visible_lead(self.request, self.kwargs['lead_pk'])
-        serializer.save(
-            lead=lead, created_by=self.request.user,
-            branch=new_record_branch(self.request, lead, serializer.validated_data.get('branch')),
-        )
+        branch = new_record_branch(self.request, lead, serializer.validated_data.get('branch'))
+        check_assignee(serializer.validated_data.get('assigned_to'), branch, 'assigned_to')
+        serializer.save(lead=lead, created_by=self.request.user, branch=branch)
 
     def perform_update(self, serializer):
+        followup = serializer.instance
+        assignee = serializer.validated_data.get('assigned_to', followup.assigned_to)
+        if assignee != followup.assigned_to:
+            check_assignee(assignee, followup.branch, 'assigned_to')
         serializer.save(updated_by=self.request.user)
 
     def get_permissions(self):
@@ -1257,6 +1289,15 @@ def visible_lead(request, lead_pk):
         request, Lead.objects.filter(is_deleted=False), view=None,
     )
     return get_object_or_404(leads, pk=lead_pk)
+
+
+def branch_enrollments(request, lead_pk, enrollments=Enrollment.objects):
+    """The lead's enrollments in this user's branch (in every branch for staff)."""
+    enrollments = enrollments.filter(lead_id=lead_pk)
+    user = request.user
+    if not (user.is_staff or user.is_superuser) and getattr(user, 'branch', None):
+        enrollments = enrollments.filter(branch=user.branch)
+    return enrollments
 
 
 class VoiceNoteViewSet(ReadRights, 

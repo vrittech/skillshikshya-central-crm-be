@@ -1,5 +1,6 @@
 import csv
 
+from django.db import transaction
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 
@@ -199,11 +200,42 @@ class AttendanceViewSet(ReadRights, viewsets.ModelViewSet):
             qs = qs.filter(student_id=self.kwargs['student_pk'])
         return qs
 
+    # A mark added, changed or removed here keeps the batch register's rules:
+    # the student sits in a batch of the course, and that batch is open and
+    # takes marks on the day (apps/course/closing.py, check_one_mark). A saved
+    # mark with no course belongs to no batch, so only its new values are checked.
+
+    @staticmethod
+    def _check(student_id, course, day):
+        from apps.course.closing import check_one_mark
+
+        check_one_mark(student_id, course.pk if course else None, day)
+
+    def _check_saved(self, mark):
+        if mark.course_id is not None:
+            self._check(mark.student_id, mark.course, mark.date)
+
     def perform_create(self, serializer):
         if 'student_pk' not in self.kwargs:
             raise ValidationError({'student': ['This field is required.']})
         student = visible_student(self.request, self.kwargs['student_pk'])
-        serializer.save(marked_by=self.request.user, student=student)
+        data = serializer.validated_data
+        with transaction.atomic():
+            self._check(student.pk, data.get('course'), data['date'])
+            serializer.save(marked_by=self.request.user, student=student)
+
+    def perform_update(self, serializer):
+        mark = serializer.instance
+        data = serializer.validated_data
+        with transaction.atomic():
+            self._check_saved(mark)
+            self._check(mark.student_id, data.get('course', mark.course), data.get('date', mark.date))
+            serializer.save()
+
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            self._check_saved(instance)
+            instance.delete()
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
